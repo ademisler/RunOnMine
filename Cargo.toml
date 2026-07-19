@@ -31,7 +31,7 @@ base64 = "0.22"
 blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 chromiumoxide = "0.9.1"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 clap = { version = "4.5", features = ["derive", "env"] }
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 directories = "6.0"
