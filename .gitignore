@@ -1,0 +1,26 @@
+.DS_Store
+target/
+.idea/
+.vscode/
+*.log
+*.tmp
+*.swp
+
+# Local reference implementation. Never publish it.
+/Eski örnek/
+/Eski örnek/
+
+# Local runtime state and secrets.
+/.runonmine/
+config.toml
+state.db
+state.db-*
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Packaging output.
+dist/
+artifacts/
+

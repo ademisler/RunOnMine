@@ -1,0 +1,23 @@
+[package]
+name = "runonmine-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["desktop-ui"]
+desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon"]
+
+[dependencies]
+anyhow.workspace = true
+eframe = { workspace = true, optional = true }
+egui = { workspace = true, optional = true }
+runonmine-core = { path = "../../crates/runonmine-core" }
+serde_json.workspace = true
+tray-icon = { workspace = true, optional = true }
+uuid.workspace = true
+
+[lints]
+workspace = true

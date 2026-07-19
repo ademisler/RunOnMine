@@ -1,0 +1,42 @@
+[package]
+name = "runonmine-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+desktop-control = ["runonmine-platform/desktop-control"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+futures.workspace = true
+hex.workspace = true
+hostname.workspace = true
+rand.workspace = true
+rmcp.workspace = true
+runonmine-browser = { path = "../runonmine-browser" }
+runonmine-connectors = { path = "../runonmine-connectors" }
+runonmine-core = { path = "../runonmine-core" }
+runonmine-oauth = { path = "../runonmine-oauth" }
+runonmine-platform = { path = "../runonmine-platform" }
+schemars.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

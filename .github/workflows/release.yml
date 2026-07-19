@@ -1,0 +1,164 @@
+name: Release candidate
+
+on:
+  push:
+    tags:
+      - "v*-beta.*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
+        with:
+          toolchain: 1.95.0
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-dist@0.32.0
+      - run: cargo run --locked -p xtask -- verify-release-tag --tag "${{ github.ref_name }}"
+      - run: dist plan --output-format=json
+
+  macos-universal:
+    needs: release-plan
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-dist@0.32.0,cargo-packager@0.11.8
+      - name: Build cargo-dist headless archives
+        run: >-
+          dist build --artifacts=local
+          --target=aarch64-apple-darwin --target=x86_64-apple-darwin
+      - name: Build both desktop architectures
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin --workspace --exclude xtask
+          cargo build --release --locked --target x86_64-apple-darwin --workspace --exclude xtask
+      - run: cargo run --locked -p xtask -- universal-macos
+      - run: cargo run --locked -p xtask -- package --target universal-apple-darwin
+      - run: cargo run --locked -p xtask -- stage-packager --target universal-apple-darwin
+      - run: cargo packager --release --config packaging/Packager.macos.toml
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runonmine-macos-universal
+          path: |
+            dist/*
+            target/distrib/*
+          if-no-files-found: error
+
+  linux:
+    needs: release-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            packager: packaging/Packager.linux-x86_64.toml
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            packager: packaging/Packager.linux-aarch64.toml
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-dist@0.32.0,cargo-packager@0.11.8
+      - run: dist build --artifacts=local --target=${{ matrix.target }}
+      - name: Build headless applications
+        run: >-
+          cargo build --release --locked --target ${{ matrix.target }}
+          --no-default-features -p runonmine -p runonmine-agent -p runonmine-helper
+      - run: cargo run --locked -p xtask -- package --target ${{ matrix.target }}
+      - run: cargo run --locked -p xtask -- stage-packager --target ${{ matrix.target }}
+      - run: cargo packager --release --config ${{ matrix.packager }}
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runonmine-${{ matrix.target }}
+          path: |
+            dist/*
+            target/distrib/*
+          if-no-files-found: error
+
+  windows:
+    needs: release-plan
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-dist@0.32.0,cargo-packager@0.11.8
+      - run: choco install nsis --yes --no-progress
+      - run: dist build --artifacts=local --target=x86_64-pc-windows-msvc
+      - run: cargo build --release --locked --target x86_64-pc-windows-msvc --workspace --exclude xtask
+      - run: cargo run --locked -p xtask -- package --target x86_64-pc-windows-msvc
+      - run: cargo run --locked -p xtask -- stage-packager --target x86_64-pc-windows-msvc
+      - run: cargo packager --release --config packaging/Packager.windows.toml
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runonmine-x86_64-pc-windows-msvc
+          path: |
+            dist/*
+            target/distrib/*
+          if-no-files-found: error
+
+  publish-draft:
+    needs: [macos-universal, linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: true
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: artifacts/**/*
+          body: |
+            Unsigned RunOnMine public beta candidate.
+            Verify every artifact against its accompanying SHA-256 checksum before use.
+            SBOM files are provided in CycloneDX JSON format.
+            This draft does not change repository visibility.

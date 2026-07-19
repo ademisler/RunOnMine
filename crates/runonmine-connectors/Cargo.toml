@@ -1,0 +1,31 @@
+[package]
+name = "runonmine-connectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+command-group.workspace = true
+flate2.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+url.workspace = true
+zip.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[lints]
+workspace = true

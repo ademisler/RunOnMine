@@ -1,0 +1,618 @@
+use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use url::Url;
+use uuid::Uuid;
+
+use crate::crypto::verify_pkce;
+use crate::model::{
+    AccessGrant, AuthorizationCodeGrant, PendingAuthorization, PendingConsent, RegisteredClient,
+    TokenGrant, TokenPairDraft,
+};
+use crate::{ScopeSet, SecretHash, StoreError};
+
+pub trait OAuthStore: Send + Sync {
+    fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError>;
+    fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError>;
+    fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError>;
+    fn take_authorization(
+        &self,
+        state_hash: &SecretHash,
+        now: DateTime<Utc>,
+    ) -> Result<PendingAuthorization, StoreError>;
+    fn put_consent(&self, pending: &PendingConsent) -> Result<(), StoreError>;
+    fn take_consent(
+        &self,
+        id: Uuid,
+        csrf_hash: &SecretHash,
+        now: DateTime<Utc>,
+    ) -> Result<PendingConsent, StoreError>;
+    fn put_authorization_code(&self, code: &AuthorizationCodeGrant) -> Result<(), StoreError>;
+    fn exchange_authorization_code(
+        &self,
+        code_hash: &SecretHash,
+        client_id: &str,
+        redirect_uri: &Url,
+        verifier: &str,
+        tokens: &TokenPairDraft,
+        now: DateTime<Utc>,
+    ) -> Result<TokenGrant, StoreError>;
+    fn rotate_refresh_token(
+        &self,
+        refresh_hash: &SecretHash,
+        client_id: &str,
+        requested_scopes: Option<&ScopeSet>,
+        tokens: &TokenPairDraft,
+        now: DateTime<Utc>,
+    ) -> Result<TokenGrant, StoreError>;
+    fn revoke_token(&self, token_hash: &SecretHash) -> Result<(), StoreError>;
+    fn access_grant(
+        &self,
+        token_hash: &SecretHash,
+        now: DateTime<Utc>,
+    ) -> Result<Option<AccessGrant>, StoreError>;
+}
+
+pub struct SqliteOAuthStore {
+    connection: Mutex<Connection>,
+}
+
+impl std::fmt::Debug for SqliteOAuthStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteOAuthStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SqliteOAuthStore {
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to open a symlinked OAuth database",
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let connection = Connection::open(path)?;
+        restrict_database_file(path)?;
+        Self::from_connection(connection)
+    }
+
+    pub fn in_memory() -> Result<Self, StoreError> {
+        Self::from_connection(Connection::open_in_memory()?)
+    }
+
+    fn from_connection(connection: Connection) -> Result<Self, StoreError> {
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS oauth_clients (
+                client_id TEXT PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                redirect_uris TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                issued_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS oauth_authorizations (
+                provider_state_hash BLOB PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                redirect_uri TEXT NOT NULL,
+                client_state TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                code_challenge TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS oauth_consents (
+                id TEXT PRIMARY KEY,
+                csrf_hash BLOB NOT NULL UNIQUE,
+                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                redirect_uri TEXT NOT NULL,
+                client_state TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                code_challenge TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS oauth_codes (
+                code_hash BLOB PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                redirect_uri TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                code_challenge TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1))
+             );
+             CREATE TABLE IF NOT EXISTS oauth_tokens (
+                token_hash BLOB PRIMARY KEY,
+                token_kind TEXT NOT NULL CHECK (token_kind IN ('access', 'refresh')),
+                family_id TEXT NOT NULL,
+                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                subject TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                issued_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('active', 'rotated', 'revoked'))
+             );
+             CREATE INDEX IF NOT EXISTS oauth_tokens_family_idx
+                ON oauth_tokens(family_id);
+             CREATE INDEX IF NOT EXISTS oauth_tokens_expiry_idx
+                ON oauth_tokens(expires_at);",
+        )?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::Io(std::io::Error::other("OAuth database lock is poisoned")))
+    }
+}
+
+impl OAuthStore for SqliteOAuthStore {
+    fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError> {
+        let redirects = serde_json::to_string(&client.redirect_uris)
+            .map_err(|_| StoreError::Corrupt("client redirect URI serialization failed"))?;
+        self.lock()?.execute(
+            "INSERT INTO oauth_clients
+             (client_id, client_name, redirect_uris, scopes, issued_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                client.client_id,
+                client.client_name,
+                redirects,
+                client.scopes.to_space_delimited(),
+                client.issued_at.timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError> {
+        self.lock()?
+            .query_row(
+                "SELECT client_id, client_name, redirect_uris, scopes, issued_at
+                 FROM oauth_clients WHERE client_id = ?1",
+                [client_id],
+                |row| {
+                    let redirect_json: String = row.get(2)?;
+                    let scopes: String = row.get(3)?;
+                    let timestamp: i64 = row.get(4)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        redirect_json,
+                        scopes,
+                        timestamp,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(client_id, client_name, redirect_json, scopes, timestamp)| {
+                    Ok(RegisteredClient {
+                        client_id,
+                        client_name,
+                        redirect_uris: serde_json::from_str(&redirect_json)
+                            .map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?,
+                        scopes: parse_scopes(&scopes)?,
+                        issued_at: from_timestamp(timestamp)?,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError> {
+        self.lock()?.execute(
+            "INSERT INTO oauth_authorizations
+             (provider_state_hash, client_id, redirect_uri, client_state, scopes,
+              code_challenge, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                pending.provider_state_hash.as_bytes().as_slice(),
+                pending.client_id,
+                pending.redirect_uri.as_str(),
+                pending.client_state,
+                pending.scopes.to_space_delimited(),
+                pending.code_challenge,
+                pending.expires_at.timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn take_authorization(
+        &self,
+        state_hash: &SecretHash,
+        now: DateTime<Utc>,
+    ) -> Result<PendingAuthorization, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM oauth_authorizations WHERE expires_at <= ?1",
+            [now.timestamp()],
+        )?;
+        let pending = transaction
+            .query_row(
+                "SELECT client_id, redirect_uri, client_state, scopes,
+                        code_challenge, expires_at
+                 FROM oauth_authorizations WHERE provider_state_hash = ?1",
+                [state_hash.as_bytes().as_slice()],
+                map_authorization,
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        transaction.execute(
+            "DELETE FROM oauth_authorizations WHERE provider_state_hash = ?1",
+            [state_hash.as_bytes().as_slice()],
+        )?;
+        transaction.commit()?;
+        Ok(PendingAuthorization {
+            provider_state_hash: *state_hash,
+            ..pending
+        })
+    }
+
+    fn put_consent(&self, pending: &PendingConsent) -> Result<(), StoreError> {
+        self.lock()?.execute(
+            "INSERT INTO oauth_consents
+             (id, csrf_hash, client_id, redirect_uri, client_state, scopes,
+              code_challenge, subject, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                pending.id.to_string(),
+                pending.csrf_hash.as_bytes().as_slice(),
+                pending.client_id,
+                pending.redirect_uri.as_str(),
+                pending.client_state,
+                pending.scopes.to_space_delimited(),
+                pending.code_challenge,
+                pending.subject,
+                pending.expires_at.timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn take_consent(
+        &self,
+        id: Uuid,
+        csrf_hash: &SecretHash,
+        now: DateTime<Utc>,
+    ) -> Result<PendingConsent, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM oauth_consents WHERE expires_at <= ?1",
+            [now.timestamp()],
+        )?;
+        let consent = transaction
+            .query_row(
+                "SELECT client_id, redirect_uri, client_state, scopes,
+                        code_challenge, subject, expires_at
+                 FROM oauth_consents WHERE id = ?1 AND csrf_hash = ?2",
+                params![id.to_string(), csrf_hash.as_bytes().as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        transaction.execute("DELETE FROM oauth_consents WHERE id = ?1", [id.to_string()])?;
+        transaction.commit()?;
+        Ok(PendingConsent {
+            id,
+            csrf_hash: *csrf_hash,
+            client_id: consent.0,
+            redirect_uri: parse_url(&consent.1)?,
+            client_state: consent.2,
+            scopes: parse_scopes(&consent.3)?,
+            code_challenge: consent.4,
+            subject: consent.5,
+            expires_at: from_timestamp(consent.6)?,
+        })
+    }
+
+    fn put_authorization_code(&self, code: &AuthorizationCodeGrant) -> Result<(), StoreError> {
+        self.lock()?.execute(
+            "INSERT INTO oauth_codes
+             (code_hash, client_id, redirect_uri, scopes, code_challenge,
+              subject, expires_at, used)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+            params![
+                code.code_hash.as_bytes().as_slice(),
+                code.client_id,
+                code.redirect_uri.as_str(),
+                code.scopes.to_space_delimited(),
+                code.code_challenge,
+                code.subject,
+                code.expires_at.timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn exchange_authorization_code(
+        &self,
+        code_hash: &SecretHash,
+        client_id: &str,
+        redirect_uri: &Url,
+        verifier: &str,
+        tokens: &TokenPairDraft,
+        now: DateTime<Utc>,
+    ) -> Result<TokenGrant, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let row = transaction
+            .query_row(
+                "SELECT client_id, redirect_uri, scopes, code_challenge,
+                        subject, expires_at, used
+                 FROM oauth_codes WHERE code_hash = ?1",
+                [code_hash.as_bytes().as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, bool>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::InvalidGrant)?;
+        if row.6
+            || row.5 <= now.timestamp()
+            || row.0 != client_id
+            || row.1 != redirect_uri.as_str()
+            || !verify_pkce(verifier, &row.3)
+        {
+            return Err(StoreError::InvalidGrant);
+        }
+        let changed = transaction.execute(
+            "UPDATE oauth_codes SET used = 1 WHERE code_hash = ?1 AND used = 0",
+            [code_hash.as_bytes().as_slice()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidGrant);
+        }
+        let scopes = parse_scopes(&row.2)?;
+        insert_token_pair(
+            &transaction,
+            Uuid::new_v4(),
+            client_id,
+            &row.4,
+            &scopes,
+            tokens,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(TokenGrant { scopes })
+    }
+
+    fn rotate_refresh_token(
+        &self,
+        refresh_hash: &SecretHash,
+        client_id: &str,
+        requested_scopes: Option<&ScopeSet>,
+        tokens: &TokenPairDraft,
+        now: DateTime<Utc>,
+    ) -> Result<TokenGrant, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let row = transaction
+            .query_row(
+                "SELECT token_kind, family_id, client_id, subject, scopes,
+                        expires_at, status
+                 FROM oauth_tokens WHERE token_hash = ?1",
+                [refresh_hash.as_bytes().as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::InvalidGrant)?;
+        if row.0 != "refresh" || row.2 != client_id || row.5 <= now.timestamp() {
+            return Err(StoreError::InvalidGrant);
+        }
+        if row.6 != "active" {
+            transaction.execute(
+                "UPDATE oauth_tokens SET status = 'revoked' WHERE family_id = ?1",
+                [&row.1],
+            )?;
+            transaction.commit()?;
+            return Err(StoreError::RefreshReuse);
+        }
+        let original_scopes = parse_scopes(&row.4)?;
+        let scopes = requested_scopes.unwrap_or(&original_scopes);
+        if !scopes.is_subset(&original_scopes) {
+            return Err(StoreError::InvalidGrant);
+        }
+        let changed = transaction.execute(
+            "UPDATE oauth_tokens SET status = 'rotated'
+             WHERE token_hash = ?1 AND status = 'active'",
+            [refresh_hash.as_bytes().as_slice()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::RefreshReuse);
+        }
+        let family = Uuid::parse_str(&row.1)
+            .map_err(|_| StoreError::Corrupt("invalid refresh token family"))?;
+        insert_token_pair(&transaction, family, client_id, &row.3, scopes, tokens, now)?;
+        transaction.commit()?;
+        Ok(TokenGrant {
+            scopes: scopes.clone(),
+        })
+    }
+
+    fn revoke_token(&self, token_hash: &SecretHash) -> Result<(), StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let token = transaction
+            .query_row(
+                "SELECT token_kind, family_id FROM oauth_tokens WHERE token_hash = ?1",
+                [token_hash.as_bytes().as_slice()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((kind, family)) = token {
+            if kind == "refresh" {
+                transaction.execute(
+                    "UPDATE oauth_tokens SET status = 'revoked' WHERE family_id = ?1",
+                    [family],
+                )?;
+            } else {
+                transaction.execute(
+                    "UPDATE oauth_tokens SET status = 'revoked' WHERE token_hash = ?1",
+                    [token_hash.as_bytes().as_slice()],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn access_grant(
+        &self,
+        token_hash: &SecretHash,
+        now: DateTime<Utc>,
+    ) -> Result<Option<AccessGrant>, StoreError> {
+        let row = self
+            .lock()?
+            .query_row(
+                "SELECT client_id, subject, scopes, expires_at
+                 FROM oauth_tokens
+                 WHERE token_hash = ?1 AND token_kind = 'access'
+                   AND status = 'active' AND expires_at > ?2",
+                params![token_hash.as_bytes().as_slice(), now.timestamp()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(client_id, subject, scopes, expires_at)| {
+            Ok(AccessGrant {
+                client_id,
+                subject,
+                scopes: parse_scopes(&scopes)?,
+                expires_at: from_timestamp(expires_at)?,
+            })
+        })
+        .transpose()
+    }
+}
+
+fn map_authorization(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingAuthorization> {
+    let redirect_uri: String = row.get(1)?;
+    let scopes: String = row.get(3)?;
+    let expires_at: i64 = row.get(5)?;
+    Ok(PendingAuthorization {
+        provider_state_hash: SecretHash::from_slice(&[0_u8; 32])
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        client_id: row.get(0)?,
+        redirect_uri: Url::parse(&redirect_uri).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        client_state: row.get(2)?,
+        scopes: ScopeSet::parse(&scopes).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        code_challenge: row.get(4)?,
+        expires_at: DateTime::from_timestamp(expires_at, 0).ok_or(rusqlite::Error::InvalidQuery)?,
+    })
+}
+
+fn insert_token_pair(
+    transaction: &Transaction<'_>,
+    family_id: Uuid,
+    client_id: &str,
+    subject: &str,
+    scopes: &ScopeSet,
+    tokens: &TokenPairDraft,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    let scope = scopes.to_space_delimited();
+    transaction.execute(
+        "INSERT INTO oauth_tokens
+         (token_hash, token_kind, family_id, client_id, subject, scopes,
+          issued_at, expires_at, status)
+         VALUES (?1, 'access', ?2, ?3, ?4, ?5, ?6, ?7, 'active')",
+        params![
+            tokens.access_hash.as_bytes().as_slice(),
+            family_id.to_string(),
+            client_id,
+            subject,
+            scope,
+            now.timestamp(),
+            tokens.access_expires_at.timestamp(),
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO oauth_tokens
+         (token_hash, token_kind, family_id, client_id, subject, scopes,
+          issued_at, expires_at, status)
+         VALUES (?1, 'refresh', ?2, ?3, ?4, ?5, ?6, ?7, 'active')",
+        params![
+            tokens.refresh_hash.as_bytes().as_slice(),
+            family_id.to_string(),
+            client_id,
+            subject,
+            scope,
+            now.timestamp(),
+            tokens.refresh_expires_at.timestamp(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn parse_scopes(value: &str) -> Result<ScopeSet, StoreError> {
+    ScopeSet::parse(value).map_err(|_| StoreError::Corrupt("invalid persisted scope"))
+}
+
+fn parse_url(value: &str) -> Result<Url, StoreError> {
+    Url::parse(value).map_err(|_| StoreError::Corrupt("invalid persisted URL"))
+}
+
+fn from_timestamp(value: i64) -> Result<DateTime<Utc>, StoreError> {
+    DateTime::from_timestamp(value, 0).ok_or(StoreError::Corrupt("invalid persisted timestamp"))
+}
+
+fn restrict_database_file(path: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}

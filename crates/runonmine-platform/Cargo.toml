@@ -1,0 +1,56 @@
+[package]
+name = "runonmine-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+desktop-control = ["dep:enigo", "dep:image", "dep:xcap"]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+command-group.workspace = true
+directories.workspace = true
+enigo = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+xcap = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.0"
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Memory",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints.rust]
+# Windows named-pipe ACLs, peer-token verification and window activation
+# require small audited Win32 FFI boundaries. Each boundary opts in locally.
+unsafe_code = "warn"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"

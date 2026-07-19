@@ -1,0 +1,33 @@
+[package]
+name = "runonmine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["desktop-control"]
+desktop-control = ["runonmine-mcp/desktop-control"]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+rand.workspace = true
+rpassword.workspace = true
+runonmine-core = { path = "../../crates/runonmine-core" }
+runonmine-connectors = { path = "../../crates/runonmine-connectors" }
+runonmine-mcp = { path = "../../crates/runonmine-mcp", default-features = false }
+runonmine-platform = { path = "../../crates/runonmine-platform" }
+secrecy.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

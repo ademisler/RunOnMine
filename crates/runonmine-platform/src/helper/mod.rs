@@ -1,0 +1,772 @@
+//! Authenticated local IPC for the optional privileged helper.
+//!
+//! The helper is deliberately not a shell. It accepts an absolute executable
+//! only when that exact, root-controlled file was allowlisted at installation
+//! time and its SHA-256 digest still matches. The transport additionally
+//! authenticates the operating-system identity of every peer.
+
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use command_group::AsyncCommandGroup as _;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq as _;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::process::Command;
+use uuid::Uuid;
+
+mod service;
+
+#[cfg(unix)]
+mod unix;
+#[cfg(windows)]
+mod windows;
+
+pub use service::{
+    HelperInstallOptions, HelperManager, HelperServiceStatus, installed_policy_path,
+    resolve_install_owner,
+};
+
+pub const PROTOCOL_VERSION: u16 = 1;
+pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
+pub const MAX_TIMEOUT: Duration = Duration::from_mins(5);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OwnerIdentity {
+    UnixUid { uid: u32 },
+    WindowsSid { sid: String },
+}
+
+impl OwnerIdentity {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::UnixUid { uid } => {
+                if *uid == 0 {
+                    bail!("the privileged helper may not be assigned to the root account");
+                }
+            }
+            Self::WindowsSid { sid } => validate_windows_sid(sid)?,
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowedProgram {
+    pub canonical_path: PathBuf,
+    pub sha256: String,
+}
+
+impl AllowedProgram {
+    pub fn inspect(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            bail!("an admin executable allowlist entry must be an absolute path");
+        }
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to inspect admin executable {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("admin executable must be a regular, non-symlink file");
+        }
+        validate_privileged_program_ownership(path, &metadata)?;
+        let canonical_path = path
+            .canonicalize()
+            .with_context(|| format!("failed to resolve admin executable {}", path.display()))?;
+        let sha256 = sha256_file(&canonical_path)?;
+        Ok(Self {
+            canonical_path,
+            sha256,
+        })
+    }
+
+    fn matches(&self, requested: &Path) -> Result<bool> {
+        if !requested.is_absolute() {
+            return Ok(false);
+        }
+        let Ok(metadata) = fs::symlink_metadata(requested) else {
+            return Ok(false);
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Ok(false);
+        }
+        validate_privileged_program_ownership(requested, &metadata)?;
+        let Ok(canonical) = requested.canonicalize() else {
+            return Ok(false);
+        };
+        if canonical != self.canonical_path {
+            return Ok(false);
+        }
+        let actual_hash = sha256_file(&canonical)?;
+        Ok(bool::from(
+            actual_hash.as_bytes().ct_eq(self.sha256.as_bytes()),
+        ))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminPolicy {
+    pub version: u16,
+    pub owner: OwnerIdentity,
+    #[serde(default)]
+    pub allowed_programs: Vec<AllowedProgram>,
+}
+
+impl AdminPolicy {
+    pub fn build(owner: OwnerIdentity, programs: &[PathBuf]) -> Result<Self> {
+        owner.validate()?;
+        let mut allowed_programs = programs
+            .iter()
+            .map(|path| AllowedProgram::inspect(path))
+            .collect::<Result<Vec<_>>>()?;
+        allowed_programs.sort_by(|left, right| left.canonical_path.cmp(&right.canonical_path));
+        allowed_programs.dedup_by(|left, right| left.canonical_path == right.canonical_path);
+        Ok(Self {
+            version: PROTOCOL_VERSION,
+            owner,
+            allowed_programs,
+        })
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        reject_symlink(path, "helper policy")?;
+        let bytes = fs::read(path).context("failed to read the helper policy")?;
+        if bytes.len() > MAX_REQUEST_BYTES {
+            bail!("helper policy is larger than the supported limit");
+        }
+        let policy: Self =
+            serde_json::from_slice(&bytes).context("helper policy is not valid JSON")?;
+        if policy.version != PROTOCOL_VERSION {
+            bail!("unsupported helper policy version");
+        }
+        policy.owner.validate()?;
+        Ok(policy)
+    }
+
+    pub fn permits(&self, program: &Path) -> Result<bool> {
+        for allowed in &self.allowed_programs {
+            if allowed.matches(program)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelperRequest {
+    pub version: u16,
+    pub request_id: Uuid,
+    pub operation: AdminOperation,
+}
+
+impl HelperRequest {
+    #[must_use]
+    pub fn health() -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            operation: AdminOperation::Health,
+        }
+    }
+
+    pub fn execute(program: PathBuf, args: Vec<String>, timeout: Duration) -> Result<Self> {
+        let request = Self {
+            version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            operation: AdminOperation::Execute(AdminExecution {
+                program,
+                args,
+                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            }),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.version != PROTOCOL_VERSION {
+            bail!("unsupported helper protocol version");
+        }
+        match &self.operation {
+            AdminOperation::Health => {}
+            AdminOperation::Execute(execution) => execution.validate()?,
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdminOperation {
+    Health,
+    Execute(AdminExecution),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminExecution {
+    pub program: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub timeout_ms: u64,
+}
+
+impl AdminExecution {
+    pub fn validate(&self) -> Result<()> {
+        if !self.program.is_absolute() {
+            bail!("admin executable must be an absolute path");
+        }
+        if self.args.len() > 128 {
+            bail!("admin execution has too many arguments");
+        }
+        if self
+            .args
+            .iter()
+            .any(|argument| argument.len() > 8 * 1024 || argument.contains('\0'))
+        {
+            bail!("admin execution contains an invalid argument");
+        }
+        if self.timeout_ms == 0 || Duration::from_millis(self.timeout_ms) > MAX_TIMEOUT {
+            bail!("admin execution timeout is outside the supported range");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelperResponse {
+    pub version: u16,
+    pub request_id: Uuid,
+    pub result: HelperResult,
+}
+
+impl HelperResponse {
+    #[must_use]
+    pub fn healthy(request_id: Uuid, allowlisted_programs: usize) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            request_id,
+            result: HelperResult::Healthy {
+                allowlisted_programs,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn rejected(request_id: Uuid, message: impl Into<String>) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            request_id,
+            result: HelperResult::Rejected {
+                message: sanitize_message(&message.into()),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn failed(request_id: Uuid, message: impl Into<String>) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            request_id,
+            result: HelperResult::Failed {
+                message: sanitize_message(&message.into()),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HelperResult {
+    Healthy {
+        allowlisted_programs: usize,
+    },
+    Completed {
+        exit_code: Option<i32>,
+        stdout_base64: String,
+        stderr_base64: String,
+        output_truncated: bool,
+        timed_out: bool,
+    },
+    Rejected {
+        message: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+impl HelperResult {
+    #[must_use]
+    pub fn completed(
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+        output_truncated: bool,
+        timed_out: bool,
+    ) -> Self {
+        Self::Completed {
+            exit_code,
+            stdout_base64: BASE64_STANDARD.encode(stdout),
+            stderr_base64: BASE64_STANDARD.encode(stderr),
+            output_truncated,
+            timed_out,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HelperClient {
+    owner: OwnerIdentity,
+}
+
+impl HelperClient {
+    pub fn new(owner: OwnerIdentity) -> Result<Self> {
+        owner.validate()?;
+        Ok(Self { owner })
+    }
+
+    /// Creates a client bound to the operating-system identity of this process.
+    /// The helper transport still performs its own peer credential check.
+    pub fn for_current_user() -> Result<Self> {
+        Self::new(current_user_identity()?)
+    }
+
+    pub async fn request(&self, request: &HelperRequest) -> Result<HelperResponse> {
+        request.validate()?;
+        #[cfg(unix)]
+        {
+            unix::client_request(&self.owner, request).await
+        }
+        #[cfg(windows)]
+        {
+            windows::client_request(&self.owner, request).await
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            bail!("the privileged helper is unsupported on this operating system")
+        }
+    }
+}
+
+pub async fn serve_installed() -> Result<()> {
+    let path = installed_policy_path()?;
+    let policy = AdminPolicy::load(&path)?;
+    require_privileged_identity()?;
+    #[cfg(unix)]
+    {
+        unix::serve(policy).await
+    }
+    #[cfg(windows)]
+    {
+        windows::serve(policy).await
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        bail!("the privileged helper is unsupported on this operating system")
+    }
+}
+
+async fn read_frame<R>(reader: &mut R, limit: usize) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let length = reader
+        .read_u32()
+        .await
+        .context("failed to read helper frame length")?;
+    let length = usize::try_from(length).context("invalid helper frame length")?;
+    if length == 0 || length > limit {
+        bail!("helper frame is outside the supported size limit");
+    }
+    let mut bytes = vec![0_u8; length];
+    reader
+        .read_exact(&mut bytes)
+        .await
+        .context("failed to read helper frame")?;
+    Ok(bytes)
+}
+
+async fn write_frame<W, T>(writer: &mut W, value: &T, limit: usize) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let bytes = serde_json::to_vec(value).context("failed to encode helper frame")?;
+    if bytes.is_empty() || bytes.len() > limit {
+        bail!("encoded helper frame is outside the supported size limit");
+    }
+    let length = u32::try_from(bytes.len()).context("helper frame is too large")?;
+    writer
+        .write_u32(length)
+        .await
+        .context("failed to write helper frame length")?;
+    writer
+        .write_all(&bytes)
+        .await
+        .context("failed to write helper frame")?;
+    writer
+        .flush()
+        .await
+        .context("failed to flush helper frame")?;
+    Ok(())
+}
+
+fn decode_request(bytes: &[u8]) -> Result<HelperRequest> {
+    let request: HelperRequest =
+        serde_json::from_slice(bytes).context("helper request is not valid JSON")?;
+    request.validate()?;
+    Ok(request)
+}
+
+fn decode_response(bytes: &[u8], request_id: Uuid) -> Result<HelperResponse> {
+    let response: HelperResponse =
+        serde_json::from_slice(bytes).context("helper response is not valid JSON")?;
+    if response.version != PROTOCOL_VERSION || response.request_id != request_id {
+        bail!("helper response did not match the request");
+    }
+    Ok(response)
+}
+
+async fn handle_authenticated_request(
+    policy: &AdminPolicy,
+    request: HelperRequest,
+) -> HelperResponse {
+    let request_id = request.request_id;
+    if let Err(error) = request.validate() {
+        return HelperResponse::rejected(request_id, error.to_string());
+    }
+    match request.operation {
+        AdminOperation::Health => {
+            HelperResponse::healthy(request_id, policy.allowed_programs.len())
+        }
+        AdminOperation::Execute(execution) => {
+            match policy.permits(&execution.program) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return HelperResponse::rejected(
+                        request_id,
+                        "the executable is not in the installed admin allowlist",
+                    );
+                }
+                Err(_) => {
+                    return HelperResponse::failed(
+                        request_id,
+                        "the installed admin allowlist could not be verified",
+                    );
+                }
+            }
+            match execute_program(&execution).await {
+                Ok(output) => HelperResponse {
+                    version: PROTOCOL_VERSION,
+                    request_id,
+                    result: HelperResult::completed(
+                        output.exit_code,
+                        &output.stdout,
+                        &output.stderr,
+                        output.truncated,
+                        output.timed_out,
+                    ),
+                },
+                Err(_) => HelperResponse::failed(request_id, "admin execution failed"),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ExecutionOutput {
+    exit_code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    truncated: bool,
+    timed_out: bool,
+}
+
+async fn execute_program(execution: &AdminExecution) -> Result<ExecutionOutput> {
+    execution.validate()?;
+    let mut command = Command::new(&execution.program);
+    command
+        .args(&execution.args)
+        .current_dir(platform_root_directory())
+        .env_clear()
+        .env("PATH", safe_admin_path())
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.env("SystemRoot", windows::system_root());
+
+    let mut child = command
+        .group_spawn()
+        .context("failed to start an admin process")?;
+    let stdout = child
+        .inner()
+        .stdout
+        .take()
+        .context("failed to capture admin stdout")?;
+    let stderr = child
+        .inner()
+        .stderr
+        .take()
+        .context("failed to capture admin stderr")?;
+    let capture_limit = u64::try_from(MAX_CAPTURE_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
+    let stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.take(capture_limit).read_to_end(&mut bytes).await?;
+        io::Result::Ok(bytes)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.take(capture_limit).read_to_end(&mut bytes).await?;
+        io::Result::Ok(bytes)
+    });
+
+    let (status, timed_out) = if let Ok(result) =
+        tokio::time::timeout(Duration::from_millis(execution.timeout_ms), child.wait()).await
+    {
+        (Some(result?), false)
+    } else {
+        let _ignored = child.kill().await;
+        (child.wait().await.ok(), true)
+    };
+    let mut stdout = stdout_task.await.context("admin stdout task failed")??;
+    let mut stderr = stderr_task.await.context("admin stderr task failed")??;
+    let truncated = stdout.len() > MAX_CAPTURE_BYTES || stderr.len() > MAX_CAPTURE_BYTES;
+    stdout.truncate(MAX_CAPTURE_BYTES);
+    stderr.truncate(MAX_CAPTURE_BYTES);
+    Ok(ExecutionOutput {
+        exit_code: status.and_then(|status| status.code()),
+        stdout,
+        stderr,
+        truncated,
+        timed_out,
+    })
+}
+
+#[cfg(unix)]
+fn platform_root_directory() -> &'static str {
+    "/"
+}
+
+#[cfg(windows)]
+fn platform_root_directory() -> PathBuf {
+    windows::system_root()
+}
+
+#[cfg(unix)]
+fn safe_admin_path() -> &'static str {
+    "/usr/sbin:/usr/bin:/sbin:/bin"
+}
+
+#[cfg(windows)]
+fn safe_admin_path() -> String {
+    windows::system_root()
+        .join("System32")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).context("failed to open an admin executable")?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .context("failed to hash an admin executable")?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn reject_symlink(path: &Path, description: &str) -> Result<()> {
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("failed to inspect {description}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("{description} must be a regular, non-symlink file");
+    }
+    Ok(())
+}
+
+fn sanitize_message(message: &str) -> String {
+    message
+        .chars()
+        .filter(|character| !character.is_control() || *character == ' ')
+        .take(512)
+        .collect()
+}
+
+fn validate_windows_sid(sid: &str) -> Result<()> {
+    let mut segments = sid.split('-');
+    if segments.next() != Some("S") || segments.next() != Some("1") {
+        bail!("invalid Windows owner SID");
+    }
+    let remaining = segments.collect::<Vec<_>>();
+    if remaining.len() < 2
+        || remaining.len() > 16
+        || remaining
+            .iter()
+            .any(|segment| segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        bail!("invalid Windows owner SID");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_privileged_program_ownership(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        bail!(
+            "admin executable must be owned by root and not group- or world-writable: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_privileged_program_ownership(path: &Path, _metadata: &fs::Metadata) -> Result<()> {
+    windows::validate_privileged_program_path(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_privileged_program_ownership(_path: &Path, _metadata: &fs::Metadata) -> Result<()> {
+    bail!("privileged programs are unsupported on this operating system")
+}
+
+fn require_privileged_identity() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .context("failed to determine the effective user id")?;
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "0" {
+            bail!("the privileged helper must run as root");
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        windows::require_local_system()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        bail!("the privileged helper is unsupported on this operating system")
+    }
+}
+
+fn require_installer_identity() -> Result<()> {
+    #[cfg(unix)]
+    {
+        require_privileged_identity()
+    }
+    #[cfg(windows)]
+    {
+        windows::require_elevated_administrator()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        bail!("the privileged helper is unsupported on this operating system")
+    }
+}
+
+#[cfg(unix)]
+fn current_user_identity() -> Result<OwnerIdentity> {
+    let output = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .context("failed to determine the current user id")?;
+    if !output.status.success() {
+        bail!("failed to determine the current user id");
+    }
+    let uid = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .context("current user id is invalid")?;
+    let owner = OwnerIdentity::UnixUid { uid };
+    owner.validate()?;
+    Ok(owner)
+}
+
+#[cfg(windows)]
+fn current_user_identity() -> Result<OwnerIdentity> {
+    let owner = OwnerIdentity::WindowsSid {
+        sid: windows::current_user_sid()?,
+    };
+    owner.validate()?;
+    Ok(owner)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn current_user_identity() -> Result<OwnerIdentity> {
+    bail!("the privileged helper is unsupported on this operating system")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_rejects_relative_programs_and_unbounded_timeouts() {
+        assert!(
+            HelperRequest::execute(
+                PathBuf::from("relative-command"),
+                Vec::new(),
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert!(
+            HelperRequest::execute(
+                PathBuf::from(if cfg!(windows) {
+                    r"C:\Windows\System32\whoami.exe"
+                } else {
+                    "/usr/bin/id"
+                }),
+                Vec::new(),
+                MAX_TIMEOUT + Duration::from_millis(1)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn response_request_id_must_match() -> Result<()> {
+        let response = HelperResponse::healthy(Uuid::new_v4(), 0);
+        let encoded = serde_json::to_vec(&response)?;
+        assert!(decode_response(&encoded, Uuid::new_v4()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn windows_sid_validation_is_strict() {
+        assert!(validate_windows_sid("S-1-5-21-123-456-789-1001").is_ok());
+        assert!(validate_windows_sid("S-2-5-21").is_err());
+        assert!(validate_windows_sid("S-1-5-owner").is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut reader = std::io::Cursor::new(bytes);
+        assert!(read_frame(&mut reader, MAX_REQUEST_BYTES).await.is_err());
+    }
+}

@@ -1,0 +1,27 @@
+# macOS
+
+The normal user agent is installed as `dev.runonmine.agent` in
+`~/Library/LaunchAgents`:
+
+```console
+runonmine setup --root /absolute/project/path
+runonmine service install
+runonmine service status
+```
+
+The desktop application needs macOS Screen Recording permission for capture and
+Accessibility permission for synthetic input and window focus. RunOnMine does
+not bypass these prompts. Browser automation with its isolated Chromium profile
+does not require access to the user's normal Chrome profile.
+
+The optional privileged helper is installed only through `runonmine admin
+install` and authenticates the local peer with `getpeereid`. It accepts only
+explicit absolute executable paths recorded at installation and hash-pinned in
+its root-owned policy.
+
+The first beta DMG is a universal arm64/x86_64 build assembled with `lipo`. It is
+unsigned and not notarized; that limitation is displayed in release notes and
+must be considered before installation.
+
+The existing `com.idemasler.macmcp.*` services, port `45799`, and MacMCP config,
+logs, and data are outside RunOnMine's ownership and must not be modified.

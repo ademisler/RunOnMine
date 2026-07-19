@@ -1,0 +1,68 @@
+# Architecture
+
+RunOnMine is a local-first Rust workspace. The AI model continues to run in the
+user's chosen AI service; tool calls execute on a machine the user owns.
+
+## Processes
+
+- `runonmine` manages setup, connectors, policies, approvals, diagnostics, audit export, and services.
+- `runonmine-agent` serves MCP over stdio or loopback Streamable HTTP.
+- `runonmine-desktop` provides the local approval window, settings, and tray menu.
+- `runonmine-helper` is an optional, separately installed privileged process.
+
+Shared crates isolate configuration and persistence, MCP routing, OAuth,
+connectors, Chromium automation, and operating-system adapters. The
+`desktop-control` feature contains capture and input dependencies. Linux/VPS
+builds with `--no-default-features` do not include those dependencies.
+
+The normal agent always runs as the signed-in user. The Linux headless system
+unit is installed by root but runs as an explicitly selected non-root account.
+Installing either normal service never installs the privileged helper.
+
+## Request path
+
+```text
+AI client
+  -> HTTPS tunnel or local stdio
+  -> connector authentication and token scope
+  -> MCP session and rate limits
+  -> local connector policy (deny / ask / allow)
+  -> local approval when required
+  -> capability implementation
+  -> operating-system account boundary
+```
+
+Authentication scopes can reduce access but can never override local policy.
+Approval is deliberately absent from the MCP tool surface.
+
+The loopback HTTP server supports at most 32 simultaneous MCP sessions, expires
+sessions after 30 idle minutes, and permits 120 calls per connector per minute
+by default. The server validates the connector bound to each session and
+rejects session reuse through a different connector.
+
+## Local data
+
+- `config.toml` contains non-secret configuration and is replaced atomically.
+- `state.db` contains approvals, sessions, OAuth token hashes, and audit records.
+- platform credential storage contains connector paths and external API credentials.
+- isolated Chromium profiles live below the per-user RunOnMine data directory.
+
+On headless Linux without Secret Service, secrets are stored only when an
+explicit `RUNONMINE_MASTER_KEY` supplies a 32-byte key. The file backend uses
+XChaCha20-Poly1305 with a random nonce and per-entry associated data. Missing or
+invalid key material fails closed.
+
+The audit log is hash-chained. Retention pruning stores a chain anchor, so the
+remaining records continue to verify after the default 30-day/100-MiB retention
+window removes old records.
+
+## Network ownership
+
+The MCP listener is fixed to `127.0.0.1:47821`; configuration validation rejects
+other bind hosts and reserves the existing MacMCP port `45799`. Cloudflare and
+OpenAI tunnel processes connect outward. RunOnMine does not open a public
+listener or modify firewall rules.
+
+Cloudflare Quick Tunnel uses `/<secret>/mcp`. Named Tunnel uses `/mcp` plus the
+embedded OAuth endpoints. OpenAI Secure MCP Tunnel launches the official
+external client against `runonmine mcp stdio --connector <id>`.
