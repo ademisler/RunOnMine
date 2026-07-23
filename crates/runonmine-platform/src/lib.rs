@@ -210,6 +210,7 @@ impl LinuxSystemService {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(clippy::unused_self)]
     fn uninstall_linux(&self) -> Result<()> {
         require_root()?;
         let _ignored = Command::new("systemctl")
@@ -577,6 +578,7 @@ impl UserService {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(clippy::unused_self)]
     fn uninstall_linux(&self) -> Result<()> {
         let path = service_definition_path()?.context("systemd user path is unavailable")?;
         let _ignored = Command::new("systemctl")
@@ -621,6 +623,7 @@ impl UserService {
     }
 }
 
+#[cfg(not(windows))]
 #[allow(clippy::unnecessary_wraps)]
 fn service_definition_path() -> Result<Option<PathBuf>> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
