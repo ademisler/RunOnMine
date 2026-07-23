@@ -2733,8 +2733,7 @@ const fn capability_name(capability: Capability) -> &'static str {
 fn browser_should_be_headless() -> bool {
     #[cfg(target_os = "linux")]
     {
-        return std::env::var_os("DISPLAY").is_none()
-            && std::env::var_os("WAYLAND_DISPLAY").is_none();
+        std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -2773,10 +2772,20 @@ mod tests {
 
     #[tokio::test]
     async fn idle_sessions_expire() -> Result<()> {
-        let manager = IdleSessionManager::new(Duration::from_millis(5));
+        let idle_ttl = Duration::from_secs(30);
+        let manager = IdleSessionManager::new(idle_ttl);
         let (id, _transport) = manager.create_session().await?;
         assert!(manager.has_session(&id).await?);
-        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        let expired_at = Instant::now()
+            .checked_sub(idle_ttl + Duration::from_millis(1))
+            .context("test clock cannot represent an expired session")?;
+        manager
+            .last_seen
+            .write()
+            .await
+            .insert(id.clone(), expired_at);
+
         assert!(!manager.has_session(&id).await?);
         Ok(())
     }

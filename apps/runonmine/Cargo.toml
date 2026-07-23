@@ -16,10 +16,10 @@ base64.workspace = true
 clap.workspace = true
 rand.workspace = true
 rpassword.workspace = true
-runonmine-core = { path = "../../crates/runonmine-core" }
-runonmine-connectors = { path = "../../crates/runonmine-connectors" }
-runonmine-mcp = { path = "../../crates/runonmine-mcp", default-features = false }
-runonmine-platform = { path = "../../crates/runonmine-platform" }
+runonmine-core = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-core" }
+runonmine-connectors = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-connectors" }
+runonmine-mcp = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-mcp", default-features = false }
+runonmine-platform = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-platform" }
 secrecy.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

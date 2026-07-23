@@ -69,7 +69,7 @@ pub(super) async fn client_request(
         {
             Ok(client) => break client,
             Err(error)
-                if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY.cast_signed())
                     && Instant::now() < deadline =>
             {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -86,7 +86,9 @@ pub(super) async fn client_request(
 pub(super) async fn serve(policy: AdminPolicy) -> Result<()> {
     let sid = match &policy.owner {
         OwnerIdentity::WindowsSid { sid } => sid.clone(),
-        _ => bail!("a Windows helper policy requires a Windows owner SID"),
+        OwnerIdentity::UnixUid { .. } => {
+            bail!("a Windows helper policy requires a Windows owner SID")
+        }
     };
     let policy = Arc::new(policy);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
@@ -131,7 +133,7 @@ fn create_server(owner_sid: &str) -> Result<NamedPipeServer> {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             wide_sddl.as_ptr(),
             SDDL_REVISION_1,
-            &mut descriptor,
+            &raw mut descriptor,
             ptr::null_mut(),
         )
     };
@@ -175,17 +177,17 @@ fn connected_client_sid(pipe: &NamedPipeServer) -> Result<String> {
     let _revert = RevertGuard;
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: the current thread is impersonating the connected pipe client.
-    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } == 0 {
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut token) } == 0 {
         return Err(io::Error::last_os_error()).context("failed to open helper client token");
     }
-    token_user_sid(OwnedHandle(token))
+    token_user_sid(&OwnedHandle(token))
 }
 
 fn verify_server_is_local_system(pipe: &NamedPipeClient) -> Result<()> {
     let mut process_id = 0_u32;
     let handle = pipe.as_raw_handle().cast::<c_void>();
     // SAFETY: handle is an open client-side named-pipe handle.
-    if unsafe { GetNamedPipeServerProcessId(handle, &mut process_id) } == 0 || process_id == 0 {
+    if unsafe { GetNamedPipeServerProcessId(handle, &raw mut process_id) } == 0 || process_id == 0 {
         return Err(io::Error::last_os_error()).context("failed to identify helper server");
     }
     // SAFETY: process_id came from the connected named pipe.
@@ -196,10 +198,10 @@ fn verify_server_is_local_system(pipe: &NamedPipeClient) -> Result<()> {
     let process = OwnedHandle(process);
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: process is a valid process handle retained by OwnedHandle.
-    if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } == 0 {
+    if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &raw mut token) } == 0 {
         return Err(io::Error::last_os_error()).context("failed to inspect helper server token");
     }
-    let sid = token_user_sid(OwnedHandle(token))?;
+    let sid = token_user_sid(&OwnedHandle(token))?;
     if !sid.eq_ignore_ascii_case(LOCAL_SYSTEM_SID) {
         bail!("refusing a privileged helper not owned by LocalSystem");
     }
@@ -209,17 +211,17 @@ fn verify_server_is_local_system(pipe: &NamedPipeClient) -> Result<()> {
 pub(super) fn current_user_sid() -> Result<String> {
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo-handle valid for this call.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
         return Err(io::Error::last_os_error()).context("failed to open the current user token");
     }
-    token_user_sid(OwnedHandle(token))
+    token_user_sid(&OwnedHandle(token))
 }
 
-fn token_user_sid(token: OwnedHandle) -> Result<String> {
+fn token_user_sid(token: &OwnedHandle) -> Result<String> {
     let mut required = 0_u32;
     // SAFETY: the null probe is the documented way to obtain the buffer size.
     unsafe {
-        GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut required);
+        GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &raw mut required);
     }
     if required == 0 || required > 64 * 1024 {
         bail!("Windows token user data has an invalid size");
@@ -236,7 +238,7 @@ fn token_user_sid(token: OwnedHandle) -> Result<String> {
             TokenUser,
             buffer.as_mut_ptr().cast::<c_void>(),
             required,
-            &mut required,
+            &raw mut required,
         )
     } == 0
     {
@@ -253,7 +255,7 @@ fn sid_to_string(sid: PSID) -> Result<String> {
     }
     let mut string = ptr::null_mut();
     // SAFETY: sid originates from a validated Windows token/security descriptor.
-    if unsafe { ConvertSidToStringSidW(sid, &mut string) } == 0 || string.is_null() {
+    if unsafe { ConvertSidToStringSidW(sid, &raw mut string) } == 0 || string.is_null() {
         return Err(io::Error::last_os_error()).context("failed to format a Windows SID");
     }
     let mut length = 0_usize;
@@ -289,7 +291,7 @@ pub(super) fn require_elevated_administrator() -> Result<()> {
     let mut member = 0;
     // SAFETY: null token means the effective process token; sid is valid until
     // the call returns.
-    if unsafe { CheckTokenMembership(ptr::null_mut(), sid.0, &mut member) } == 0 {
+    if unsafe { CheckTokenMembership(ptr::null_mut(), sid.0, &raw mut member) } == 0 {
         return Err(io::Error::last_os_error()).context("failed to check administrator status");
     }
     if member == 0 {
@@ -361,7 +363,9 @@ fn reject_low_privilege_write_access(path: &Path) -> Result<()> {
         };
         let mut rights = 0_u32;
         // SAFETY: DACL and SID are owned for the complete query call.
-        let error = unsafe { GetEffectiveRightsFromAclW(security.dacl, &trustee, &mut rights) };
+        let error = unsafe {
+            GetEffectiveRightsFromAclW(security.dacl, &raw const trustee, &raw mut rights)
+        };
         if error != 0 {
             bail!("failed to verify admin executable path permissions");
         }
@@ -390,15 +394,15 @@ fn query_file_security(path: &Path) -> Result<FileSecurity> {
             wide_path.as_ptr(),
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
+            &raw mut owner,
             ptr::null_mut(),
-            &mut dacl,
+            &raw mut dacl,
             ptr::null_mut(),
-            &mut descriptor,
+            &raw mut descriptor,
         )
     };
     if error != 0 || descriptor.is_null() || owner.is_null() {
-        return Err(io::Error::from_raw_os_error(error as i32))
+        return Err(io::Error::from_raw_os_error(error.cast_signed()))
             .context("failed to read admin executable permissions");
     }
     Ok(FileSecurity {
@@ -412,7 +416,7 @@ fn allocated_sid(value: &str) -> Result<LocalSid> {
     let wide_value = wide(value);
     let mut sid: PSID = ptr::null_mut();
     // SAFETY: wide_value is NUL-terminated and sid is released by LocalSid.
-    if unsafe { ConvertStringSidToSidW(wide_value.as_ptr(), &mut sid) } == 0 || sid.is_null() {
+    if unsafe { ConvertStringSidToSidW(wide_value.as_ptr(), &raw mut sid) } == 0 || sid.is_null() {
         return Err(io::Error::last_os_error()).context("failed to parse a Windows SID");
     }
     Ok(LocalSid(sid))
@@ -423,9 +427,7 @@ fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
 }
 
 pub(super) fn system_root() -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+    std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from)
 }
 
 struct OwnedHandle(HANDLE);

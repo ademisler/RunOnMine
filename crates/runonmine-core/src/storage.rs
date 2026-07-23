@@ -503,6 +503,7 @@ fn restrict_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }

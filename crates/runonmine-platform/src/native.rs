@@ -13,6 +13,7 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 
+#[cfg(any(target_os = "macos", windows, test))]
 const MAX_SCRIPT_BYTES: usize = 256 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_ARGUMENTS: usize = 64;
@@ -55,6 +56,7 @@ pub fn dbus_available() -> bool {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(clippy::unused_async))]
 pub async fn run_applescript(
     script: &str,
     timeout: Duration,
@@ -178,6 +180,7 @@ pub async fn run_dbus_call(
     }
 }
 
+#[cfg(any(target_os = "macos", windows, test))]
 fn validate_script(script: &str) -> Result<()> {
     if script.is_empty() || script.len() > MAX_SCRIPT_BYTES || script.contains('\0') {
         bail!("platform script is outside the supported size limit");

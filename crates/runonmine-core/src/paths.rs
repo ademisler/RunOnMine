@@ -85,6 +85,7 @@ fn restrict_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn restrict_directory(_path: &Path) -> Result<()> {
     Ok(())
 }

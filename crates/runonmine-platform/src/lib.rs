@@ -210,6 +210,7 @@ impl LinuxSystemService {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(clippy::unused_self)]
     fn uninstall_linux(&self) -> Result<()> {
         require_root()?;
         let _ignored = Command::new("systemctl")
@@ -474,6 +475,7 @@ impl UserService {
     }
 
     pub fn status(&self) -> Result<ServiceStatus> {
+        #[cfg(not(windows))]
         let service_path = service_definition_path()?;
         #[cfg(target_os = "macos")]
         let output = Command::new("launchctl")
@@ -576,6 +578,7 @@ impl UserService {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(clippy::unused_self)]
     fn uninstall_linux(&self) -> Result<()> {
         let path = service_definition_path()?.context("systemd user path is unavailable")?;
         let _ignored = Command::new("systemctl")
@@ -611,6 +614,7 @@ impl UserService {
     }
 
     #[cfg(windows)]
+    #[allow(clippy::unused_self)]
     fn uninstall_windows(&self) -> Result<()> {
         command_success(
             Command::new("schtasks.exe").args(["/Delete", "/F", "/TN", "RunOnMine Agent"]),
@@ -619,6 +623,8 @@ impl UserService {
     }
 }
 
+#[cfg(not(windows))]
+#[allow(clippy::unnecessary_wraps)]
 fn service_definition_path() -> Result<Option<PathBuf>> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let base = BaseDirs::new().context("the operating system did not provide a home directory")?;
