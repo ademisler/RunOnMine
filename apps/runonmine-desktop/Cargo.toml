@@ -14,7 +14,7 @@ desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon"]
 anyhow.workspace = true
 eframe = { workspace = true, optional = true }
 egui = { workspace = true, optional = true }
-runonmine-core = { path = "../../crates/runonmine-core" }
+runonmine-core = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-core" }
 serde_json.workspace = true
 tray-icon = { workspace = true, optional = true }
 uuid.workspace = true

@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-runonmine-platform = { path = "../../crates/runonmine-platform" }
+runonmine-platform = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-platform" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

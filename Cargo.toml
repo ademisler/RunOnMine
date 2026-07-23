@@ -65,7 +65,7 @@ tempfile = "3.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 trash = "5.2"
-tray-icon = "0.24.1"
+tray-icon = { version = "0.24.1", default-features = false }
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 walkdir = "2.5"

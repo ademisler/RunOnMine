@@ -243,11 +243,9 @@ impl SystemPaths {
     #[allow(clippy::unnecessary_wraps)]
     fn discover() -> Result<Self> {
         let program_files = std::env::var_os("ProgramFiles")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+            .map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
         let program_data = std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
         Ok(Self {
             binary: program_files.join("RunOnMine/runonmine-helper.exe"),
             policy: program_data.join("RunOnMine/helper-policy.json"),

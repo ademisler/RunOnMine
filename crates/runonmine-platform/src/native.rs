@@ -55,6 +55,7 @@ pub fn dbus_available() -> bool {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(clippy::unused_async))]
 pub async fn run_applescript(
     script: &str,
     timeout: Duration,

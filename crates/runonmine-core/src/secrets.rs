@@ -220,14 +220,15 @@ impl SecretStore for EncryptedFileSecretStore {
     }
 }
 
-pub fn default_secret_store(_paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+pub fn default_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
     #[cfg(target_os = "linux")]
     {
         let desktop_secret_service = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
             || std::env::var_os("XDG_RUNTIME_DIR").is_some();
         if !desktop_secret_service {
             return Ok(Box::new(EncryptedFileSecretStore::from_environment(
-                _paths.state_dir.join("secrets.enc"),
+                paths.state_dir.join("secrets.enc"),
                 "dev.runonmine.agent",
             )?));
         }
@@ -254,6 +255,7 @@ fn restrict_secret_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn restrict_secret_file(_path: &Path) -> Result<()> {
     Ok(())
 }
