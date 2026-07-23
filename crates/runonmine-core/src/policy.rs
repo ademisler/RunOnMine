@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConnectorConfig;
+use crate::config::{ConnectorConfig, ConnectorKind};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +103,7 @@ pub enum DecisionSource {
     PackOverride,
     Preset,
     DefaultDeny,
+    RemoteSafetyCeiling,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -115,35 +116,70 @@ impl PolicyEngine {
         tool_name: &str,
         capability: Capability,
     ) -> PolicyDecision {
-        if let Some(mode) = connector.tool_overrides.get(tool_name) {
-            return PolicyDecision {
+        let decision = if let Some(mode) = connector.tool_overrides.get(tool_name) {
+            PolicyDecision {
                 mode: *mode,
                 source: DecisionSource::ToolOverride,
-            };
-        }
-        if let Some(mode) = connector.pack_overrides.get(&capability) {
-            return PolicyDecision {
+            }
+        } else if let Some(mode) = connector.pack_overrides.get(&capability) {
+            PolicyDecision {
                 mode: *mode,
                 source: DecisionSource::PackOverride,
-            };
-        }
-        if let Some(mode) = connector.policy_preset.modes().get(&capability) {
-            return PolicyDecision {
+            }
+        } else if let Some(mode) = connector.policy_preset.modes().get(&capability) {
+            PolicyDecision {
                 mode: *mode,
                 source: DecisionSource::Preset,
-            };
+            }
+        } else {
+            PolicyDecision {
+                mode: PolicyMode::Deny,
+                source: DecisionSource::DefaultDeny,
+            }
+        };
+        apply_remote_safety_ceiling(connector, capability, decision)
+    }
+}
+
+fn apply_remote_safety_ceiling(
+    connector: &ConnectorConfig,
+    capability: Capability,
+    decision: PolicyDecision,
+) -> PolicyDecision {
+    if !matches!(
+        connector.kind,
+        ConnectorKind::CloudflareQuick
+            | ConnectorKind::CloudflareOauth
+            | ConnectorKind::OpenAiTunnel
+    ) {
+        return decision;
+    }
+    let capped_mode = match capability {
+        Capability::AdminExec => PolicyMode::Deny,
+        Capability::FilesWrite
+        | Capability::ShellExec
+        | Capability::BrowserAct
+        | Capability::DesktopControl
+        | Capability::PlatformNative
+            if decision.mode == PolicyMode::Allow =>
+        {
+            PolicyMode::Ask
         }
-        PolicyDecision {
-            mode: PolicyMode::Deny,
-            source: DecisionSource::DefaultDeny,
-        }
+        _ => return decision,
+    };
+    if capped_mode == decision.mode {
+        return decision;
+    }
+    PolicyDecision {
+        mode: capped_mode,
+        source: DecisionSource::RemoteSafetyCeiling,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ConnectorConfig;
+    use crate::config::{ConnectorConfig, ConnectorKind};
 
     #[test]
     fn precedence_is_tool_then_pack_then_preset() {
@@ -169,6 +205,38 @@ mod tests {
             .tool_overrides
             .insert("shell_exec".to_owned(), PolicyMode::Deny);
         let decision = engine.evaluate(&connector, "shell_exec", Capability::ShellExec);
+        assert_eq!(decision.mode, PolicyMode::Deny);
+        assert_eq!(decision.source, DecisionSource::ToolOverride);
+    }
+
+    #[test]
+    fn remote_connectors_cannot_auto_allow_dangerous_capabilities() {
+        let mut connector = ConnectorConfig::local_default();
+        connector.kind = ConnectorKind::CloudflareQuick;
+        connector.cloudflare_quick = Some(crate::config::CloudflareQuickSettings::default());
+        connector.policy_preset = PolicyPreset::Full;
+        let shell = PolicyEngine.evaluate(&connector, "shell_exec", Capability::ShellExec);
+        assert_eq!(shell.mode, PolicyMode::Ask);
+        assert_eq!(shell.source, DecisionSource::RemoteSafetyCeiling);
+        let admin = PolicyEngine.evaluate(&connector, "admin_exec", Capability::AdminExec);
+        assert_eq!(admin.mode, PolicyMode::Deny);
+        assert_eq!(admin.source, DecisionSource::RemoteSafetyCeiling);
+    }
+
+    #[test]
+    fn remote_safety_ceiling_preserves_explicit_denials() {
+        let mut connector = ConnectorConfig::local_default();
+        connector.kind = ConnectorKind::OpenAiTunnel;
+        connector.openai_tunnel = Some(crate::config::OpenAiTunnelSettings {
+            tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".to_owned(),
+            profile: "test".to_owned(),
+            tunnel_client_path: None,
+            health_port: 47_823,
+        });
+        connector
+            .tool_overrides
+            .insert("shell_exec".to_owned(), PolicyMode::Deny);
+        let decision = PolicyEngine.evaluate(&connector, "shell_exec", Capability::ShellExec);
         assert_eq!(decision.mode, PolicyMode::Deny);
         assert_eq!(decision.source, DecisionSource::ToolOverride);
     }

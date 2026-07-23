@@ -30,6 +30,30 @@ The endpoint is treated as expert mode: every page, cookie, and account visible
 to that browser may be reachable through browser actions. Start a dedicated
 temporary browser profile whenever possible.
 
+## Network boundary
+
+By default, navigation rejects loopback, private, carrier-grade NAT, link-local,
+multicast, documentation, benchmark, reserved, and otherwise non-routable IP
+ranges. Hostnames are resolved before navigation and rejected when any returned
+address is non-public. Only `about:blank` is accepted from the `about:` scheme.
+
+Local development targets can be enabled explicitly:
+
+```console
+runonmine browser private-network allow
+```
+
+Disable the exception again with:
+
+```console
+runonmine browser private-network deny
+```
+
+Enabling this option allows browser actions to reach services on the machine and
+local network. It should not be enabled for an untrusted remote connector.
+Redirect-chain enforcement remains part of the pre-release acceptance review;
+do not treat the browser as a network sandbox.
+
 ## Output and policy
 
 Screenshots are encoded as complete JPEG images. When they exceed the MCP output

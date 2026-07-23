@@ -152,6 +152,8 @@ impl ConnectorConfig {
 pub struct BrowserConfig {
     pub profile_name: String,
     pub external_cdp_url: Option<Url>,
+    #[serde(default)]
+    pub allow_private_network: bool,
 }
 
 impl Default for BrowserConfig {
@@ -159,6 +161,7 @@ impl Default for BrowserConfig {
         Self {
             profile_name: "default".to_owned(),
             external_cdp_url: None,
+            allow_private_network: false,
         }
     }
 }

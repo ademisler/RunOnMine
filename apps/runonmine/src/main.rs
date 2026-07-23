@@ -18,6 +18,7 @@ use runonmine_core::{
     CloudflareQuickSettings, ConnectorConfig, ConnectorKind, OAuthOwnerSettings,
     OpenAiTunnelSettings, PolicyMode, PolicyPreset, StateStore,
 };
+use runonmine_oauth::SqliteOAuthStore;
 use runonmine_platform::{LinuxSystemService, UserService, current};
 use secrecy::{ExposeSecret, SecretString};
 use tracing_subscriber::EnvFilter;
@@ -71,6 +72,8 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Immediately stop access, revoke live sessions, and invalidate temporary credentials.
+    Lock(LockArgs),
     /// Remove the per-user service. User data is retained unless purge is explicit.
     Uninstall(UninstallArgs),
     Doctor,
@@ -213,6 +216,16 @@ enum BrowserCommand {
     Attach {
         loopback_cdp_url: Url,
     },
+    PrivateNetwork {
+        #[arg(value_enum)]
+        access: PrivateNetworkAccess,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum PrivateNetworkAccess {
+    Allow,
+    Deny,
 }
 
 #[derive(Debug, Subcommand)]
@@ -256,6 +269,13 @@ struct ServiceInstallArgs {
 #[derive(Clone, Copy, Debug, Args)]
 struct ServiceScopeArgs {
     /// Operate on the headless systemd service (Linux only).
+    #[arg(long)]
+    system: bool,
+}
+
+#[derive(Debug, Args)]
+struct LockArgs {
+    /// Stop the Linux system service instead of the current user's service.
     #[arg(long)]
     system: bool,
 }
@@ -374,6 +394,7 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Browser { command } => browser(command),
         Command::Admin { command } => admin(command),
         Command::Service { command } => service(command),
+        Command::Lock(args) => emergency_lock(&args),
         Command::Uninstall(args) => uninstall(&args),
         Command::Doctor => doctor().await,
         Command::Audit { command } => audit(command),
@@ -832,7 +853,10 @@ fn approvals(command: ApprovalCommand) -> Result<()> {
                     .insert(request.tool_name.clone(), PolicyMode::Allow);
                 config.save(&paths.config_file())?;
             }
-            println!("Approved {} ({decision:?}).", args.id);
+            println!(
+                "Approved {} ({decision:?}). Ten-minute grants apply only to the exact arguments shown.",
+                args.id
+            );
         }
         ApprovalCommand::Deny { id } => {
             if !store.resolve_approval(id, ApprovalDecision::Deny)? {
@@ -870,6 +894,17 @@ fn browser(command: BrowserCommand) -> Result<()> {
             println!(
                 "Configured expert CDP attachment. RunOnMine will not launch your daily profile."
             );
+        }
+        BrowserCommand::PrivateNetwork { access } => {
+            config.browser.allow_private_network = matches!(access, PrivateNetworkAccess::Allow);
+            config.save(&paths.config_file())?;
+            if config.browser.allow_private_network {
+                println!(
+                    "Private-network browser access enabled. Remote connectors can reach local services."
+                );
+            } else {
+                println!("Private-network browser access disabled.");
+            }
         }
     }
     Ok(())
@@ -920,6 +955,60 @@ fn service(command: ServiceCommand) -> Result<()> {
         }
     }
     println!("Service operation completed.");
+    Ok(())
+}
+
+fn emergency_lock(arguments: &LockArgs) -> Result<()> {
+    let paths = AppPaths::discover()?;
+    paths.ensure()?;
+
+    if arguments.system {
+        let service = LinuxSystemService::discover()?;
+        if service.status().is_ok_and(|status| status.running) {
+            service.stop()?;
+        }
+    } else {
+        let service = UserService::discover()?;
+        if service.status().is_ok_and(|status| status.running) {
+            service.stop()?;
+        }
+    }
+
+    let store = StateStore::open(&paths.state_db())?;
+    let (denied, temporary_grants) = store.emergency_lock()?;
+    let oauth = SqliteOAuthStore::open(&paths.state_db())?;
+    let revoked_tokens = oauth.emergency_revoke_all()?;
+
+    let config = AppConfig::load(&paths.config_file())?;
+    let secrets = default_secret_store(&paths)?;
+    let mut rotated_quick_tunnels = 0_usize;
+    let mut removed_openai_keys = 0_usize;
+    for connector in &config.connectors {
+        match connector.kind {
+            ConnectorKind::CloudflareQuick => {
+                secrets.set(
+                    &format!("connector.{}.path_secret", connector.id),
+                    &SecretString::from(generate_path_secret()),
+                )?;
+                rotated_quick_tunnels += 1;
+            }
+            ConnectorKind::OpenAiTunnel => {
+                secrets.delete(&format!("connector.{}.runtime_api_key", connector.id))?;
+                removed_openai_keys += 1;
+            }
+            ConnectorKind::LocalStdio
+            | ConnectorKind::LocalHttp
+            | ConnectorKind::CloudflareOauth => {}
+        }
+    }
+
+    println!("RunOnMine is locked.");
+    println!("Denied pending approvals: {denied}");
+    println!("Cleared temporary grants: {temporary_grants}");
+    println!("Revoked OAuth tokens: {revoked_tokens}");
+    println!("Rotated Quick Tunnel secrets: {rotated_quick_tunnels}");
+    println!("Removed OpenAI runtime keys: {removed_openai_keys}");
+    println!("Restart and reconnect explicitly when access should be restored.");
     Ok(())
 }
 

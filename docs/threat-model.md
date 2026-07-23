@@ -28,17 +28,18 @@ compromised.
 | Threat | Primary controls |
 | --- | --- |
 | An internet user discovers a tunnel endpoint | Quick paths contain 256 random bits; permanent connections use OAuth; invalid paths return 404 |
-| A confused-deputy or prompt-injection request invokes a destructive tool | deny/ask/allow policy, local-only approval, truthful destructive/open-world annotations |
+| A confused-deputy or prompt-injection request invokes a destructive tool | deny/ask/allow policy, argument-aware local-only approval, exact-hash temporary grants, remote safety ceiling, truthful destructive/open-world annotations |
 | A token asks for more authority than granted locally | OAuth scope is intersected with policy and never expands it |
 | A file path escapes a selected root | canonical root validation, component checks, symlink rejection, bounded operations |
-| Output or errors reveal credentials | generic remote errors, bounded output, structured redaction, no raw environment or stdin audit data |
+| Output or errors reveal credentials | generic remote errors, bounded output, approval redaction, cleared shell environment, no raw environment or stdin audit data |
 | A timed-out command leaves descendants running | Unix process groups and Windows Job Objects terminate the process tree |
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
-| Browser automation reaches an unrelated daily profile | isolated profile by default; expert attachment requires an explicit loopback CDP URL |
+| Browser automation reaches an unrelated daily profile or internal network | isolated profile by default; private-network destinations denied by default; expert attachment requires an explicit loopback CDP URL |
 | Audit rows are edited or reordered | BLAKE3 hash chain, retained chain anchor, startup and doctor verification |
 | A stale refresh token is replayed | one-time rotation and family-wide revocation on reuse |
-| Session identifiers cross connector boundaries | connector-bound session state, 30-minute idle expiry, concurrency and rate limits |
+| Session identifiers cross connector boundaries | connector-bound session state, 30-minute idle expiry, request body limit, concurrency and rate limits |
+| The owner needs to terminate access immediately | local emergency lock stops the service, rejects approvals, clears grants, revokes OAuth state, and invalidates temporary credentials |
 
 ## Privileged helper boundary
 
@@ -64,6 +65,9 @@ prevent a fully compromised user account from deleting the database and its
 anchor. A malicious process already running as the same user can also interact
 with user-accessible files and UI outside RunOnMine's control.
 
-Quick Tunnel with no authentication is a temporary development mode, not a
-substitute for OAuth. Unsigned beta packages provide checksums and SBOMs but no
-publisher identity, notarization, or code-signing guarantee.
+Quick Tunnel with no user identity is a temporary development mode, not a
+substitute for OAuth. Its secret path is a bearer credential and is rotated by
+the emergency lock. Browser destination validation occurs before navigation;
+redirect-chain enforcement is still an explicit pre-release limitation.
+Unsigned beta packages provide checksums and SBOMs but no publisher identity,
+notarization, or code-signing guarantee.

@@ -1,5 +1,6 @@
 //! Isolated browser-profile and CDP automation primitives.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -49,20 +50,22 @@ struct ActiveBrowser {
 pub struct BrowserSession {
     profile: BrowserProfile,
     headless: bool,
+    allow_private_network: bool,
     active: Mutex<Option<ActiveBrowser>>,
 }
 
 impl BrowserSession {
-    pub fn new(profile: BrowserProfile, headless: bool) -> Self {
+    pub fn new(profile: BrowserProfile, headless: bool, allow_private_network: bool) -> Self {
         Self {
             profile,
             headless,
+            allow_private_network,
             active: Mutex::new(None),
         }
     }
 
     pub async fn open(&self, url: &str) -> Result<String> {
-        validate_navigation_url(url)?;
+        validate_navigation_url(url, self.allow_private_network).await?;
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
         let page = active.browser.new_page(url).await?;
@@ -71,7 +74,7 @@ impl BrowserSession {
     }
 
     pub async fn navigate(&self, url: &str) -> Result<String> {
-        validate_navigation_url(url)?;
+        validate_navigation_url(url, self.allow_private_network).await?;
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
         active.page.goto(url).await?;
@@ -274,12 +277,77 @@ pub fn chromium_available() -> bool {
     })
 }
 
-fn validate_navigation_url(value: &str) -> Result<()> {
+async fn validate_navigation_url(value: &str, allow_private_network: bool) -> Result<()> {
     let url = Url::parse(value).context("invalid browser URL")?;
-    if !matches!(url.scheme(), "http" | "https" | "about") {
-        bail!("browser navigation only supports HTTP, HTTPS, and about URLs");
+    if url.scheme() == "about" {
+        if url.as_str() != "about:blank" {
+            bail!("only about:blank is permitted");
+        }
+        return Ok(());
+    }
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("browser navigation only supports HTTP, HTTPS, and about:blank URLs");
+    }
+    if allow_private_network {
+        return Ok(());
+    }
+    let host = url.host_str().context("browser URL has no host")?;
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        bail!("private-network browser navigation is disabled");
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        if is_non_public_address(address) {
+            bail!("private-network browser navigation is disabled");
+        }
+        return Ok(());
+    }
+    let port = url
+        .port_or_known_default()
+        .context("browser URL has no effective port")?;
+    let addresses = tokio::net::lookup_host((host, port))
+        .await
+        .context("browser host could not be resolved")?;
+    if addresses
+        .map(|address| address.ip())
+        .any(is_non_public_address)
+    {
+        bail!("browser host resolves to a private or non-routable address");
     }
     Ok(())
+}
+
+fn is_non_public_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_non_public_ipv4(address),
+        IpAddr::V6(address) => is_non_public_ipv6(address),
+    }
+}
+
+fn is_non_public_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
+    address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_multicast()
+        || address.is_broadcast()
+        || address.is_unspecified()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && matches!(b, 18 | 19))
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 240
+}
+
+fn is_non_public_ipv6(address: Ipv6Addr) -> bool {
+    address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || address.is_unique_local()
+        || address.is_unicast_link_local()
+        || address.to_ipv4_mapped().is_some_and(is_non_public_ipv4)
 }
 
 fn validate_selector(selector: &str) -> Result<()> {
@@ -300,9 +368,32 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn navigation_rejects_non_web_protocols() {
-        assert!(validate_navigation_url("file:///etc/passwd").is_err());
-        assert!(validate_navigation_url("https://example.com").is_ok());
+    #[tokio::test]
+    async fn navigation_rejects_non_web_protocols() {
+        assert!(
+            validate_navigation_url("file:///etc/passwd", false)
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_navigation_url("about:config", false)
+                .await
+                .is_err()
+        );
+        assert!(validate_navigation_url("about:blank", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn private_network_is_denied_unless_explicitly_enabled() {
+        for url in [
+            "http://127.0.0.1:3000",
+            "http://10.0.0.1",
+            "http://169.254.169.254",
+            "http://[::1]",
+            "http://localhost",
+        ] {
+            assert!(validate_navigation_url(url, false).await.is_err());
+            assert!(validate_navigation_url(url, true).await.is_ok());
+        }
     }
 }

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{AUTHORIZATION, HOST, WWW_AUTHENTICATE};
 use axum::http::uri::Authority;
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -70,9 +70,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex as AsyncMutex;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use url::Url;
 
 pub const SERVER_NAME: &str = "runonmine";
+const MCP_BODY_LIMIT: usize = 2 * 1_024 * 1_024;
+const MCP_CONCURRENCY_LIMIT: usize = 64;
 
 tokio::task_local! {
     static REQUEST_RUNTIME: Runtime;
@@ -411,6 +415,7 @@ impl RunOnMineServer {
         let browser = Arc::new(BrowserSession::new(
             browser_profile,
             browser_should_be_headless(),
+            app_config.browser.allow_private_network,
         ));
         let engine = PolicyEngine;
         let mut tool_router = Self::tool_router();
@@ -493,16 +498,16 @@ impl RunOnMineServer {
                 .runtime
                 .0
                 .store
-                .temporary_grant_allows(&connector.id, tool_name)
+                .temporary_grant_allows(&connector.id, tool_name, &argument_hash)
                 .unwrap_or(false)
         {
-            self.audit_with_hash(
+            self.audit_authorization_required(
                 tool_name,
                 capability,
                 AuditOutcome::Allowed,
                 &argument_hash,
                 summary,
-            );
+            )?;
             return Ok(());
         }
         if mode == PolicyMode::Deny {
@@ -524,7 +529,7 @@ impl RunOnMineServer {
         let approval = ApprovalRequest::new(
             &connector.id,
             tool_name,
-            summary,
+            approval_preview(tool_name, arguments),
             &argument_hash,
             Utc::now() + chrono_timeout,
         );
@@ -535,13 +540,20 @@ impl RunOnMineServer {
             .map_err(|_| {
                 McpError::internal_error("Could not create a local approval request", None)
             })?;
-        self.audit_with_hash(
+        if let Err(error) = self.audit_authorization_required(
             tool_name,
             capability,
             AuditOutcome::PendingApproval,
             &argument_hash,
             summary,
-        );
+        ) {
+            let _ignored = self
+                .runtime
+                .0
+                .store
+                .resolve_approval(approval.id, runonmine_core::ApprovalDecision::Deny);
+            return Err(error);
+        }
         let deadline = Instant::now() + self.runtime.0.approval_timeout;
         loop {
             if Instant::now() >= deadline {
@@ -557,13 +569,13 @@ impl RunOnMineServer {
                 .map_or(ApprovalStatus::Expired, |request| request.status);
             match status {
                 ApprovalStatus::Approved => {
-                    self.audit_with_hash(
+                    self.audit_authorization_required(
                         tool_name,
                         capability,
                         AuditOutcome::Allowed,
                         &argument_hash,
                         summary,
-                    );
+                    )?;
                     return Ok(());
                 }
                 ApprovalStatus::Denied => {
@@ -576,6 +588,38 @@ impl RunOnMineServer {
                     return Err(McpError::invalid_request("Local approval timed out", None));
                 }
                 ApprovalStatus::Pending => {}
+            }
+        }
+    }
+
+    fn audit_authorization_required(
+        &self,
+        tool_name: &str,
+        capability: Capability,
+        outcome: AuditOutcome,
+        argument_hash: &str,
+        summary: &str,
+    ) -> Result<(), McpError> {
+        let event = AuditEvent::new(
+            &self.runtime.0.connector_id,
+            tool_name,
+            capability_name(capability),
+            outcome,
+            argument_hash,
+            summary,
+        );
+        match self.runtime.0.store.append_audit(&event) {
+            Ok(_) => Ok(()),
+            Err(error) if capability_requires_reliable_audit(capability) => {
+                tracing::error!(%error, "refusing dangerous tool call because audit is unavailable");
+                Err(McpError::internal_error(
+                    "Local audit storage is unavailable; the tool call was blocked",
+                    None,
+                ))
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to append audit event");
+                Ok(())
             }
         }
     }
@@ -2074,6 +2118,9 @@ pub async fn serve_loopback() -> Result<()> {
     let mcp_router = Router::new()
         .route_service("/mcp", service.clone())
         .route_service("/{secret}/mcp", service)
+        .layer(DefaultBodyLimit::max(MCP_BODY_LIMIT))
+        .layer(RequestBodyLimitLayer::new(MCP_BODY_LIMIT))
+        .layer(ConcurrencyLimitLayer::new(MCP_CONCURRENCY_LIMIT))
         .layer(from_fn_with_state(
             Arc::clone(&connector_state),
             http_connector_auth,
@@ -2711,6 +2758,172 @@ async fn shutdown_signal() {
     let _result = tokio::signal::ctrl_c().await;
 }
 
+#[allow(clippy::too_many_lines)]
+fn approval_preview(tool_name: &str, arguments: &impl Serialize) -> String {
+    let value = serde_json::to_value(arguments).unwrap_or(serde_json::Value::Null);
+    let string = |name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let path = |name: &str| string(name);
+    let preview = match tool_name {
+        "fs_list" | "fs_read" | "fs_delete" => format!("Path: {}", path("path")),
+        "fs_search" => format!(
+            "Root: {}\nQuery: {}",
+            path("root"),
+            redact_preview_text(string("query"))
+        ),
+        "fs_write" => format!(
+            "Path: {}\nNew content: {} bytes\nPreview: {}",
+            path("path"),
+            string("content").len(),
+            redact_preview_text(string("content"))
+        ),
+        "fs_patch" => format!(
+            "Path: {}\nExpected replacements: {}\nReplace: {}\nWith: {}",
+            path("path"),
+            value
+                .get("expected_replacements")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1),
+            redact_preview_text(string("old_text")),
+            redact_preview_text(string("new_text"))
+        ),
+        "fs_move" => format!("From: {}\nTo: {}", path("from"), path("to")),
+        "shell_exec" => format!(
+            "Command: {}\nWorking directory: {}",
+            redact_preview_text(string("command")),
+            value
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("current directory")
+        ),
+        "admin_exec" => format!(
+            "Privileged program: {}\nArguments: {}",
+            path("program"),
+            redact_preview_text(
+                &value
+                    .get("args")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default()
+            )
+        ),
+        "desktop_focus_window" => format!("Window ID: {}", value["window_id"]),
+        "desktop_screenshot" => format!(
+            "Capture screenshot\nMonitor: {}\nWindow: {}",
+            value.get("monitor_id").unwrap_or(&serde_json::Value::Null),
+            value.get("window_id").unwrap_or(&serde_json::Value::Null)
+        ),
+        "desktop_click" => format!(
+            "Click at ({}, {}) with {} button",
+            value["x"],
+            value["y"],
+            string("button")
+        ),
+        "desktop_type" => format!(
+            "Type {} characters\nText: {}",
+            string("text").chars().count(),
+            redact_preview_text(string("text"))
+        ),
+        "desktop_key" | "browser_press" => format!("Key: {}", string("key")),
+        "macos_applescript" | "windows_powershell" => format!(
+            "Script ({} characters):\n{}",
+            string("script").chars().count(),
+            redact_preview_text(string("script"))
+        ),
+        "linux_dbus_call" => format!(
+            "D-Bus: {} {}.{} on {}",
+            string("destination"),
+            string("interface"),
+            string("method"),
+            string("object_path")
+        ),
+        "browser_open" | "browser_navigate" => format!("URL: {}", string("url")),
+        "browser_click" => format!("Selector: {}", string("selector")),
+        "browser_type" => format!(
+            "Selector: {}\nType {} characters\nText: {}",
+            string("selector"),
+            string("text").chars().count(),
+            redact_preview_text(string("text"))
+        ),
+        "browser_evaluate" => format!(
+            "JavaScript ({} characters):\n{}",
+            string("expression").chars().count(),
+            redact_preview_text(string("expression"))
+        ),
+        _ => tool_name.replace('_', " "),
+    };
+    truncate_preview(&preview, 1_500)
+}
+
+fn redact_preview_text(input: &str) -> String {
+    let mut output = truncate_preview(input, 1_024);
+    for marker in [
+        "authorization:",
+        "bearer ",
+        "token=",
+        "access_token=",
+        "refresh_token=",
+        "password=",
+        "passwd=",
+        "secret=",
+        "client_secret=",
+        "api_key=",
+        "apikey=",
+    ] {
+        let mut search_from = 0;
+        loop {
+            let lower = output.to_ascii_lowercase();
+            let Some(relative_start) = lower[search_from..].find(marker) else {
+                break;
+            };
+            let start = search_from + relative_start;
+            let value_start = start + marker.len();
+            let value_end = output[value_start..]
+                .find(|character: char| character.is_whitespace() || matches!(character, '&' | ';'))
+                .map_or(output.len(), |offset| value_start + offset);
+            if value_start >= value_end {
+                search_from = value_start;
+                continue;
+            }
+            if &output[value_start..value_end] != "[REDACTED]" {
+                output.replace_range(value_start..value_end, "[REDACTED]");
+            }
+            search_from = value_start + "[REDACTED]".len();
+        }
+    }
+    output
+}
+
+fn truncate_preview(value: &str, maximum_chars: usize) -> String {
+    let mut output = value.chars().take(maximum_chars).collect::<String>();
+    if value.chars().count() > maximum_chars {
+        output.push('…');
+    }
+    output
+}
+
+const fn capability_requires_reliable_audit(capability: Capability) -> bool {
+    matches!(
+        capability,
+        Capability::FilesWrite
+            | Capability::ShellExec
+            | Capability::BrowserAct
+            | Capability::DesktopControl
+            | Capability::PlatformNative
+            | Capability::AdminExec
+    )
+}
+
 fn argument_hash(value: &impl Serialize) -> String {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     blake3::hash(&bytes).to_hex().to_string()
@@ -2750,6 +2963,30 @@ mod tests {
         let hash = argument_hash(&json!({"token": "secret-value"}));
         assert_eq!(hash.len(), 64);
         assert!(!hash.contains("secret-value"));
+    }
+
+    #[test]
+    fn approval_preview_shows_target_and_redacts_common_secrets() {
+        let preview = approval_preview(
+            "shell_exec",
+            &json!({
+                "command": "curl -H 'Authorization: Bearer top-secret' 'https://example.com?token=abc123'",
+                "cwd": "/tmp/project",
+                "timeout_seconds": 30
+            }),
+        );
+        assert!(preview.contains("curl"));
+        assert!(preview.contains("/tmp/project"));
+        assert!(preview.contains("[REDACTED]"));
+        assert!(!preview.contains("top-secret"));
+        assert!(!preview.contains("abc123"));
+    }
+
+    #[test]
+    fn dangerous_capabilities_require_reliable_audit() {
+        assert!(capability_requires_reliable_audit(Capability::ShellExec));
+        assert!(capability_requires_reliable_audit(Capability::FilesWrite));
+        assert!(!capability_requires_reliable_audit(Capability::FilesRead));
     }
 
     #[test]
