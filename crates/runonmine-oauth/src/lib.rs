@@ -22,8 +22,8 @@ pub use metadata::{AuthorizationServerMetadata, ProtectedResourceMetadata};
 pub use model::{
     AccessGrant, AuthorizationCodeGrant, AuthorizationRequest, ConsentChallenge, ConsentDecision,
     ConsentResult, DynamicClientRequest, DynamicClientResponse, GitHubAuthorization,
-    GitHubCallback, IssuedToken, PendingAuthorization, PendingConsent, RegisteredClient,
-    RevocationRequest, TokenGrant, TokenPairDraft, TokenRequest,
+    GitHubCallback, IssuedToken, OAuthSession, PendingAuthorization, PendingConsent,
+    RegisteredClient, RevocationRequest, TokenGrant, TokenPairDraft, TokenRequest,
 };
 pub use scope::{Scope, ScopeSet};
 pub use service::{OAuthService, OAuthServiceConfig};

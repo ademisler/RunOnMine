@@ -4,15 +4,20 @@ RunOnMine launches Chromium with a dedicated user-data directory below its own
 data directory. It does not copy cookies, saved passwords, extensions, or other
 state from the user's daily profile.
 
-Browser objects are separated by connector and MCP session. One AI conversation
-cannot silently reuse another session's in-memory page object. Closing an MCP
-session releases its browser session, while persistent profile data remains in
-the explicitly named RunOnMine profile.
-
-Create the default isolated profile with:
+The default mode is ephemeral: browser objects and profile data are separated by
+connector and MCP session, and the random session directory is removed when the
+session closes. Create a persistent RunOnMine-only profile explicitly when login
+state must survive:
 
 ```console
-runonmine browser profile create
+runonmine browser profile create --name work
+```
+
+Return to disposable profiles or remove an unused persistent profile with:
+
+```console
+runonmine browser profile ephemeral --name default
+runonmine browser profile delete work
 ```
 
 ## Expert CDP attachment
@@ -25,8 +30,8 @@ explicitly with:
 runonmine browser attach http://127.0.0.1:<port>
 ```
 
-HTTP and WebSocket CDP URLs must resolve to `localhost`, `127.0.0.1`, or `::1`.
-The endpoint is treated as expert mode: every page, cookie, and account visible
+HTTP and WebSocket CDP URLs must use `localhost`, `127.0.0.1`, or `::1`.
+External CDP is unavailable to remote connectors. The endpoint is treated as expert mode: every page, cookie, and account visible
 to that browser may be reachable through browser actions. Start a dedicated
 temporary browser profile whenever possible.
 
@@ -49,16 +54,18 @@ Disable the exception again with:
 runonmine browser private-network deny
 ```
 
-Enabling this option allows browser actions to reach services on the machine and
-local network. It should not be enabled for an untrusted remote connector.
-Redirect-chain enforcement remains part of the pre-release acceptance review;
-do not treat the browser as a network sandbox.
+Enabling this option allows local connector browser actions to reach services on
+the machine and local network. Remote Cloudflare and OpenAI connectors remain
+blocked even when the local option is enabled. CDP Fetch interception validates
+navigations, redirects, and subresources before they are continued. This reduces
+SSRF exposure but does not make an authenticated browser session harmless.
 
 ## Output and policy
 
-Screenshots are encoded as complete JPEG images. When they exceed the MCP output
-budget, RunOnMine reduces quality and dimensions; it never truncates encoded
-bytes into an invalid image.
+Screenshots are encoded as complete JPEG images and rejected when they exceed
+the configured MCP output budget; encoded image bytes are never truncated.
+Page text, HTML snapshots, JavaScript input, and serialized evaluation results
+also have explicit byte limits.
 
 Navigation, click, type, key press, evaluation, open, and close operations use
 the `browser_act` capability. URL, text, snapshot, screenshot, and profile

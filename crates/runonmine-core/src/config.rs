@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ use crate::atomic;
 use crate::policy::{Capability, PolicyMode, PolicyPreset};
 use crate::{CONFIG_VERSION, DEFAULT_PORT};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorKind {
     LocalStdio,
@@ -134,7 +134,7 @@ impl ConnectorConfig {
             id: Uuid::new_v4().to_string(),
             name: "Local loopback HTTP".to_owned(),
             kind: ConnectorKind::LocalHttp,
-            enabled: true,
+            enabled: false,
             policy_preset: PolicyPreset::Safe,
             pack_overrides: BTreeMap::new(),
             tool_overrides: BTreeMap::new(),
@@ -147,10 +147,20 @@ impl ConnectorConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserProfileMode {
+    #[default]
+    Ephemeral,
+    Persistent,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserConfig {
     pub profile_name: String,
+    #[serde(default)]
+    pub profile_mode: BrowserProfileMode,
     pub external_cdp_url: Option<Url>,
     #[serde(default)]
     pub allow_private_network: bool,
@@ -160,6 +170,7 @@ impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
             profile_name: "default".to_owned(),
+            profile_mode: BrowserProfileMode::Ephemeral,
             external_cdp_url: None,
             allow_private_network: false,
         }
@@ -271,97 +282,13 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.version != CONFIG_VERSION {
-            bail!("unsupported config version: {}", self.version);
-        }
-        if self.bind_host != "127.0.0.1" {
-            bail!(
-                "RunOnMine HTTP must bind to 127.0.0.1; got {}",
-                self.bind_host
-            );
-        }
-        if self.port == 45_799 {
-            bail!("port 45799 is reserved for the existing MacMCP installation");
-        }
-        if self.port == 0 {
-            bail!("RunOnMine agent port must be non-zero");
-        }
-        if self.limits.session_idle_minutes == 0
-            || self.limits.max_sessions == 0
-            || self.limits.calls_per_minute == 0
-            || self.limits.max_sessions > 1_024
-            || self.limits.calls_per_minute > 100_000
-            || self.limits.approval_timeout_seconds == 0
-            || self.limits.approval_timeout_seconds > 3_600
-            || self.limits.max_output_bytes == 0
-            || self.limits.max_output_bytes > 64 * 1_024 * 1_024
-            || self.limits.default_process_timeout_seconds == 0
-            || self.limits.default_process_timeout_seconds > self.limits.max_process_timeout_seconds
-        {
-            bail!("configured limits are invalid or exceed safe bounds");
-        }
+        validate_app_endpoint(self)?;
+        validate_limits(&self.limits)?;
+        validate_browser(&self.browser)?;
         if self.allowed_roots.len() > 256 {
             bail!("too many selected filesystem roots");
         }
-        for connector in &self.connectors {
-            if connector.id.is_empty()
-                || connector.id.len() > 128
-                || !connector
-                    .id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-                || connector.name.trim().is_empty()
-                || connector.name.len() > 100
-                || connector.name.chars().any(char::is_control)
-            {
-                bail!("connector id or name is invalid");
-            }
-            validate_connector_settings(connector, self.port)?;
-        }
-        let mut auxiliary_ports = std::collections::BTreeSet::new();
-        for port in self
-            .connectors
-            .iter()
-            .filter(|connector| connector.enabled)
-            .filter_map(|connector| {
-                connector
-                    .cloudflare_quick
-                    .as_ref()
-                    .map(|settings| settings.metrics_port)
-                    .or_else(|| {
-                        connector
-                            .cloudflare_named
-                            .as_ref()
-                            .map(|settings| settings.metrics_port)
-                    })
-                    .or_else(|| {
-                        connector
-                            .openai_tunnel
-                            .as_ref()
-                            .map(|settings| settings.health_port)
-                    })
-            })
-        {
-            if !auxiliary_ports.insert(port) {
-                bail!("enabled connectors must use distinct auxiliary ports");
-            }
-        }
-        for kind in [
-            ConnectorKind::LocalHttp,
-            ConnectorKind::CloudflareQuick,
-            ConnectorKind::CloudflareOauth,
-        ] {
-            if self
-                .connectors
-                .iter()
-                .filter(|connector| connector.enabled && connector.kind == kind)
-                .count()
-                > 1
-            {
-                bail!("only one enabled {kind:?} connector is supported");
-            }
-        }
-        Ok(())
+        validate_connectors(&self.connectors, self.port)
     }
 
     pub fn connector(&self, id: &str) -> Option<&ConnectorConfig> {
@@ -373,6 +300,146 @@ impl AppConfig {
             .iter_mut()
             .find(|connector| connector.id == id)
     }
+}
+
+fn validate_app_endpoint(config: &AppConfig) -> Result<()> {
+    if config.version != CONFIG_VERSION {
+        bail!("unsupported config version: {}", config.version);
+    }
+    if config.bind_host != "127.0.0.1" {
+        bail!(
+            "RunOnMine HTTP must bind to 127.0.0.1; got {}",
+            config.bind_host
+        );
+    }
+    if config.port == 45_799 {
+        bail!("port 45799 is reserved for the existing MacMCP installation");
+    }
+    if config.port == 0 {
+        bail!("RunOnMine agent port must be non-zero");
+    }
+    Ok(())
+}
+
+fn validate_limits(limits: &LimitsConfig) -> Result<()> {
+    if limits.session_idle_minutes == 0
+        || limits.session_idle_minutes > 24 * 60
+        || limits.max_sessions == 0
+        || limits.calls_per_minute == 0
+        || limits.max_sessions > 1_024
+        || limits.calls_per_minute > 100_000
+        || limits.approval_timeout_seconds == 0
+        || limits.approval_timeout_seconds > 3_600
+        || limits.max_output_bytes == 0
+        || limits.max_output_bytes > 64 * 1_024 * 1_024
+        || limits.default_process_timeout_seconds == 0
+        || limits.default_process_timeout_seconds > limits.max_process_timeout_seconds
+    {
+        bail!("configured limits are invalid or exceed safe bounds");
+    }
+    Ok(())
+}
+
+fn validate_browser(browser: &BrowserConfig) -> Result<()> {
+    if browser.profile_name.is_empty()
+        || browser.profile_name.len() > 64
+        || !browser
+            .profile_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("browser profile name is invalid");
+    }
+    if let Some(endpoint) = &browser.external_cdp_url {
+        let host = endpoint.host_str().unwrap_or_default();
+        if !matches!(endpoint.scheme(), "http" | "https" | "ws" | "wss")
+            || !matches!(host, "127.0.0.1" | "::1" | "localhost")
+        {
+            bail!("external browser CDP endpoint must use loopback HTTP or WebSocket transport");
+        }
+    }
+    Ok(())
+}
+
+fn validate_connectors(connectors: &[ConnectorConfig], agent_port: u16) -> Result<()> {
+    if connectors.len() > 64 {
+        bail!("too many configured connectors");
+    }
+    let mut connector_ids = BTreeSet::new();
+    for connector in connectors {
+        validate_connector_identity(connector)?;
+        if !connector_ids.insert(connector.id.as_str()) {
+            bail!("connector ids must be unique");
+        }
+        validate_connector_settings(connector, agent_port)?;
+    }
+    validate_connector_ports(connectors)?;
+    validate_singleton_connectors(connectors)
+}
+
+fn validate_connector_identity(connector: &ConnectorConfig) -> Result<()> {
+    if connector.id.is_empty()
+        || connector.id.len() > 128
+        || !connector
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || connector.name.trim().is_empty()
+        || connector.name.len() > 100
+        || connector.name.chars().any(char::is_control)
+    {
+        bail!("connector id or name is invalid");
+    }
+    Ok(())
+}
+
+fn validate_connector_ports(connectors: &[ConnectorConfig]) -> Result<()> {
+    let mut auxiliary_ports = BTreeSet::new();
+    for port in connectors
+        .iter()
+        .filter(|connector| connector.enabled)
+        .filter_map(|connector| {
+            connector
+                .cloudflare_quick
+                .as_ref()
+                .map(|settings| settings.metrics_port)
+                .or_else(|| {
+                    connector
+                        .cloudflare_named
+                        .as_ref()
+                        .map(|settings| settings.metrics_port)
+                })
+                .or_else(|| {
+                    connector
+                        .openai_tunnel
+                        .as_ref()
+                        .map(|settings| settings.health_port)
+                })
+        })
+    {
+        if !auxiliary_ports.insert(port) {
+            bail!("enabled connectors must use distinct auxiliary ports");
+        }
+    }
+    Ok(())
+}
+
+fn validate_singleton_connectors(connectors: &[ConnectorConfig]) -> Result<()> {
+    for kind in [
+        ConnectorKind::LocalHttp,
+        ConnectorKind::CloudflareQuick,
+        ConnectorKind::CloudflareOauth,
+    ] {
+        if connectors
+            .iter()
+            .filter(|connector| connector.enabled && connector.kind == kind)
+            .count()
+            > 1
+        {
+            bail!("only one enabled {kind:?} connector is supported");
+        }
+    }
+    Ok(())
 }
 
 fn validate_connector_settings(connector: &ConnectorConfig, agent_port: u16) -> Result<()> {
@@ -560,5 +627,36 @@ mod tests {
         assert_eq!(loaded.port, DEFAULT_PORT);
         assert_eq!(loaded.default_preset, PolicyPreset::Safe);
         Ok(())
+    }
+    #[test]
+    fn local_http_is_disabled_by_default() -> Result<()> {
+        let config = AppConfig::default();
+        let local_http = config
+            .connectors
+            .iter()
+            .find(|connector| connector.kind == ConnectorKind::LocalHttp)
+            .context("default local HTTP connector is missing")?;
+        assert!(!local_http.enabled);
+        assert_eq!(config.browser.profile_mode, BrowserProfileMode::Ephemeral);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_connector_ids_are_rejected() {
+        let mut config = AppConfig::default();
+        let duplicate = config.connectors[0].clone();
+        config.connectors.push(duplicate);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_browser_profile_and_remote_cdp_are_rejected() {
+        let mut config = AppConfig::default();
+        config.browser.profile_name = "../escape".to_owned();
+        assert!(config.validate().is_err());
+
+        let mut config = AppConfig::default();
+        config.browser.external_cdp_url = Url::parse("http://example.com:9222").ok();
+        assert!(config.validate().is_err());
     }
 }

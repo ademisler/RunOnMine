@@ -21,7 +21,7 @@ presented to its owner. There is no supported production release yet.
 
 Implemented connection modes:
 
-- local stdio and loopback MCP Streamable HTTP;
+- local stdio and opt-in, bearer-authenticated loopback MCP Streamable HTTP;
 - Cloudflare Quick Tunnel with a rotating 256-bit secret path for temporary use;
 - Cloudflare Named Tunnel with an embedded OAuth 2.1 server and GitHub owner login;
 - OpenAI Secure MCP Tunnel through the official external `tunnel-client`.
@@ -33,7 +33,7 @@ connect outward to the loopback listener at `127.0.0.1:47821`.
 
 - `runonmine`: setup, connectors, policy, approvals, services, audit, and diagnostics;
 - `runonmine-agent`: MCP server and connector supervisor;
-- `runonmine-desktop`: tray menu, settings, and local approvals;
+- `runonmine-desktop`: local security control center for approvals, connectors, roots, policies, OAuth, audit, and diagnostics;
 - `runonmine-helper`: optional, separately installed privileged helper.
 
 The helper is absent by default. Normal setup and user-service installation do
@@ -47,17 +47,29 @@ runonmine policy show
 runonmine agent run
 ```
 
-In another local MCP client, use:
+In another local MCP client, use stdio:
 
 ```console
 runonmine mcp stdio --connector <connector-id>
 ```
 
+Loopback HTTP is disabled by default. Enable it explicitly and store the token
+printed once by the command:
+
+```console
+runonmine connect local-http enable
+runonmine agent run
+```
+
+Every request to `http://127.0.0.1:47821/mcp` must include
+`Authorization: Bearer <token>`. Rotate or disable it with
+`runonmine connect local-http rotate` and `runonmine connect local-http disable`.
+
 Use `runonmine ui` for approvals, or approve locally from another terminal with
 `runonmine approvals list` and `runonmine approvals approve <id> --once`.
 Approvals cannot be granted through MCP. Approval prompts show the concrete
 command, path, URL, selector, or script target after local secret redaction.
-A ten-minute approval applies only to the exact argument hash that was reviewed.
+Ten-minute and persistent approvals apply only to the exact connector, tool, and argument hash that was reviewed.
 
 Immediately stop the service, reject queued approvals, revoke OAuth sessions,
 and invalidate temporary connector credentials with:
@@ -74,9 +86,10 @@ runonmine lock
   administrator execution remains denied.
 - Denied tools are omitted from MCP discovery and rejected if called directly.
 - File operations are restricted to explicitly selected canonical roots.
-- The default browser profile is isolated from the user's daily browser profile,
-  and private, loopback, link-local, and non-routable network targets are denied
-  unless the owner explicitly enables private-network browser access.
+- The default browser profile is disposable and isolated from the user's daily
+  browser profile. Redirects and subresources are intercepted; private,
+  loopback, link-local, and non-routable targets are denied. Private-network
+  access is a local-connector-only opt-in and remains blocked for remote connectors.
 - Secrets use the operating-system credential store, with an explicit encrypted
   headless Linux fallback.
 - Audit records contain argument summaries and hashes rather than raw command,
@@ -99,6 +112,7 @@ Requirements:
 
 ```console
 cargo fmt --all --check
+cargo run --locked -p xtask -- verify-versions
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 ```

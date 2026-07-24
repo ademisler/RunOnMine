@@ -158,14 +158,24 @@ pub struct AccessGrant {
     pub expires_at: DateTime<Utc>,
 }
 
-#[doc(hidden)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RegisteredClient {
     pub client_id: String,
     pub client_name: String,
     pub redirect_uris: Vec<Url>,
     pub scopes: ScopeSet,
     pub issued_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuthSession {
+    pub family_id: Uuid,
+    pub client_id: String,
+    pub subject: String,
+    pub scopes: ScopeSet,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub active: bool,
 }
 
 #[doc(hidden)]

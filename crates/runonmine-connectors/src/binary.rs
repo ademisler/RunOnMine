@@ -71,6 +71,16 @@ impl BinaryDiscovery {
         }
     }
 
+    pub fn discover_managed(&self, kind: BinaryKind) -> Result<Option<InstalledBinary>> {
+        for directory in &self.managed_directories {
+            let candidate = directory.join(kind.executable_name());
+            if candidate.exists() {
+                return InstalledBinary::from_verified_path(kind, &candidate).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
     /// Discovers a binary in strict priority order: explicit path, `RunOnMine`'s
     /// managed directories, then the current process `PATH`.
     pub fn discover(

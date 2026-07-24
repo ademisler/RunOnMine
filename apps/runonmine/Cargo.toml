@@ -14,13 +14,14 @@ desktop-control = ["runonmine-mcp/desktop-control"]
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
+chrono.workspace = true
 rand.workspace = true
 rpassword.workspace = true
-runonmine-core = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-core" }
-runonmine-connectors = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-connectors" }
-runonmine-mcp = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-mcp", default-features = false }
-runonmine-oauth = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-oauth" }
-runonmine-platform = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-platform" }
+runonmine-core.workspace = true
+runonmine-connectors.workspace = true
+runonmine-mcp.workspace = true
+runonmine-oauth.workspace = true
+runonmine-platform.workspace = true
 secrecy.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

@@ -14,12 +14,20 @@ target used by OpenAI Secure MCP Tunnel.
 
 ## Loopback Streamable HTTP
 
+Loopback HTTP is disabled by default and is not treated as an identity boundary.
+Enable it explicitly:
+
 ```console
+runonmine connect local-http enable
 runonmine agent run
 ```
 
-The agent listens on `127.0.0.1:47821`. Configuration rejects public bind
-addresses and reserves port `45799` for the existing MacMCP installation.
+The enable command creates a 256-bit bearer token in the operating-system
+credential store and prints it once. Every `/mcp` request must send
+`Authorization: Bearer <token>`. Use `local-http rotate`, `local-http status`, or
+`local-http disable` to manage access. The agent listens on `127.0.0.1:47821`;
+configuration rejects public bind addresses and reserves port `45799` for the
+existing MacMCP installation.
 
 ## Cloudflare Quick Tunnel
 
@@ -59,7 +67,7 @@ stored in SQLite. The GitHub client secret and hashing key remain in the
 platform credential store.
 
 The public hostname, Cloudflare tunnel ID, credentials file, GitHub OAuth client
-ID, and expected GitHub owner are required. The CLI prompts for secrets rather
+ID, expected GitHub owner login, and immutable positive GitHub numeric owner ID are required. The CLI prompts for secrets rather
 than accepting them in command-line arguments.
 
 ## OpenAI Secure MCP Tunnel
@@ -78,7 +86,19 @@ and Developer Mode access. RunOnMine does not claim or bypass those permissions.
 
 ## External binary policy
 
-`cloudflared` downloads resolve through the official GitHub release, require an
-HTTPS URL on an allowed host, verify the release checksum, reject archive path
-traversal, and install by atomic replacement. `tunnel-client` is discovered as
-an external official dependency and is never reimplemented inside RunOnMine.
+Managed `cloudflared` and `tunnel-client` downloads resolve through official
+GitHub releases, require HTTPS URLs on allowlisted hosts, verify release digests,
+reject archive path traversal, and install by atomic replacement. RunOnMine
+persists a private installation receipt and re-verifies the executable path and
+SHA-256 digest whenever the managed binary is loaded. Explicit user-supplied
+absolute paths remain an advanced local trust decision; PATH fallback is not used.
+
+Connector lifecycle commands are available without editing configuration files:
+
+```console
+runonmine connect list
+runonmine connect show <id>
+runonmine connect enable <id>
+runonmine connect disable <id>
+runonmine connect remove <id> --confirm REMOVE
+```

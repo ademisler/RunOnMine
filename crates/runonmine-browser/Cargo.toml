@@ -10,7 +10,7 @@ repository.workspace = true
 anyhow.workspace = true
 chromiumoxide.workspace = true
 futures.workspace = true
-runonmine-core = { version = "=0.1.0-beta.1", path = "../runonmine-core" }
+runonmine-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -17,13 +17,20 @@ members = [
 [workspace.package]
 version = "0.1.0-beta.1"
 edition = "2024"
-rust-version = "1.95"  # documented minimum; toolchain file pins stable
+rust-version = "1.95"  # rust-toolchain.toml pins 1.95.0
 license = "Apache-2.0"
 repository = "https://github.com/ademisler/RunOnMine"
 homepage = "https://github.com/ademisler/RunOnMine"
 authors = ["RunOnMine contributors"]
 
 [workspace.dependencies]
+runonmine-browser = { version = "=0.1.0-beta.1", path = "crates/runonmine-browser" }
+runonmine-connectors = { version = "=0.1.0-beta.1", path = "crates/runonmine-connectors" }
+runonmine-core = { version = "=0.1.0-beta.1", path = "crates/runonmine-core" }
+runonmine-mcp = { version = "=0.1.0-beta.1", path = "crates/runonmine-mcp", default-features = false }
+runonmine-oauth = { version = "=0.1.0-beta.1", path = "crates/runonmine-oauth" }
+runonmine-platform = { version = "=0.1.0-beta.1", path = "crates/runonmine-platform" }
+
 anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.8.9", features = ["form", "http1", "json", "tokio"] }

@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use walkdir::WalkDir;
@@ -18,6 +19,20 @@ pub struct DirectoryEntry {
     pub path: PathBuf,
     pub kind: String,
     pub bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DirectoryListing {
+    pub entries: Vec<DirectoryEntry>,
+    pub offset: usize,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SearchResults {
+    pub matches: Vec<PathBuf>,
+    pub visited: usize,
+    pub truncated: bool,
 }
 
 impl ScopedFilesystem {
@@ -60,33 +75,58 @@ impl ScopedFilesystem {
     }
 
     pub fn list(&self, path: &Path) -> Result<Vec<DirectoryEntry>> {
+        Ok(self.list_limited(path, 0, usize::MAX)?.entries)
+    }
+
+    pub fn list_limited(
+        &self,
+        path: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<DirectoryListing> {
+        if limit == 0 {
+            bail!("directory listing limit must be greater than zero");
+        }
         let resolved = self.resolve_existing(path)?;
         if !resolved.is_dir() {
             bail!("not a directory: {}", resolved.display());
         }
-        let mut entries = fs::read_dir(&resolved)?
-            .map(|entry| {
-                let entry = entry?;
-                let metadata = entry.metadata()?;
-                let kind = if metadata.is_dir() {
-                    "directory"
-                } else if metadata.is_file() {
-                    "file"
-                } else if metadata.file_type().is_symlink() {
-                    "symlink"
-                } else {
-                    "other"
-                };
-                Ok(DirectoryEntry {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    path: entry.path(),
-                    kind: kind.to_owned(),
-                    bytes: metadata.is_file().then_some(metadata.len()),
-                })
-            })
-            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut entries = Vec::with_capacity(limit.min(1_024));
+        let mut truncated = false;
+        for entry in fs::read_dir(&resolved)?.skip(offset) {
+            let entry = entry?;
+            if entries.len() >= limit {
+                truncated = true;
+                break;
+            }
+            let file_type = entry.file_type()?;
+            let metadata = if file_type.is_symlink() {
+                fs::symlink_metadata(entry.path())?
+            } else {
+                entry.metadata()?
+            };
+            let kind = if file_type.is_symlink() {
+                "symlink"
+            } else if file_type.is_dir() {
+                "directory"
+            } else if file_type.is_file() {
+                "file"
+            } else {
+                "other"
+            };
+            entries.push(DirectoryEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path(),
+                kind: kind.to_owned(),
+                bytes: file_type.is_file().then_some(metadata.len()),
+            });
+        }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(entries)
+        Ok(DirectoryListing {
+            entries,
+            offset,
+            truncated,
+        })
     }
 
     pub fn read_text(&self, path: &Path, max_bytes: usize) -> Result<(String, bool)> {
@@ -121,19 +161,48 @@ impl ScopedFilesystem {
 
     pub fn write_atomic(&self, path: &Path, contents: &[u8]) -> Result<PathBuf> {
         let resolved = self.resolve_for_write(path)?;
-        atomic::write(&resolved, contents, 0o600)?;
+        let unix_mode = existing_unix_mode(&resolved)?.unwrap_or(0o600);
+        atomic::write(&resolved, contents, unix_mode)?;
         Ok(resolved)
     }
 
     pub fn search_names(&self, root: &Path, pattern: &str, limit: usize) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .search_names_bounded(root, pattern, limit, 32, 100_000, Duration::from_secs(5))?
+            .matches)
+    }
+
+    pub fn search_names_bounded(
+        &self,
+        root: &Path,
+        pattern: &str,
+        limit: usize,
+        max_depth: usize,
+        max_nodes: usize,
+        max_duration: Duration,
+    ) -> Result<SearchResults> {
+        if pattern.is_empty() || pattern.len() > 4_096 {
+            bail!("search pattern is empty or too large");
+        }
+        if limit == 0 || max_depth == 0 || max_nodes == 0 || max_duration.is_zero() {
+            bail!("search limits must be greater than zero");
+        }
         let resolved = self.resolve_existing(root)?;
         let needle = pattern.to_lowercase();
-        let mut matches = Vec::new();
+        let started = Instant::now();
+        let mut matches = Vec::with_capacity(limit.min(1_000));
+        let mut visited = 0_usize;
+        let mut truncated = false;
         for entry in WalkDir::new(resolved)
             .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
+            .max_depth(max_depth)
         {
+            if visited >= max_nodes || started.elapsed() >= max_duration {
+                truncated = true;
+                break;
+            }
+            let entry = entry?;
+            visited = visited.saturating_add(1);
             if entry
                 .file_name()
                 .to_string_lossy()
@@ -142,11 +211,16 @@ impl ScopedFilesystem {
             {
                 matches.push(entry.path().to_path_buf());
                 if matches.len() >= limit {
+                    truncated = true;
                     break;
                 }
             }
         }
-        Ok(matches)
+        Ok(SearchResults {
+            matches,
+            visited,
+            truncated,
+        })
     }
 
     pub fn move_path(&self, from: &Path, to: &Path) -> Result<()> {
@@ -171,6 +245,35 @@ impl ScopedFilesystem {
             return Ok(());
         }
         bail!("path is outside the configured roots")
+    }
+}
+
+#[cfg(unix)]
+fn existing_unix_mode(path: &Path) -> Result<Option<u32>> {
+    use std::os::unix::fs::PermissionsExt;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("write target must be a regular non-symlink file");
+            }
+            Ok(Some(metadata.permissions().mode() & 0o777))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn existing_unix_mode(path: &Path) -> Result<Option<u32>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("write target must be a regular non-symlink file");
+            }
+            Ok(Some(0o600))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -241,6 +344,39 @@ mod tests {
         symlink(&outside_file, &link)?;
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
         assert!(scoped.resolve_existing(&link).is_err());
+        Ok(())
+    }
+    #[test]
+    fn directory_listing_and_search_are_bounded() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for index in 0..6 {
+            fs::write(root.path().join(format!("match-{index}.txt")), "data")?;
+        }
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let listing = scoped.list_limited(root.path(), 0, 2)?;
+        assert_eq!(listing.entries.len(), 2);
+        assert!(listing.truncated);
+
+        let search =
+            scoped.search_names_bounded(root.path(), "match", 2, 4, 100, Duration::from_secs(1))?;
+        assert_eq!(search.matches.len(), 2);
+        assert!(search.truncated);
+        assert!(search.visited >= 2);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_overwrite_preserves_existing_mode() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("script.sh");
+        fs::write(&target, "old")?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o750))?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        scoped.write_atomic(&target, b"new")?;
+        assert_eq!(fs::metadata(&target)?.permissions().mode() & 0o777, 0o750);
         Ok(())
     }
 }

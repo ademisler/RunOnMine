@@ -153,6 +153,26 @@ impl Sha256Digest {
     fn matches(&self, actual: &[u8; 32]) -> bool {
         bool::from(self.0.ct_eq(actual))
     }
+
+    pub fn verify_file(&self, path: &Path) -> Result<bool> {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("verified binary must be a regular non-symlink file");
+        }
+        let mut file = File::open(path)?;
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0_u8; 64 * 1_024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        let actual: [u8; 32] = digest.finalize().into();
+        Ok(self.matches(&actual))
+    }
 }
 
 impl fmt::Debug for Sha256Digest {
@@ -854,6 +874,37 @@ mod tests {
         }));
         assert!(installer.install(&artifact, &destination).await.is_err());
         assert!(!destination.exists());
+        Ok(())
+    }
+    #[test]
+    fn persisted_digest_detects_binary_tampering() -> Result<()> {
+        let directory = tempdir()?;
+        let binary = directory.path().join("managed-binary");
+        let original = b"trusted bytes";
+        fs::write(&binary, original)?;
+        let digest =
+            Sha256Digest::parse(&format!("sha256:{}", hex::encode(Sha256::digest(original))))?;
+        assert!(digest.verify_file(&binary)?);
+        fs::write(&binary, b"tampered bytes")?;
+        assert!(!digest.verify_file(&binary)?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_digest_rejects_symlinked_binary() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir()?;
+        let target = directory.path().join("target");
+        fs::write(&target, b"trusted bytes")?;
+        let link = directory.path().join("link");
+        symlink(&target, &link)?;
+        let digest = Sha256Digest::parse(&format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(b"trusted bytes"))
+        ))?;
+        assert!(digest.verify_file(&link).is_err());
         Ok(())
     }
 }
