@@ -18,7 +18,7 @@ env:
 
 jobs:
   format:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, runonmine]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -31,7 +31,7 @@ jobs:
       - run: cargo fmt --all --check
 
   test-headless-linux:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, runonmine]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

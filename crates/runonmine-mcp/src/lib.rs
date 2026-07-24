@@ -557,6 +557,13 @@ impl RunOnMineServer {
         let deadline = Instant::now() + self.runtime.0.approval_timeout;
         loop {
             if Instant::now() >= deadline {
+                self.audit_authorization_required(
+                    tool_name,
+                    capability,
+                    AuditOutcome::Denied,
+                    &argument_hash,
+                    "local approval timed out",
+                )?;
                 return Err(McpError::invalid_request("Local approval timed out", None));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -579,12 +586,26 @@ impl RunOnMineServer {
                     return Ok(());
                 }
                 ApprovalStatus::Denied => {
+                    self.audit_authorization_required(
+                        tool_name,
+                        capability,
+                        AuditOutcome::Denied,
+                        &argument_hash,
+                        "denied by the machine owner",
+                    )?;
                     return Err(McpError::invalid_request(
                         "Denied by the machine owner",
                         None,
                     ));
                 }
                 ApprovalStatus::Expired => {
+                    self.audit_authorization_required(
+                        tool_name,
+                        capability,
+                        AuditOutcome::Denied,
+                        &argument_hash,
+                        "local approval expired",
+                    )?;
                     return Err(McpError::invalid_request("Local approval timed out", None));
                 }
                 ApprovalStatus::Pending => {}
