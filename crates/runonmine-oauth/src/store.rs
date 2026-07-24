@@ -15,6 +15,7 @@ use crate::model::{
 use crate::{ScopeSet, SecretHash, StoreError};
 
 pub trait OAuthStore: Send + Sync {
+    fn registered_client_count(&self) -> Result<usize, StoreError>;
     fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError>;
     fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError>;
     fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError>;
@@ -148,9 +149,47 @@ impl SqliteOAuthStore {
              CREATE INDEX IF NOT EXISTS oauth_tokens_expiry_idx
                 ON oauth_tokens(expires_at);",
         )?;
-        Ok(Self {
+        let store = Self {
             connection: Mutex::new(connection),
-        })
+        };
+        store.cleanup_expired(Utc::now())?;
+        Ok(store)
+    }
+
+    /// Revoke every active token and remove incomplete authorization flows.
+    pub fn emergency_revoke_all(&self) -> Result<usize, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM oauth_authorizations", [])?;
+        transaction.execute("DELETE FROM oauth_consents", [])?;
+        transaction.execute("DELETE FROM oauth_codes", [])?;
+        let revoked = transaction.execute(
+            "UPDATE oauth_tokens SET status = 'revoked' WHERE status = 'active'",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(revoked)
+    }
+
+    /// Remove expired OAuth state without deleting live refresh-token reuse
+    /// evidence before its natural expiry.
+    pub fn cleanup_expired(&self, now: DateTime<Utc>) -> Result<usize, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let mut removed = 0;
+        for table in [
+            "oauth_authorizations",
+            "oauth_consents",
+            "oauth_codes",
+            "oauth_tokens",
+        ] {
+            removed += transaction.execute(
+                &format!("DELETE FROM {table} WHERE expires_at <= ?1"),
+                [now.timestamp()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(removed)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
@@ -161,6 +200,15 @@ impl SqliteOAuthStore {
 }
 
 impl OAuthStore for SqliteOAuthStore {
+    fn registered_client_count(&self) -> Result<usize, StoreError> {
+        let count = self
+            .lock()?
+            .query_row("SELECT COUNT(*) FROM oauth_clients", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        usize::try_from(count).map_err(|_| StoreError::Corrupt("invalid OAuth client count"))
+    }
+
     fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError> {
         let redirects = serde_json::to_string(&client.redirect_uris)
             .map_err(|_| StoreError::Corrupt("client redirect URI serialization failed"))?;
@@ -615,4 +663,76 @@ fn restrict_database_file(path: &Path) -> Result<(), StoreError> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emergency_revoke_removes_pending_flows_and_revokes_tokens() -> Result<(), StoreError> {
+        let store = SqliteOAuthStore::in_memory()?;
+        let now = Utc::now().timestamp();
+        let connection = store.lock()?;
+        connection.execute(
+            "INSERT INTO oauth_clients
+             (client_id, client_name, redirect_uris, scopes, issued_at)
+             VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
+            [now],
+        )?;
+        connection.execute(
+            "INSERT INTO oauth_tokens
+             (token_hash, token_kind, family_id, client_id, subject, scopes,
+              issued_at, expires_at, status)
+             VALUES (?1, 'access', ?2, 'client', 'owner', 'machine:read', ?3, ?4, 'active')",
+            params![vec![7_u8; 32], Uuid::new_v4().to_string(), now, now + 3_600],
+        )?;
+        drop(connection);
+
+        assert_eq!(store.emergency_revoke_all()?, 1);
+        let status: String =
+            store
+                .lock()?
+                .query_row("SELECT status FROM oauth_tokens LIMIT 1", [], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(status, "revoked");
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_removes_only_expired_records() -> Result<(), StoreError> {
+        let store = SqliteOAuthStore::in_memory()?;
+        let now = Utc::now();
+        let connection = store.lock()?;
+        connection.execute(
+            "INSERT INTO oauth_clients
+             (client_id, client_name, redirect_uris, scopes, issued_at)
+             VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
+            [now.timestamp()],
+        )?;
+        for (hash, expiry) in [(vec![1_u8; 32], -1_i64), (vec![2_u8; 32], 3_600_i64)] {
+            connection.execute(
+                "INSERT INTO oauth_tokens
+                 (token_hash, token_kind, family_id, client_id, subject, scopes,
+                  issued_at, expires_at, status)
+                 VALUES (?1, 'access', ?2, 'client', 'owner', 'machine:read', ?3, ?4, 'active')",
+                params![
+                    hash,
+                    Uuid::new_v4().to_string(),
+                    now.timestamp(),
+                    now.timestamp() + expiry
+                ],
+            )?;
+        }
+        drop(connection);
+
+        assert_eq!(store.cleanup_expired(now)?, 1);
+        let remaining: i64 =
+            store
+                .lock()?
+                .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |row| row.get(0))?;
+        assert_eq!(remaining, 1);
+        Ok(())
+    }
 }

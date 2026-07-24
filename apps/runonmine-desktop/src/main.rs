@@ -37,6 +37,7 @@ mod desktop {
         error: Option<String>,
         tray: Option<TrayIcon>,
         open_menu_id: Option<MenuId>,
+        lock_menu_id: Option<MenuId>,
         quit_menu_id: Option<MenuId>,
     }
 
@@ -53,6 +54,7 @@ mod desktop {
                 error: None,
                 tray: None,
                 open_menu_id: None,
+                lock_menu_id: None,
                 quit_menu_id: None,
             };
             if let Err(error) = app.initialize() {
@@ -78,8 +80,12 @@ mod desktop {
         fn create_tray(&mut self) {
             let menu = Menu::new();
             let open = MenuItem::new("Open RunOnMine", true, None);
+            let lock = MenuItem::new("Lock RunOnMine", true, None);
             let quit = MenuItem::new("Quit", true, None);
-            if menu.append(&open).is_err() || menu.append(&quit).is_err() {
+            if menu.append(&open).is_err()
+                || menu.append(&lock).is_err()
+                || menu.append(&quit).is_err()
+            {
                 return;
             }
             let Ok(icon) = app_icon() else {
@@ -94,6 +100,7 @@ mod desktop {
                 return;
             };
             self.open_menu_id = Some(open.id().clone());
+            self.lock_menu_id = Some(lock.id().clone());
             self.quit_menu_id = Some(quit.id().clone());
             self.tray = Some(tray);
         }
@@ -145,9 +152,40 @@ mod desktop {
             self.refresh()
         }
 
-        fn process_menu(&self, context: &egui::Context) {
+        fn emergency_lock(&mut self) -> Result<()> {
+            let current = std::env::current_exe().context("Could not locate RunOnMine Desktop")?;
+            let directory = current
+                .parent()
+                .context("RunOnMine Desktop has no installation directory")?;
+            let cli = if cfg!(windows) {
+                directory.join("runonmine.exe")
+            } else {
+                directory.join("runonmine")
+            };
+            if !cli.is_file() {
+                anyhow::bail!("RunOnMine CLI is not installed beside the desktop application");
+            }
+            let status = std::process::Command::new(cli).arg("lock").status()?;
+            if !status.success() {
+                anyhow::bail!("RunOnMine could not be locked");
+            }
+            self.refresh()?;
+            "Locked — restart explicitly to restore access".clone_into(&mut self.status);
+            if let Some(tray) = &self.tray {
+                let _result = tray.set_tooltip(Some("RunOnMine — locked"));
+            }
+            Ok(())
+        }
+
+        fn process_menu(&mut self, context: &egui::Context) {
             while let Ok(event) = MenuEvent::receiver().try_recv() {
                 if self.open_menu_id.as_ref() == Some(&event.id) {
+                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                } else if self.lock_menu_id.as_ref() == Some(&event.id) {
+                    if let Err(error) = self.emergency_lock() {
+                        self.error = Some(error.to_string());
+                    }
                     context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     context.send_viewport_cmd(egui::ViewportCommand::Focus);
                 } else if self.quit_menu_id.as_ref() == Some(&event.id) {
@@ -170,11 +208,23 @@ mod desktop {
 
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+                let mut lock_requested = false;
                 ui.horizontal(|ui| {
                     ui.heading("RunOnMine");
                     ui.separator();
                     ui.label(&self.status);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Lock all access").clicked() {
+                            lock_requested = true;
+                        }
+                    });
                 });
+                if lock_requested {
+                    match self.emergency_lock() {
+                        Ok(()) => self.error = None,
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                }
                 ui.separator();
                 ui.add_space(8.0);
                 ui.heading("Local approvals");
@@ -208,10 +258,13 @@ mod desktop {
                                 if ui.button("Allow once").clicked() {
                                     action = Some((request.id, ApprovalDecision::Once));
                                 }
-                                if ui.button("Allow for 10 minutes").clicked() {
+                                if ui
+                                    .button("Allow this exact action for 10 minutes")
+                                    .clicked()
+                                {
                                     action = Some((request.id, ApprovalDecision::ForTenMinutes));
                                 }
-                                if ui.button("Always allow this tool").clicked() {
+                                if ui.button("Always allow this tool (unsafe)").clicked() {
                                     action = Some((request.id, ApprovalDecision::Always));
                                 }
                                 if ui.button("Deny").clicked() {

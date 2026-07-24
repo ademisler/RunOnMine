@@ -38,9 +38,11 @@ pub async fn execute_shell(request: &ProcessRequest) -> Result<ProcessResult> {
     let mut command = Command::new(program);
     command
         .args(args)
+        .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    configure_safe_environment(&mut command);
     if let Some(cwd) = &request.cwd {
         command.current_dir(cwd);
     }
@@ -112,6 +114,34 @@ pub async fn execute_shell(request: &ProcessRequest) -> Result<ProcessResult> {
     })
 }
 
+fn configure_safe_environment(command: &mut Command) {
+    #[cfg(windows)]
+    command.env("PATH", r"C:\Windows\System32;C:\Windows");
+    #[cfg(target_os = "macos")]
+    command.env(
+        "PATH",
+        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    );
+    #[cfg(all(unix, not(target_os = "macos")))]
+    command.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+
+    command.env("LANG", "C.UTF-8");
+    command.env("LC_ALL", "C.UTF-8");
+    for name in [
+        "HOME",
+        "USERPROFILE",
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
 fn shell_command(command: &str) -> (&'static str, Vec<&str>) {
     #[cfg(windows)]
     {
@@ -145,6 +175,47 @@ mod tests {
         .await?;
         assert_eq!(result.stdout, "hello");
         assert_eq!(result.exit_code, Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_inherit_unapproved_environment_variables() -> Result<()> {
+        let allowed = [
+            "HOME",
+            "USERPROFILE",
+            "SystemRoot",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "PATH",
+            "LANG",
+            "LC_ALL",
+        ];
+        let (variable_name, _) = std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value)))
+            .map(|(name, value)| (name, value.to_string_lossy().into_owned()))
+            .find(|(name, value)| {
+                !value.is_empty()
+                    && !allowed.contains(&name.as_str())
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+            .context("test process has no non-allowlisted environment variable")?;
+        #[cfg(windows)]
+        let command =
+            format!("if ($env:{variable_name}) {{ $env:{variable_name} }} else {{ 'missing' }}");
+        #[cfg(not(windows))]
+        let command = format!(r#"printf %s "${{{variable_name}-missing}}""#);
+        let result = execute_shell(&ProcessRequest {
+            command,
+            cwd: None,
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 1_024,
+        })
+        .await?;
+        assert_eq!(result.stdout.trim(), "missing");
         Ok(())
     }
 

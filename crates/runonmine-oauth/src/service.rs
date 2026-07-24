@@ -1,6 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, Utc};
 use secrecy::{ExposeSecret, SecretString};
@@ -25,6 +26,9 @@ const REFRESH_TOKEN_TTL: Duration = Duration::days(30);
 const AUTHORIZATION_TRANSACTION_TTL: Duration = Duration::minutes(10);
 const CONSENT_TTL: Duration = Duration::minutes(5);
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
+const REGISTRATION_WINDOW: StdDuration = StdDuration::from_mins(1);
+const REGISTRATIONS_PER_WINDOW: usize = 20;
+const MAX_REGISTERED_CLIENTS: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct OAuthServiceConfig {
@@ -59,6 +63,7 @@ pub struct OAuthService {
     store: Arc<dyn OAuthStore>,
     hasher: TokenHasher,
     github: Arc<dyn GitHubOwnerVerifier>,
+    registration_attempts: Mutex<VecDeque<Instant>>,
 }
 
 impl std::fmt::Debug for OAuthService {
@@ -69,6 +74,7 @@ impl std::fmt::Debug for OAuthService {
             .field("store", &"dyn OAuthStore")
             .field("hasher", &self.hasher)
             .field("github", &"dyn GitHubOwnerVerifier")
+            .field("registration_attempts", &"rate limited")
             .finish()
     }
 }
@@ -86,6 +92,7 @@ impl OAuthService {
             store,
             hasher,
             github,
+            registration_attempts: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -113,6 +120,7 @@ impl OAuthService {
         &self,
         request: DynamicClientRequest,
     ) -> Result<DynamicClientResponse, OAuthError> {
+        self.check_registration_limits()?;
         if request.redirect_uris.is_empty() || request.redirect_uris.len() > 16 {
             return Err(OAuthError::invalid_request());
         }
@@ -187,6 +195,33 @@ impl OAuthService {
             response_types: vec!["code"],
             scope: scopes.to_space_delimited(),
         })
+    }
+
+    fn check_registration_limits(&self) -> Result<(), OAuthError> {
+        if self
+            .store
+            .registered_client_count()
+            .map_err(map_store_server_error)?
+            >= MAX_REGISTERED_CLIENTS
+        {
+            return Err(OAuthError::temporarily_unavailable());
+        }
+        let mut attempts = self
+            .registration_attempts
+            .lock()
+            .map_err(|_| OAuthError::temporarily_unavailable())?;
+        let now = Instant::now();
+        while attempts
+            .front()
+            .is_some_and(|attempt| now.duration_since(*attempt) >= REGISTRATION_WINDOW)
+        {
+            attempts.pop_front();
+        }
+        if attempts.len() >= REGISTRATIONS_PER_WINDOW {
+            return Err(OAuthError::temporarily_unavailable());
+        }
+        attempts.push_back(now);
+        Ok(())
     }
 
     pub fn begin_authorization(
@@ -695,6 +730,20 @@ mod tests {
             scope: None,
         });
         assert!(reused.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_registration_is_rate_limited() -> Result<(), OAuthError> {
+        let service = service()?;
+        for _ in 0..REGISTRATIONS_PER_WINDOW {
+            register(&service)?;
+        }
+        let result = register(&service);
+        assert!(matches!(
+            result,
+            Err(error) if error.code == crate::OAuthErrorCode::TemporarilyUnavailable
+        ));
         Ok(())
     }
 

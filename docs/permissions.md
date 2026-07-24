@@ -1,11 +1,17 @@
 # Permissions
 
-Every connector resolves a tool in this order:
+Every connector first resolves a tool in this order:
 
 1. connector tool override;
 2. connector capability override;
 3. selected preset;
 4. deny.
+
+A final safety ceiling is then applied to internet-facing Cloudflare and OpenAI
+connectors. File writes, user shell, browser actions, desktop control, and
+platform-native scripting can never resolve above `ask`; administrator execution
+always resolves to `deny`. Local stdio and loopback connectors retain the
+configured result.
 
 `deny` removes the tool from discovery and rejects direct calls. `ask` creates a
 local approval request for up to 90 seconds. `allow` runs the tool without a
@@ -30,9 +36,15 @@ when the separate helper is installed, allowlisted administrator execution.
 
 ## Local approvals
 
-An approval may apply once, to the same connector and tool for ten minutes, or
-permanently as a tool override. Permanent access can be removed with policy
+An approval may apply once, to the exact connector, tool, and argument hash for
+ten minutes, or permanently as a tool override. The approval screen displays a
+bounded local preview of the concrete command, path, URL, selector, or script.
+Common token, password, authorization-header, and API-key forms are redacted
+before storage and display. Permanent access can be removed with policy
 commands. MCP clients cannot list, grant, or deny approvals.
+
+For an internet-facing connector, a permanent override still cannot bypass the
+remote safety ceiling. Dangerous calls continue to require local approval.
 
 ```console
 runonmine approvals list
@@ -59,3 +71,16 @@ escapes. `fs_delete` uses the operating-system trash by default.
 to the agent's user account. `admin_exec` is not a root shell: the helper accepts
 only explicitly installed, hash-pinned absolute program paths. Program
 arguments can still be security-sensitive and must be reviewed before approval.
+
+
+## Emergency lock
+
+Use `runonmine lock` or **Lock all access** in the desktop application to stop the
+current user service, deny pending approvals, clear temporary grants, revoke
+active OAuth tokens, delete incomplete OAuth authorization flows, rotate Quick
+Tunnel path secrets, and remove stored OpenAI runtime keys. On a Linux system
+service use `runonmine lock --system`.
+
+The lock does not delete user configuration. Restoring access requires an
+explicit service restart and, where credentials were invalidated, an explicit
+connector reconnection.

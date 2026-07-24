@@ -101,9 +101,11 @@ impl StateStore {
         )?;
         if changed == 1 && decision == ApprovalDecision::ForTenMinutes {
             transaction.execute(
-                "INSERT INTO temporary_grants (connector_id, tool_name, expires_at)
-                 SELECT connector_id, tool_name, ?1 FROM approvals WHERE id = ?2
-                 ON CONFLICT(connector_id, tool_name)
+                "INSERT INTO temporary_grants
+                    (connector_id, tool_name, argument_hash, expires_at)
+                 SELECT connector_id, tool_name, argument_hash, ?1
+                 FROM approvals WHERE id = ?2
+                 ON CONFLICT(connector_id, tool_name, argument_hash)
                  DO UPDATE SET expires_at = excluded.expires_at",
                 params![
                     (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
@@ -115,7 +117,12 @@ impl StateStore {
         Ok(changed == 1)
     }
 
-    pub fn temporary_grant_allows(&self, connector_id: &str, tool_name: &str) -> Result<bool> {
+    pub fn temporary_grant_allows(
+        &self,
+        connector_id: &str,
+        tool_name: &str,
+        argument_hash: &str,
+    ) -> Result<bool> {
         let connection = self.lock()?;
         connection.execute(
             "DELETE FROM temporary_grants WHERE expires_at <= ?1",
@@ -124,8 +131,14 @@ impl StateStore {
         let exists = connection
             .query_row(
                 "SELECT 1 FROM temporary_grants
-                 WHERE connector_id = ?1 AND tool_name = ?2 AND expires_at > ?3",
-                params![connector_id, tool_name, Utc::now().to_rfc3339()],
+                 WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3
+                   AND expires_at > ?4",
+                params![
+                    connector_id,
+                    tool_name,
+                    argument_hash,
+                    Utc::now().to_rfc3339()
+                ],
                 |_| Ok(()),
             )
             .optional()?
@@ -159,6 +172,25 @@ impl StateStore {
         let rows = statement.query_map([], map_approval)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Deny all pending approvals and remove every temporary grant.
+    ///
+    /// This is used by the local emergency lock after the agent service has
+    /// been stopped, so no queued request can survive a later restart.
+    pub fn emergency_lock(&self) -> Result<(usize, usize)> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let denied = transaction.execute(
+            "UPDATE approvals
+             SET status = 'denied', resolved_at = ?1, decision = 'deny'
+             WHERE status = 'pending'",
+            [&now],
+        )?;
+        let cleared = transaction.execute("DELETE FROM temporary_grants", [])?;
+        transaction.commit()?;
+        Ok((denied, cleared))
     }
 
     pub fn append_audit(&self, event: &AuditEvent) -> Result<String> {
@@ -292,6 +324,17 @@ fn configure_connection(connection: &Connection) -> Result<()> {
 }
 
 fn migrate(connection: &Connection) -> Result<()> {
+    let temporary_grants_has_argument_hash = connection
+        .prepare("PRAGMA table_info(temporary_grants)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|column| column == "argument_hash");
+    if !temporary_grants_has_argument_hash {
+        // Temporary grants are intentionally ephemeral. Dropping the legacy
+        // tool-wide table prevents an old broad grant from surviving upgrade.
+        connection.execute("DROP TABLE IF EXISTS temporary_grants", [])?;
+    }
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS approvals (
             id TEXT PRIMARY KEY,
@@ -310,8 +353,9 @@ fn migrate(connection: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS temporary_grants (
             connector_id TEXT NOT NULL,
             tool_name TEXT NOT NULL,
+            argument_hash TEXT NOT NULL,
             expires_at TEXT NOT NULL,
-            PRIMARY KEY (connector_id, tool_name)
+            PRIMARY KEY (connector_id, tool_name, argument_hash)
         );
         CREATE INDEX IF NOT EXISTS temporary_grants_expiry_idx
             ON temporary_grants(expires_at);
@@ -547,8 +591,41 @@ mod tests {
         );
         store.insert_approval(&approval)?;
         assert!(store.resolve_approval(approval.id, ApprovalDecision::ForTenMinutes)?);
-        assert!(store.temporary_grant_allows("local", "shell_exec")?);
-        assert!(!store.temporary_grant_allows("local", "fs_write")?);
+        assert!(store.temporary_grant_allows("local", "shell_exec", "hash")?);
+        assert!(!store.temporary_grant_allows("local", "shell_exec", "different-hash")?);
+        assert!(!store.temporary_grant_allows("local", "fs_write", "hash")?);
+        Ok(())
+    }
+
+    #[test]
+    fn emergency_lock_denies_pending_and_clears_temporary_grants() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let approved = ApprovalRequest::new(
+            "local",
+            "shell_exec",
+            "run a command",
+            "approved-hash",
+            Utc::now() + Duration::seconds(90),
+        );
+        store.insert_approval(&approved)?;
+        assert!(store.resolve_approval(approved.id, ApprovalDecision::ForTenMinutes)?);
+        let pending = ApprovalRequest::new(
+            "local",
+            "fs_write",
+            "write a file",
+            "pending-hash",
+            Utc::now() + Duration::seconds(90),
+        );
+        store.insert_approval(&pending)?;
+
+        let (denied, cleared) = store.emergency_lock()?;
+        assert_eq!(denied, 1);
+        assert_eq!(cleared, 1);
+        assert_eq!(
+            store.approval_status(pending.id)?.map(|item| item.status),
+            Some(ApprovalStatus::Denied)
+        );
+        assert!(!store.temporary_grant_allows("local", "shell_exec", "approved-hash")?);
         Ok(())
     }
 

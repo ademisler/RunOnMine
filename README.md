@@ -55,21 +55,36 @@ runonmine mcp stdio --connector <connector-id>
 
 Use `runonmine ui` for approvals, or approve locally from another terminal with
 `runonmine approvals list` and `runonmine approvals approve <id> --once`.
-Approvals cannot be granted through MCP.
+Approvals cannot be granted through MCP. Approval prompts show the concrete
+command, path, URL, selector, or script target after local secret redaction.
+A ten-minute approval applies only to the exact argument hash that was reviewed.
+
+Immediately stop the service, reject queued approvals, revoke OAuth sessions,
+and invalidate temporary connector credentials with:
+
+```console
+runonmine lock
+```
 
 ## Security model
 
 - Connector policy resolves as tool override, capability override, preset, then deny.
+- Internet-facing connectors have a non-bypassable safety ceiling: destructive
+  capabilities can require local approval but cannot be configured to auto-run;
+  administrator execution remains denied.
 - Denied tools are omitted from MCP discovery and rejected if called directly.
 - File operations are restricted to explicitly selected canonical roots.
-- The default browser profile is isolated from the user's daily browser profile.
+- The default browser profile is isolated from the user's daily browser profile,
+  and private, loopback, link-local, and non-routable network targets are denied
+  unless the owner explicitly enables private-network browser access.
 - Secrets use the operating-system credential store, with an explicit encrypted
   headless Linux fallback.
 - Audit records contain argument summaries and hashes rather than raw command,
   token, cookie, or stdin contents.
 - Audit records form a tamper-evident chain and retain 30 days or 100 MiB by default.
 - Shell execution is not a sandbox; when allowed, it has the full authority of
-  the account running the agent.
+  the account running the agent, but starts from a cleared environment so agent
+  secrets are not inherited automatically.
 
 Read [permissions](docs/permissions.md), the [threat model](docs/threat-model.md),
 and [browser security](docs/browser-security.md) before enabling write or

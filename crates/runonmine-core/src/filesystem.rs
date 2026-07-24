@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -89,11 +90,32 @@ impl ScopedFilesystem {
     }
 
     pub fn read_text(&self, path: &Path, max_bytes: usize) -> Result<(String, bool)> {
+        if max_bytes == 0 {
+            bail!("read limit must be greater than zero");
+        }
         let resolved = self.resolve_existing(path)?;
-        let bytes = fs::read(&resolved)?;
-        let truncated = bytes.len() > max_bytes;
-        let slice = &bytes[..bytes.len().min(max_bytes)];
-        let text = String::from_utf8(slice.to_vec()).context("file is not valid UTF-8")?;
+        let metadata = fs::metadata(&resolved)?;
+        if !metadata.is_file() {
+            bail!("path is not a regular file: {}", resolved.display());
+        }
+        let mut file = fs::File::open(&resolved)?;
+        if !file.metadata()?.is_file() {
+            bail!("path changed before it could be read safely");
+        }
+
+        let capture_limit = u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+        let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1_024).saturating_add(1));
+        file.by_ref().take(capture_limit).read_to_end(&mut bytes)?;
+        let truncated = bytes.len() > max_bytes || metadata.len() > max_bytes as u64;
+        bytes.truncate(max_bytes);
+
+        let valid_length = match std::str::from_utf8(&bytes) {
+            Ok(_) => bytes.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => bail!("file is not valid UTF-8"),
+        };
+        bytes.truncate(valid_length);
+        let text = String::from_utf8(bytes).context("file is not valid UTF-8")?;
         Ok((text, truncated))
     }
 
@@ -172,6 +194,38 @@ mod tests {
         let target = root.path().join("hello.txt");
         scoped.write_atomic(&target, b"hello")?;
         assert_eq!(fs::read_to_string(target)?, "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_non_regular_paths() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        assert!(scoped.read_text(root.path(), 1_024).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reads_only_the_configured_prefix() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let target = root.path().join("large.txt");
+        fs::write(&target, "x".repeat(32 * 1_024))?;
+        let (content, truncated) = scoped.read_text(&target, 1_024)?;
+        assert_eq!(content.len(), 1_024);
+        assert!(truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_utf8_boundaries_when_truncated() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let target = root.path().join("utf8.txt");
+        fs::write(&target, "abcé")?;
+        let (content, truncated) = scoped.read_text(&target, 4)?;
+        assert_eq!(content, "abc");
+        assert!(truncated);
         Ok(())
     }
 
