@@ -9,10 +9,12 @@ use uuid::Uuid;
 
 use crate::crypto::verify_pkce;
 use crate::model::{
-    AccessGrant, AuthorizationCodeGrant, PendingAuthorization, PendingConsent, RegisteredClient,
-    TokenGrant, TokenPairDraft,
+    AccessGrant, AuthorizationCodeGrant, OAuthSession, PendingAuthorization, PendingConsent,
+    RegisteredClient, TokenGrant, TokenPairDraft,
 };
 use crate::{ScopeSet, SecretHash, StoreError};
+
+const OAUTH_SCHEMA_VERSION: i64 = 1;
 
 pub trait OAuthStore: Send + Sync {
     fn registered_client_count(&self) -> Result<usize, StoreError>;
@@ -96,7 +98,26 @@ impl SqliteOAuthStore {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS oauth_clients (
+             CREATE TABLE IF NOT EXISTS schema_versions (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL CHECK (version >= 0)
+             );",
+        )?;
+        let current = connection
+            .query_row(
+                "SELECT version FROM schema_versions WHERE component = 'oauth'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if current > OAUTH_SCHEMA_VERSION {
+            return Err(StoreError::Corrupt(
+                "unsupported OAuth database schema version",
+            ));
+        }
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS oauth_clients (
                 client_id TEXT PRIMARY KEY,
                 client_name TEXT NOT NULL,
                 redirect_uris TEXT NOT NULL,
@@ -149,11 +170,110 @@ impl SqliteOAuthStore {
              CREATE INDEX IF NOT EXISTS oauth_tokens_expiry_idx
                 ON oauth_tokens(expires_at);",
         )?;
+        connection.execute(
+            "INSERT INTO schema_versions(component, version) VALUES ('oauth', ?1)
+             ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+            [OAUTH_SCHEMA_VERSION],
+        )?;
         let store = Self {
             connection: Mutex::new(connection),
         };
         store.cleanup_expired(Utc::now())?;
         Ok(store)
+    }
+
+    pub fn registered_clients(&self) -> Result<Vec<RegisteredClient>, StoreError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT client_id, client_name, redirect_uris, scopes, issued_at
+             FROM oauth_clients ORDER BY issued_at DESC, client_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (client_id, client_name, redirect_json, scopes, issued_at) = row?;
+            Ok(RegisteredClient {
+                client_id,
+                client_name,
+                redirect_uris: serde_json::from_str(&redirect_json)
+                    .map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?,
+                scopes: parse_scopes(&scopes)?,
+                issued_at: from_timestamp(issued_at)?,
+            })
+        })
+        .collect()
+    }
+
+    pub fn revoke_client_tokens(&self, client_id: &str) -> Result<usize, StoreError> {
+        let changed = self.lock()?.execute(
+            "UPDATE oauth_tokens SET status = 'revoked'
+             WHERE client_id = ?1 AND status = 'active'",
+            [client_id],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn delete_client(&self, client_id: &str) -> Result<bool, StoreError> {
+        let changed = self.lock()?.execute(
+            "DELETE FROM oauth_clients WHERE client_id = ?1",
+            [client_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn sessions(&self, client_id: Option<&str>) -> Result<Vec<OAuthSession>, StoreError> {
+        let connection = self.lock()?;
+        let client_filter = client_id.map(str::to_owned);
+        let mut statement = connection.prepare(
+            "SELECT family_id, client_id, subject, scopes,
+                    MIN(issued_at), MAX(expires_at),
+                    MAX(CASE WHEN status = 'active' AND expires_at > ?1 THEN 1 ELSE 0 END)
+             FROM oauth_tokens
+             WHERE (?2 IS NULL OR client_id = ?2)
+             GROUP BY family_id, client_id, subject, scopes
+             ORDER BY MAX(issued_at) DESC, family_id ASC",
+        )?;
+        let rows = statement.query_map(params![Utc::now().timestamp(), client_filter], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, bool>(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (family_id, client_id, subject, scopes, issued_at, expires_at, active) = row?;
+            Ok(OAuthSession {
+                family_id: Uuid::parse_str(&family_id)
+                    .map_err(|_| StoreError::Corrupt("invalid token family"))?,
+                client_id,
+                subject,
+                scopes: parse_scopes(&scopes)?,
+                issued_at: from_timestamp(issued_at)?,
+                expires_at: from_timestamp(expires_at)?,
+                active,
+            })
+        })
+        .collect()
+    }
+
+    pub fn revoke_session(&self, family_id: Uuid) -> Result<usize, StoreError> {
+        let changed = self.lock()?.execute(
+            "UPDATE oauth_tokens SET status = 'revoked'
+             WHERE family_id = ?1 AND status = 'active'",
+            [family_id.to_string()],
+        )?;
+        Ok(changed)
     }
 
     /// Revoke every active token and remove incomplete authorization flows.
@@ -733,6 +853,71 @@ mod tests {
                 .lock()?
                 .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |row| row.get(0))?;
         assert_eq!(remaining, 1);
+        Ok(())
+    }
+    #[test]
+    fn owner_can_list_revoke_and_delete_clients_and_sessions() -> Result<(), StoreError> {
+        let store = SqliteOAuthStore::in_memory()?;
+        let now = Utc::now();
+        let family = Uuid::new_v4();
+        let connection = store.lock()?;
+        connection.execute(
+            r#"INSERT INTO oauth_clients
+               (client_id, client_name, redirect_uris, scopes, issued_at)
+               VALUES ('client', 'Client', '["https://client.example/callback"]',
+                       'machine:read', ?1)"#,
+            [now.timestamp()],
+        )?;
+        for (index, kind) in ["access", "refresh"].into_iter().enumerate() {
+            connection.execute(
+                "INSERT INTO oauth_tokens
+                 (token_hash, token_kind, family_id, client_id, subject, scopes,
+                  issued_at, expires_at, status)
+                 VALUES (?1, ?2, ?3, 'client', 'github:42', 'machine:read',
+                         ?4, ?5, 'active')",
+                params![
+                    vec![u8::try_from(index + 1).unwrap_or(1); 32],
+                    kind,
+                    family.to_string(),
+                    now.timestamp(),
+                    (now + chrono::Duration::hours(1)).timestamp(),
+                ],
+            )?;
+        }
+        drop(connection);
+
+        let clients = store.registered_clients()?;
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].client_id, "client");
+        let sessions = store.sessions(Some("client"))?;
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].active);
+        assert_eq!(store.revoke_session(family)?, 2);
+        assert!(!store.sessions(Some("client"))?[0].active);
+        assert_eq!(store.revoke_client_tokens("client")?, 0);
+        assert!(store.delete_client("client")?);
+        assert!(store.registered_clients()?.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn oauth_schema_version_is_recorded_and_future_versions_are_rejected() -> Result<(), StoreError>
+    {
+        let store = SqliteOAuthStore::in_memory()?;
+        let version: i64 = store.lock()?.query_row(
+            "SELECT version FROM schema_versions WHERE component = 'oauth'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, OAUTH_SCHEMA_VERSION);
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE schema_versions (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
+             );
+             INSERT INTO schema_versions(component, version) VALUES ('oauth', 999);",
+        )?;
+        assert!(SqliteOAuthStore::from_connection(connection).is_err());
         Ok(())
     }
 }

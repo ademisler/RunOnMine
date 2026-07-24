@@ -37,6 +37,10 @@ enum XtaskCommand {
     },
     /// Create SHA-256 files for every regular artifact in dist/.
     Checksums,
+    /// Fail unless all package and packager versions match the workspace version.
+    VerifyVersions,
+    /// Update package-manager configuration versions from the workspace version.
+    SyncVersions,
     /// Fail unless a release tag exactly matches the workspace version.
     VerifyReleaseTag {
         #[arg(long)]
@@ -50,8 +54,93 @@ fn main() -> Result<()> {
         XtaskCommand::UniversalMacos => universal_macos(),
         XtaskCommand::StagePackager { target } => stage_packager(&target),
         XtaskCommand::Checksums => checksums(),
+        XtaskCommand::VerifyVersions => verify_versions(),
+        XtaskCommand::SyncVersions => sync_versions(),
         XtaskCommand::VerifyReleaseTag { tag } => verify_release_tag(&tag),
     }
+}
+
+const PACKAGER_CONFIGS: [&str; 4] = [
+    "packaging/Packager.macos.toml",
+    "packaging/Packager.windows.toml",
+    "packaging/Packager.linux-x86_64.toml",
+    "packaging/Packager.linux-aarch64.toml",
+];
+
+fn verify_versions() -> Result<()> {
+    let root = workspace_root()?;
+    let metadata_output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--locked", "--no-deps"])
+        .current_dir(&root)
+        .output()
+        .context("cargo metadata failed while verifying versions")?;
+    if !metadata_output.status.success() {
+        bail!("cargo metadata failed while verifying versions");
+    }
+    let metadata: Value = serde_json::from_slice(&metadata_output.stdout)?;
+    let workspace_members = metadata["workspace_members"]
+        .as_array()
+        .context("cargo metadata has no workspace members")?;
+    let members = workspace_members
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    for package in metadata["packages"]
+        .as_array()
+        .context("cargo metadata has no packages")?
+    {
+        let Some(id) = package["id"].as_str() else {
+            continue;
+        };
+        if !members.contains(id) {
+            continue;
+        }
+        let name = package["name"].as_str().unwrap_or("unknown");
+        let version = package["version"].as_str().unwrap_or("unknown");
+        if version != VERSION {
+            bail!("workspace package {name} has version {version}; expected {VERSION}");
+        }
+    }
+    for relative in PACKAGER_CONFIGS {
+        let path = root.join(relative);
+        let content = fs::read_to_string(&path)?;
+        let declared = content
+            .lines()
+            .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+            .with_context(|| format!("{relative} has no version field"))?;
+        if declared != VERSION {
+            bail!("{relative} has version {declared}; expected {VERSION}");
+        }
+    }
+    println!("All RunOnMine package versions match {VERSION}.");
+    Ok(())
+}
+
+fn sync_versions() -> Result<()> {
+    let root = workspace_root()?;
+    for relative in PACKAGER_CONFIGS {
+        let path = root.join(relative);
+        let content = fs::read_to_string(&path)?;
+        let mut replaced = false;
+        let updated = content
+            .lines()
+            .map(|line| {
+                if !replaced && line.starts_with("version = \"") {
+                    replaced = true;
+                    format!("version = \"{VERSION}\"")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        if !replaced {
+            bail!("{relative} has no version field");
+        }
+        fs::write(path, updated)?;
+    }
+    verify_versions()
 }
 
 fn verify_release_tag(tag: &str) -> Result<()> {

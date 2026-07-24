@@ -9,12 +9,12 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use rand::RngCore;
 use runonmine_connectors::openai::{OpenAiMcpTarget, OpenAiTunnelProfile};
 use runonmine_connectors::{
-    BinaryDiscovery, BinaryInstaller, BinaryKind, BinaryProbe, GitHubReleaseResolver,
+    BinaryInstaller, BinaryKind, BinaryProbe, GitHubReleaseResolver, InstallReceipt,
     InstalledBinary, ReleaseChannel, ReleaseProvider, SecretValue, run_once,
 };
 use runonmine_core::secrets::default_secret_store;
 use runonmine_core::{
-    AppConfig, AppPaths, ApprovalDecision, Capability, CloudflareNamedSettings,
+    AppConfig, AppPaths, ApprovalDecision, BrowserProfileMode, Capability, CloudflareNamedSettings,
     CloudflareQuickSettings, ConnectorConfig, ConnectorKind, OAuthOwnerSettings,
     OpenAiTunnelSettings, PolicyMode, PolicyPreset, StateStore,
 };
@@ -64,6 +64,10 @@ enum Command {
         #[command(subcommand)]
         command: BrowserCommand,
     },
+    Oauth {
+        #[command(subcommand)]
+        command: OauthCommand,
+    },
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
@@ -105,11 +109,45 @@ enum McpCommand {
 
 #[derive(Debug, Subcommand)]
 enum ConnectCommand {
+    List,
+    Show {
+        connector: String,
+    },
+    Enable {
+        connector: String,
+    },
+    Disable {
+        connector: String,
+    },
+    Remove {
+        connector: String,
+        #[arg(long)]
+        confirm: String,
+    },
+    LocalHttp {
+        #[command(subcommand)]
+        command: LocalHttpCommand,
+    },
     Cloudflare {
         #[command(subcommand)]
         command: CloudflareCommand,
     },
     Openai(OpenAiConnectArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum LocalHttpCommand {
+    /// Enable authenticated loopback MCP access and print a new bearer token once.
+    Enable,
+    /// Disable loopback MCP access and delete its bearer token.
+    Disable,
+    /// Replace the bearer token for the enabled loopback connector.
+    Rotate,
+    /// Show local HTTP status. The token is hidden unless explicitly requested.
+    Status {
+        #[arg(long)]
+        show_token: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -175,7 +213,32 @@ enum PolicyCommand {
 enum ApprovalCommand {
     List,
     Approve(ApproveArgs),
-    Deny { id: Uuid },
+    Deny {
+        id: Uuid,
+    },
+    Grants {
+        #[command(subcommand)]
+        command: GrantCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GrantCommand {
+    List {
+        #[arg(long)]
+        connector: Option<String>,
+    },
+    Revoke {
+        connector: String,
+        tool: String,
+        argument_hash: String,
+    },
+    Clear {
+        #[arg(long)]
+        connector: Option<String>,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -230,9 +293,55 @@ enum PrivateNetworkAccess {
 
 #[derive(Debug, Subcommand)]
 enum BrowserProfileCommand {
+    /// Create or select a persistent browser profile.
     Create {
         #[arg(long, default_value = "default")]
         name: String,
+    },
+    /// Use a disposable browser profile that is removed when the MCP session ends.
+    Ephemeral {
+        #[arg(long, default_value = "default")]
+        name: String,
+    },
+    /// Delete a persistent profile that is not currently selected.
+    Delete { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum OauthCommand {
+    Clients {
+        #[command(subcommand)]
+        command: OauthClientCommand,
+    },
+    Sessions {
+        #[command(subcommand)]
+        command: OauthSessionCommand,
+    },
+    /// Remove expired authorization state and tokens.
+    Cleanup,
+}
+
+#[derive(Debug, Subcommand)]
+enum OauthClientCommand {
+    List,
+    /// Revoke every active token issued to one client.
+    Revoke {
+        client_id: String,
+    },
+    /// Delete one registered client and all of its authorization state.
+    Delete {
+        client_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OauthSessionCommand {
+    List {
+        #[arg(long)]
+        client_id: Option<String>,
+    },
+    Revoke {
+        family_id: Uuid,
     },
 }
 
@@ -275,7 +384,7 @@ struct ServiceScopeArgs {
 
 #[derive(Debug, Args)]
 struct LockArgs {
-    /// Stop the Linux system service instead of the current user's service.
+    /// Also stop the Linux system service in addition to the current user's service.
     #[arg(long)]
     system: bool,
 }
@@ -392,6 +501,7 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Policy { command } => policy(command),
         Command::Approvals { command } => approvals(command),
         Command::Browser { command } => browser(command),
+        Command::Oauth { command } => oauth(command),
         Command::Admin { command } => admin(command),
         Command::Service { command } => service(command),
         Command::Lock(args) => emergency_lock(&args),
@@ -434,6 +544,144 @@ async fn connect(command: ConnectCommand) -> Result<()> {
     let mut config = AppConfig::load_or_create(&paths.config_file())?;
     let secrets = default_secret_store(&paths)?;
     match command {
+        ConnectCommand::List => {
+            if config.connectors.is_empty() {
+                println!("No connectors are configured.");
+            }
+            for connector in &config.connectors {
+                println!(
+                    "{}  {:?}  enabled={}  preset={:?}  {}",
+                    connector.id,
+                    connector.kind,
+                    connector.enabled,
+                    connector.policy_preset,
+                    connector.name,
+                );
+            }
+        }
+        ConnectCommand::Show { connector } => {
+            let connector = config
+                .connector(&connector)
+                .context("connector was not found")?;
+            println!("{}", serde_json::to_string_pretty(connector)?);
+        }
+        ConnectCommand::Enable { connector } => {
+            let item = config
+                .connector(&connector)
+                .context("connector was not found")?;
+            ensure_connector_credentials(item, secrets.as_ref())?;
+            config
+                .connector_mut(&connector)
+                .context("connector was not found")?
+                .enabled = true;
+            config.save(&paths.config_file())?;
+            println!(
+                "Enabled connector {connector}. Restart the agent to apply transport changes."
+            );
+        }
+        ConnectCommand::Disable { connector } => {
+            config
+                .connector_mut(&connector)
+                .context("connector was not found")?
+                .enabled = false;
+            config.save(&paths.config_file())?;
+            println!(
+                "Disabled connector {connector}. Restart the agent to close live transport sessions."
+            );
+        }
+        ConnectCommand::Remove { connector, confirm } => {
+            if confirm != "REMOVE" {
+                bail!("connector removal requires --confirm REMOVE");
+            }
+            let index = config
+                .connectors
+                .iter()
+                .position(|item| item.id == connector)
+                .context("connector was not found")?;
+            let removed = config.connectors.remove(index);
+            let secret_names = connector_secret_suffixes(removed.kind)
+                .iter()
+                .map(|suffix| format!("connector.{}.{suffix}", removed.id))
+                .collect::<Vec<_>>();
+            save_config_after_secret_deletion(
+                &config,
+                &paths.config_file(),
+                secrets.as_ref(),
+                &secret_names,
+            )?;
+            StateStore::open(&paths.state_db())?.clear_persistent_grants(Some(&removed.id))?;
+            if removed.kind == ConnectorKind::CloudflareOauth {
+                SqliteOAuthStore::open(&paths.state_db())?.emergency_revoke_all()?;
+            }
+            remove_connector_directories(&paths, &removed.id)?;
+            println!(
+                "Removed connector {} and its local credentials/state.",
+                removed.id
+            );
+            println!("Restart the agent to close any live transport process.");
+        }
+        ConnectCommand::LocalHttp { command } => {
+            let connector_index = config
+                .connectors
+                .iter()
+                .position(|connector| connector.kind == ConnectorKind::LocalHttp);
+            let connector_index = if let Some(index) = connector_index {
+                index
+            } else {
+                let mut connector = ConnectorConfig::local_http_default();
+                connector.policy_preset = config.default_preset;
+                config.connectors.push(connector);
+                config.connectors.len() - 1
+            };
+            let connector_id = config.connectors[connector_index].id.clone();
+            let secret_name = local_http_secret_name(&connector_id);
+            match command {
+                LocalHttpCommand::Enable => {
+                    config.connectors[connector_index].enabled = true;
+                    config.connectors[connector_index].policy_preset = config.default_preset;
+                    let token = generate_path_secret();
+                    commit_connector(
+                        &config,
+                        &paths,
+                        secrets.as_ref(),
+                        &[(secret_name, SecretString::from(token.clone()))],
+                    )?;
+                    print_local_http_credentials(config.port, &connector_id, &token);
+                }
+                LocalHttpCommand::Disable => {
+                    config.connectors[connector_index].enabled = false;
+                    save_config_after_secret_deletion(
+                        &config,
+                        &paths.config_file(),
+                        secrets.as_ref(),
+                        std::slice::from_ref(&secret_name),
+                    )?;
+                    println!(
+                        "Local HTTP connector {connector_id} is disabled and its token was deleted."
+                    );
+                }
+                LocalHttpCommand::Rotate => {
+                    if !config.connectors[connector_index].enabled {
+                        bail!("local HTTP is disabled; enable it before rotating its token");
+                    }
+                    let token = generate_path_secret();
+                    secrets.set(&secret_name, &SecretString::from(token.clone()))?;
+                    print_local_http_credentials(config.port, &connector_id, &token);
+                }
+                LocalHttpCommand::Status { show_token } => {
+                    let enabled = config.connectors[connector_index].enabled;
+                    println!("Connector: {connector_id}");
+                    println!("Enabled: {enabled}");
+                    println!("Endpoint: http://127.0.0.1:{}/mcp", config.port);
+                    let token = secrets.get(&secret_name)?;
+                    println!("Token configured: {}", token.is_some());
+                    if show_token {
+                        let token = token.context("local HTTP token is not configured")?;
+                        println!("Bearer token: {}", token.expose_secret());
+                    }
+                }
+            }
+        }
         ConnectCommand::Cloudflare {
             command:
                 CloudflareCommand::Quick {
@@ -468,7 +716,7 @@ async fn connect(command: ConnectCommand) -> Result<()> {
                 name: "Cloudflare Quick Tunnel".to_owned(),
                 kind: ConnectorKind::CloudflareQuick,
                 enabled: true,
-                policy_preset: PolicyPreset::Safe,
+                policy_preset: config.default_preset,
                 pack_overrides: BTreeMap::default(),
                 tool_overrides: BTreeMap::default(),
                 public_base_url: None,
@@ -520,6 +768,17 @@ async fn connect(command: ConnectCommand) -> Result<()> {
                 bail!("GitHub OAuth client secret must not be empty");
             }
             let owner_login = value_or_prompt(args.github_owner, "Machine owner's GitHub login: ")?;
+            let owner_id = args.github_owner_id.map_or_else(
+                || {
+                    prompt_required("Machine owner's immutable GitHub numeric ID: ")?
+                        .parse::<u64>()
+                        .context("GitHub owner ID must be a positive integer")
+                },
+                Ok,
+            )?;
+            if owner_id == 0 {
+                bail!("GitHub owner ID must be greater than zero");
+            }
             let id = Uuid::new_v4().to_string();
             let public_base_url = Url::parse(&format!("https://{hostname}/"))
                 .context("public Cloudflare hostname is invalid")?;
@@ -528,7 +787,7 @@ async fn connect(command: ConnectCommand) -> Result<()> {
                 name: "Cloudflare Named Tunnel with OAuth".to_owned(),
                 kind: ConnectorKind::CloudflareOauth,
                 enabled: true,
-                policy_preset: PolicyPreset::Safe,
+                policy_preset: config.default_preset,
                 pack_overrides: BTreeMap::default(),
                 tool_overrides: BTreeMap::default(),
                 public_base_url: Some(public_base_url),
@@ -542,7 +801,7 @@ async fn connect(command: ConnectCommand) -> Result<()> {
                 }),
                 oauth_owner: Some(OAuthOwnerSettings {
                     github_login: owner_login,
-                    github_id: args.github_owner_id,
+                    github_id: Some(owner_id),
                 }),
                 openai_tunnel: None,
             });
@@ -624,7 +883,7 @@ async fn connect(command: ConnectCommand) -> Result<()> {
                 name: "OpenAI Secure MCP Tunnel".to_owned(),
                 kind: ConnectorKind::OpenAiTunnel,
                 enabled: true,
-                policy_preset: PolicyPreset::Safe,
+                policy_preset: config.default_preset,
                 pack_overrides: BTreeMap::default(),
                 tool_overrides: BTreeMap::default(),
                 public_base_url: None,
@@ -651,6 +910,130 @@ async fn connect(command: ConnectCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn save_config_after_secret_deletion(
+    config: &AppConfig,
+    config_path: &Path,
+    secrets: &dyn runonmine_core::secrets::SecretStore,
+    names: &[String],
+) -> Result<()> {
+    let backups = names
+        .iter()
+        .map(|name| Ok((name.clone(), secrets.get(name)?)))
+        .collect::<Result<Vec<_>>>()?;
+    for name in names {
+        if let Err(error) = secrets.delete(name) {
+            restore_secret_backups(secrets, &backups)?;
+            return Err(error).context("failed to delete connector credential");
+        }
+    }
+    if let Err(error) = config.save(config_path) {
+        restore_secret_backups(secrets, &backups)?;
+        return Err(error).context("failed to save configuration after credential deletion");
+    }
+    Ok(())
+}
+
+fn restore_secret_backups(
+    secrets: &dyn runonmine_core::secrets::SecretStore,
+    backups: &[(String, Option<SecretString>)],
+) -> Result<()> {
+    for (name, value) in backups {
+        match value {
+            Some(value) => secrets.set(name, value)?,
+            None => secrets.delete(name)?,
+        }
+    }
+    Ok(())
+}
+
+fn connector_secret_suffixes(kind: ConnectorKind) -> &'static [&'static str] {
+    match kind {
+        ConnectorKind::LocalStdio => &[],
+        ConnectorKind::LocalHttp => &["local_http_token"],
+        ConnectorKind::CloudflareQuick => &["path_secret"],
+        ConnectorKind::CloudflareOauth => {
+            &["github_client_id", "github_client_secret", "oauth_hash_key"]
+        }
+        ConnectorKind::OpenAiTunnel => &["runtime_api_key"],
+    }
+}
+
+fn ensure_connector_credentials(
+    connector: &ConnectorConfig,
+    secrets: &dyn runonmine_core::secrets::SecretStore,
+) -> Result<()> {
+    for suffix in connector_secret_suffixes(connector.kind) {
+        if secrets
+            .get(&format!("connector.{}.{suffix}", connector.id))?
+            .is_none()
+        {
+            bail!("connector credential {suffix} is missing");
+        }
+    }
+    if connector.kind == ConnectorKind::CloudflareOauth
+        && connector
+            .oauth_owner
+            .as_ref()
+            .and_then(|owner| owner.github_id)
+            .is_none_or(|id| id == 0)
+    {
+        bail!("OAuth connector must pin the machine owner's immutable GitHub numeric ID");
+    }
+    Ok(())
+}
+
+fn remove_connector_directories(paths: &AppPaths, connector_id: &str) -> Result<()> {
+    for directory in [
+        paths.data_dir.join("connectors").join(connector_id),
+        paths.state_dir.join("connectors").join(connector_id),
+    ] {
+        remove_real_directory_if_exists(&directory)?;
+    }
+    let profiles = paths.browser_profiles();
+    if profiles.is_dir() {
+        for entry in std::fs::read_dir(&profiles)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                remove_real_directory_if_exists(&entry.path().join(connector_id))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_real_directory_if_exists(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing to remove symlinked connector directory: {}",
+                path.display()
+            );
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            std::fs::remove_dir_all(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        Ok(_) => bail!(
+            "connector state path is not a directory: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn local_http_secret_name(connector_id: &str) -> String {
+    format!("connector.{connector_id}.local_http_token")
+}
+
+fn print_local_http_credentials(port: u16, connector_id: &str, token: &str) {
+    println!("Local HTTP connector {connector_id} is enabled.");
+    println!("Endpoint: http://127.0.0.1:{port}/mcp");
+    println!("Bearer token: {token}");
+    println!("Store this token now; it is kept in the operating system credential store.");
 }
 
 fn value_or_prompt(value: Option<String>, prompt: &str) -> Result<String> {
@@ -691,22 +1074,123 @@ async fn ensure_binary(
 ) -> Result<InstalledBinary> {
     let managed_directory = paths.data_dir.join("bin");
     ensure_private_directory(&managed_directory)?;
-    let discovery = BinaryDiscovery::new(vec![managed_directory.clone()]);
-    if let Some(binary) = discovery.discover(kind, explicit_path)? {
+    if let Some(path) = explicit_path {
+        let binary = InstalledBinary::from_verified_path(kind, path)?;
         BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
         return Ok(binary);
     }
+
+    let destination = managed_directory.join(kind.executable_name());
+    let receipt_path = managed_receipt_path(&managed_directory, kind);
+    if destination.exists() {
+        let binary = InstalledBinary::from_verified_path(kind, &destination)?;
+        match verify_managed_binary(&binary, provider, &receipt_path) {
+            Ok(()) => {
+                BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+                return Ok(binary);
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %destination.display(), "managed connector binary failed integrity verification and will be replaced");
+                std::fs::remove_file(&destination)?;
+                if receipt_path.exists() {
+                    std::fs::remove_file(&receipt_path)?;
+                }
+            }
+        }
+    }
+
     println!("Downloading the latest verified official connector binary...");
     let artifact = GitHubReleaseResolver::production()?
         .resolve(provider, &ReleaseChannel::Latest)
         .await?;
-    let destination = managed_directory.join(kind.executable_name());
-    BinaryInstaller::production()?
+    let receipt = BinaryInstaller::production()?
         .install(&artifact, &destination)
         .await?;
+    write_install_receipt(&receipt_path, &receipt)?;
     let binary = InstalledBinary::from_verified_path(kind, &destination)?;
+    verify_managed_binary(&binary, provider, &receipt_path)?;
     BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
     Ok(binary)
+}
+
+fn managed_receipt_path(directory: &Path, kind: BinaryKind) -> PathBuf {
+    directory.join(format!("{}.receipt.json", kind.executable_name()))
+}
+
+fn write_install_receipt(path: &Path, receipt: &InstallReceipt) -> Result<()> {
+    atomic_write(path, &serde_json::to_vec_pretty(receipt)?)?;
+    restrict_private_file(path)
+}
+
+fn read_install_receipt(path: &Path) -> Result<InstallReceipt> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("managed binary receipt is missing: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 64 * 1_024 {
+        bail!("managed binary receipt is not a small regular file");
+    }
+    serde_json::from_slice(&std::fs::read(path)?).context("managed binary receipt is invalid")
+}
+
+fn verify_managed_binary(
+    binary: &InstalledBinary,
+    provider: ReleaseProvider,
+    receipt_path: &Path,
+) -> Result<()> {
+    let receipt = read_install_receipt(receipt_path)?;
+    if receipt.provider != provider {
+        bail!("managed binary receipt provider does not match");
+    }
+    let expected_path = receipt
+        .installed_path
+        .canonicalize()
+        .context("managed binary receipt path does not exist")?;
+    if expected_path != binary.path {
+        bail!("managed binary path does not match its receipt");
+    }
+    if !receipt.sha256.verify_file(&binary.path)? {
+        bail!("managed binary SHA-256 does not match its installation receipt");
+    }
+    Ok(())
+}
+
+fn load_connector_binary(
+    paths: &AppPaths,
+    kind: BinaryKind,
+    provider: ReleaseProvider,
+    configured_path: Option<&Path>,
+) -> Result<Option<InstalledBinary>> {
+    let managed_directory = paths.data_dir.join("bin");
+    let candidate = configured_path.map_or_else(
+        || managed_directory.join(kind.executable_name()),
+        Path::to_path_buf,
+    );
+    if !candidate.exists() {
+        return Ok(None);
+    }
+    let managed = managed_directory
+        .canonicalize()
+        .unwrap_or(managed_directory.clone());
+    let candidate_parent = candidate
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok());
+    let is_managed_candidate = candidate_parent.as_deref() == Some(managed.as_path())
+        && candidate.file_name() == Some(std::ffi::OsStr::new(kind.executable_name()));
+    if is_managed_candidate
+        && std::fs::symlink_metadata(&candidate)?
+            .file_type()
+            .is_symlink()
+    {
+        bail!("managed connector binary must not be a symlink");
+    }
+    let binary = InstalledBinary::from_verified_path(kind, &candidate)?;
+    if is_managed_candidate {
+        verify_managed_binary(
+            &binary,
+            provider,
+            &managed_receipt_path(&managed_directory, kind),
+        )?;
+    }
+    Ok(Some(binary))
 }
 
 fn ensure_private_directory(path: &Path) -> Result<()> {
@@ -830,9 +1314,6 @@ fn approvals(command: ApprovalCommand) -> Result<()> {
             }
         }
         ApprovalCommand::Approve(args) => {
-            let request = store
-                .approval_status(args.id)?
-                .context("approval was not found")?;
             let decision = if args.once {
                 ApprovalDecision::Once
             } else if args.duration.is_some() {
@@ -843,18 +1324,8 @@ fn approvals(command: ApprovalCommand) -> Result<()> {
             if !store.resolve_approval(args.id, decision)? {
                 bail!("approval is no longer pending or has expired");
             }
-            if args.always {
-                let mut config = AppConfig::load(&paths.config_file())?;
-                let connector = config
-                    .connector_mut(&request.connector_id)
-                    .context("approval connector is no longer configured")?;
-                connector
-                    .tool_overrides
-                    .insert(request.tool_name.clone(), PolicyMode::Allow);
-                config.save(&paths.config_file())?;
-            }
             println!(
-                "Approved {} ({decision:?}). Ten-minute grants apply only to the exact arguments shown.",
+                "Approved {} ({decision:?}). Temporary and persistent grants apply only to the exact arguments shown.",
                 args.id
             );
         }
@@ -863,6 +1334,47 @@ fn approvals(command: ApprovalCommand) -> Result<()> {
                 bail!("approval is no longer pending or has expired");
             }
             println!("Denied {id}.");
+        }
+        ApprovalCommand::Grants {
+            command: GrantCommand::List { connector },
+        } => {
+            let grants = store.persistent_grants(connector.as_deref())?;
+            if grants.is_empty() {
+                println!("No persistent exact-action grants were found.");
+            }
+            for grant in grants {
+                println!(
+                    "{}  {}  {}  created={}
+  {}",
+                    grant.connector_id,
+                    grant.tool_name,
+                    grant.argument_hash,
+                    grant.created_at.to_rfc3339(),
+                    grant.argument_summary,
+                );
+            }
+        }
+        ApprovalCommand::Grants {
+            command:
+                GrantCommand::Revoke {
+                    connector,
+                    tool,
+                    argument_hash,
+                },
+        } => {
+            if !store.delete_persistent_grant(&connector, &tool, &argument_hash)? {
+                bail!("persistent grant was not found");
+            }
+            println!("Revoked the persistent exact-action grant.");
+        }
+        ApprovalCommand::Grants {
+            command: GrantCommand::Clear { connector, confirm },
+        } => {
+            if confirm != "CLEAR" {
+                bail!("clearing persistent grants requires --confirm CLEAR");
+            }
+            let removed = store.clear_persistent_grants(connector.as_deref())?;
+            println!("Removed {removed} persistent exact-action grant(s).");
         }
     }
     Ok(())
@@ -878,14 +1390,49 @@ fn browser(command: BrowserCommand) -> Result<()> {
         } => {
             validate_profile_name(&name)?;
             let directory = paths.browser_profiles().join(&name);
-            std::fs::create_dir_all(&directory)?;
+            ensure_private_directory(&directory)?;
             config.browser.profile_name = name;
+            config.browser.profile_mode = BrowserProfileMode::Persistent;
             config.browser.external_cdp_url = None;
             config.save(&paths.config_file())?;
             println!(
-                "Created isolated browser profile at {}.",
+                "Selected persistent browser profile at {}.",
                 directory.display()
             );
+        }
+        BrowserCommand::Profile {
+            command: BrowserProfileCommand::Ephemeral { name },
+        } => {
+            validate_profile_name(&name)?;
+            config.browser.profile_name = name;
+            config.browser.profile_mode = BrowserProfileMode::Ephemeral;
+            config.browser.external_cdp_url = None;
+            config.save(&paths.config_file())?;
+            println!("Selected disposable browser profile mode.");
+        }
+        BrowserCommand::Profile {
+            command: BrowserProfileCommand::Delete { name },
+        } => {
+            validate_profile_name(&name)?;
+            if config.browser.profile_mode == BrowserProfileMode::Persistent
+                && config.browser.profile_name == name
+                && config.browser.external_cdp_url.is_none()
+            {
+                bail!(
+                    "switch to an ephemeral or different profile before deleting the active profile"
+                );
+            }
+            let directory = paths.browser_profiles().join(&name);
+            if directory
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                bail!("refusing to delete a symlinked browser profile directory");
+            }
+            if directory.exists() {
+                std::fs::remove_dir_all(&directory)?;
+            }
+            println!("Deleted browser profile {}.", directory.display());
         }
         BrowserCommand::Attach { loopback_cdp_url } => {
             runonmine_browser_guard(&loopback_cdp_url)?;
@@ -900,11 +1447,89 @@ fn browser(command: BrowserCommand) -> Result<()> {
             config.save(&paths.config_file())?;
             if config.browser.allow_private_network {
                 println!(
-                    "Private-network browser access enabled. Remote connectors can reach local services."
+                    "Private-network browser access enabled for local connectors. Remote connectors remain blocked."
                 );
             } else {
                 println!("Private-network browser access disabled.");
             }
+        }
+    }
+    Ok(())
+}
+
+fn oauth(command: OauthCommand) -> Result<()> {
+    let paths = AppPaths::discover()?;
+    let store = SqliteOAuthStore::open(&paths.state_db())?;
+    match command {
+        OauthCommand::Clients {
+            command: OauthClientCommand::List,
+        } => {
+            let clients = store.registered_clients()?;
+            if clients.is_empty() {
+                println!("No OAuth clients are registered.");
+            }
+            for client in clients {
+                println!(
+                    "{}  {}  issued={}
+  scopes: {}
+  redirects: {}",
+                    client.client_id,
+                    client.client_name,
+                    client.issued_at.to_rfc3339(),
+                    client.scopes.to_space_delimited(),
+                    client
+                        .redirect_uris
+                        .iter()
+                        .map(Url::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        OauthCommand::Clients {
+            command: OauthClientCommand::Revoke { client_id },
+        } => {
+            let revoked = store.revoke_client_tokens(&client_id)?;
+            println!("Revoked {revoked} active OAuth token(s) for {client_id}.");
+        }
+        OauthCommand::Clients {
+            command: OauthClientCommand::Delete { client_id },
+        } => {
+            if !store.delete_client(&client_id)? {
+                bail!("OAuth client was not found");
+            }
+            println!("Deleted OAuth client {client_id} and its authorization state.");
+        }
+        OauthCommand::Sessions {
+            command: OauthSessionCommand::List { client_id },
+        } => {
+            let sessions = store.sessions(client_id.as_deref())?;
+            if sessions.is_empty() {
+                println!("No OAuth sessions were found.");
+            }
+            for session in sessions {
+                println!(
+                    "{}  client={}  active={}  expires={}
+  subject: {}
+  scopes: {}",
+                    session.family_id,
+                    session.client_id,
+                    session.active,
+                    session.expires_at.to_rfc3339(),
+                    session.subject,
+                    session.scopes.to_space_delimited(),
+                );
+            }
+        }
+        OauthCommand::Sessions {
+            command: OauthSessionCommand::Revoke { family_id },
+        } => {
+            let revoked = store.revoke_session(family_id)?;
+            println!("Revoked {revoked} active token(s) in session {family_id}.");
+        }
+        OauthCommand::Cleanup => {
+            let removed = store.cleanup_expired(chrono::Utc::now())?;
+            println!("Removed {removed} expired OAuth record(s).");
         }
     }
     Ok(())
@@ -962,16 +1587,37 @@ fn emergency_lock(arguments: &LockArgs) -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
 
+    let mut stop_failures = Vec::new();
+    match UserService::discover() {
+        Ok(service) => match service.status() {
+            Ok(status) if status.running => {
+                if let Err(error) = service.stop() {
+                    stop_failures.push(format!("user service: {error}"));
+                }
+            }
+            Ok(_) => {}
+            Err(error) => stop_failures.push(format!("user service status: {error}")),
+        },
+        Err(error) => stop_failures.push(format!("user service discovery: {error}")),
+    }
+    #[cfg(target_os = "linux")]
     if arguments.system {
-        let service = LinuxSystemService::discover()?;
-        if service.status().is_ok_and(|status| status.running) {
-            service.stop()?;
+        match LinuxSystemService::discover() {
+            Ok(service) => match service.status() {
+                Ok(status) if status.running => {
+                    if let Err(error) = service.stop() {
+                        stop_failures.push(format!("system service: {error}"));
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => stop_failures.push(format!("system service status: {error}")),
+            },
+            Err(error) => stop_failures.push(format!("system service discovery: {error}")),
         }
-    } else {
-        let service = UserService::discover()?;
-        if service.status().is_ok_and(|status| status.running) {
-            service.stop()?;
-        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    if arguments.system {
+        stop_failures.push("system service locking is only supported on Linux".to_owned());
     }
 
     let store = StateStore::open(&paths.state_db())?;
@@ -981,10 +1627,18 @@ fn emergency_lock(arguments: &LockArgs) -> Result<()> {
 
     let config = AppConfig::load(&paths.config_file())?;
     let secrets = default_secret_store(&paths)?;
+    let mut rotated_local_http_tokens = 0_usize;
     let mut rotated_quick_tunnels = 0_usize;
     let mut removed_openai_keys = 0_usize;
     for connector in &config.connectors {
         match connector.kind {
+            ConnectorKind::LocalHttp => {
+                secrets.set(
+                    &local_http_secret_name(&connector.id),
+                    &SecretString::from(generate_path_secret()),
+                )?;
+                rotated_local_http_tokens += 1;
+            }
             ConnectorKind::CloudflareQuick => {
                 secrets.set(
                     &format!("connector.{}.path_secret", connector.id),
@@ -996,9 +1650,7 @@ fn emergency_lock(arguments: &LockArgs) -> Result<()> {
                 secrets.delete(&format!("connector.{}.runtime_api_key", connector.id))?;
                 removed_openai_keys += 1;
             }
-            ConnectorKind::LocalStdio
-            | ConnectorKind::LocalHttp
-            | ConnectorKind::CloudflareOauth => {}
+            ConnectorKind::LocalStdio | ConnectorKind::CloudflareOauth => {}
         }
     }
 
@@ -1006,9 +1658,16 @@ fn emergency_lock(arguments: &LockArgs) -> Result<()> {
     println!("Denied pending approvals: {denied}");
     println!("Cleared temporary grants: {temporary_grants}");
     println!("Revoked OAuth tokens: {revoked_tokens}");
+    println!("Rotated local HTTP tokens: {rotated_local_http_tokens}");
     println!("Rotated Quick Tunnel secrets: {rotated_quick_tunnels}");
     println!("Removed OpenAI runtime keys: {removed_openai_keys}");
     println!("Restart and reconnect explicitly when access should be restored.");
+    if !stop_failures.is_empty() {
+        bail!(
+            "credentials and grants were locked, but service shutdown had errors: {}",
+            stop_failures.join("; ")
+        );
+    }
     Ok(())
 }
 
@@ -1047,6 +1706,7 @@ fn uninstall(arguments: &UninstallArgs) -> Result<()> {
             Ok(store) => {
                 for connector in &config.connectors {
                     for suffix in [
+                        "local_http_token",
                         "path_secret",
                         "github_client_id",
                         "github_client_secret",
@@ -1124,7 +1784,6 @@ async fn doctor() -> Result<()> {
     .await
     .is_ok_and(|result| result.is_ok());
     println!("Agent loopback listener: {agent_reachable}");
-    let discovery = BinaryDiscovery::new(vec![paths.data_dir.join("bin")]);
     let secrets = default_secret_store(&paths)?;
     for connector in config
         .connectors
@@ -1132,14 +1791,27 @@ async fn doctor() -> Result<()> {
         .filter(|connector| connector.enabled)
     {
         match connector.kind {
+            ConnectorKind::LocalHttp => {
+                if secrets
+                    .get(&local_http_secret_name(&connector.id))?
+                    .is_some()
+                {
+                    println!("{}: authenticated local HTTP configured", connector.id);
+                } else {
+                    println!("{}: local HTTP bearer token missing", connector.id);
+                    failures = failures.saturating_add(1);
+                }
+            }
             ConnectorKind::CloudflareQuick => {
                 let Some(settings) = &connector.cloudflare_quick else {
                     println!("{}: Cloudflare Quick settings FAILED", connector.id);
                     failures = failures.saturating_add(1);
                     continue;
                 };
-                match discovery.discover(
+                match load_connector_binary(
+                    &paths,
                     BinaryKind::Cloudflared,
+                    ReleaseProvider::Cloudflared,
                     settings.cloudflared_path.as_deref(),
                 )? {
                     Some(binary) => {
@@ -1175,8 +1847,10 @@ async fn doctor() -> Result<()> {
                     failures = failures.saturating_add(1);
                     continue;
                 };
-                match discovery.discover(
+                match load_connector_binary(
+                    &paths,
                     BinaryKind::Cloudflared,
+                    ReleaseProvider::Cloudflared,
                     settings.cloudflared_path.as_deref(),
                 )? {
                     Some(binary) => {
@@ -1207,6 +1881,15 @@ async fn doctor() -> Result<()> {
                         failures = failures.saturating_add(1);
                     }
                 }
+                if connector
+                    .oauth_owner
+                    .as_ref()
+                    .and_then(|owner| owner.github_id)
+                    .is_none_or(|id| id == 0)
+                {
+                    println!("{}: immutable GitHub owner ID missing", connector.id);
+                    failures = failures.saturating_add(1);
+                }
             }
             ConnectorKind::OpenAiTunnel => {
                 let Some(settings) = &connector.openai_tunnel else {
@@ -1214,8 +1897,10 @@ async fn doctor() -> Result<()> {
                     failures = failures.saturating_add(1);
                     continue;
                 };
-                let Some(binary) = discovery.discover(
+                let Some(binary) = load_connector_binary(
+                    &paths,
                     BinaryKind::OpenAiTunnelClient,
+                    ReleaseProvider::OpenAiTunnelClient,
                     settings.tunnel_client_path.as_deref(),
                 )?
                 else {
@@ -1280,7 +1965,7 @@ async fn doctor() -> Result<()> {
                     }
                 }
             }
-            ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => {}
+            ConnectorKind::LocalStdio => {}
         }
     }
     let status = UserService::discover()?.status()?;
@@ -1501,4 +2186,128 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runonmine_core::secrets::SecretStore;
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_binary_symlink_is_rejected_before_receipt_verification() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = tempfile::tempdir()?;
+        let paths = AppPaths::under(root.path());
+        let managed = paths.data_dir.join("bin");
+        std::fs::create_dir_all(&managed)?;
+        let target = root.path().join("outside-cloudflared");
+        std::fs::write(&target, b"not executed")?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700))?;
+        let candidate = managed.join(BinaryKind::Cloudflared.executable_name());
+        symlink(&target, &candidate)?;
+
+        let result = load_connector_binary(
+            &paths,
+            BinaryKind::Cloudflared,
+            ReleaseProvider::Cloudflared,
+            Some(&candidate),
+        );
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct MemorySecretStore {
+        values: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    }
+
+    impl runonmine_core::secrets::SecretStore for MemorySecretStore {
+        fn get(&self, name: &str) -> Result<Option<SecretString>> {
+            let values = self
+                .values
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test secret store lock failed"))?;
+            Ok(values.get(name).cloned().map(SecretString::from))
+        }
+
+        fn set(&self, name: &str, value: &SecretString) -> Result<()> {
+            self.values
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test secret store lock failed"))?
+                .insert(name.to_owned(), value.expose_secret().to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, name: &str) -> Result<()> {
+            self.values
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test secret store lock failed"))?
+                .remove(name);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn secret_deletion_is_committed_with_config_save() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        let store = MemorySecretStore::default();
+        let name = "connector.local.local_http_token".to_owned();
+        store.set(&name, &SecretString::from("token".to_owned()))?;
+        save_config_after_secret_deletion(
+            &AppConfig::default(),
+            &config_path,
+            &store,
+            std::slice::from_ref(&name),
+        )?;
+        assert!(store.get(&name)?.is_none());
+        assert!(config_path.is_file());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_deletion_rolls_back_when_config_save_fails() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("target.toml");
+        std::fs::write(&target, "unchanged")?;
+        let config_path = directory.path().join("config.toml");
+        symlink(&target, &config_path)?;
+        let store = MemorySecretStore::default();
+        let name = "connector.local.local_http_token".to_owned();
+        store.set(&name, &SecretString::from("token".to_owned()))?;
+        assert!(
+            save_config_after_secret_deletion(
+                &AppConfig::default(),
+                &config_path,
+                &store,
+                std::slice::from_ref(&name),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            store
+                .get(&name)?
+                .map(|value| value.expose_secret().to_owned()),
+            Some("token".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn connector_secret_sets_are_complete() {
+        assert!(connector_secret_suffixes(ConnectorKind::LocalStdio).is_empty());
+        assert_eq!(
+            connector_secret_suffixes(ConnectorKind::LocalHttp),
+            &["local_http_token"]
+        );
+        assert!(
+            connector_secret_suffixes(ConnectorKind::CloudflareOauth)
+                .contains(&"github_client_secret")
+        );
+    }
 }

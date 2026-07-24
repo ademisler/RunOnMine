@@ -37,14 +37,16 @@ when the separate helper is installed, allowlisted administrator execution.
 ## Local approvals
 
 An approval may apply once, to the exact connector, tool, and argument hash for
-ten minutes, or permanently as a tool override. The approval screen displays a
+ten minutes, or persistently to that same exact action. Persistent approval no
+longer creates a broad tool-wide policy override. The approval screen displays a
 bounded local preview of the concrete command, path, URL, selector, or script.
 Common token, password, authorization-header, and API-key forms are redacted
-before storage and display. Permanent access can be removed with policy
-commands. MCP clients cannot list, grant, or deny approvals.
+before storage and display. Persistent exact-action grants can be listed and
+revoked with `runonmine approvals grants ...`. MCP clients cannot list, grant,
+or deny approvals.
 
-For an internet-facing connector, a permanent override still cannot bypass the
-remote safety ceiling. Dangerous calls continue to require local approval.
+For an internet-facing connector, a connector policy still cannot bypass the
+remote safety ceiling. Exact grants authorize only the reviewed argument hash.
 
 ```console
 runonmine approvals list
@@ -52,6 +54,8 @@ runonmine approvals approve <id> --once
 runonmine approvals approve <id> --for 10m
 runonmine approvals approve <id> --always
 runonmine approvals deny <id>
+runonmine approvals grants list
+runonmine approvals grants revoke <connector> <tool> <argument-hash>
 ```
 
 ## OAuth scopes
@@ -77,9 +81,9 @@ arguments can still be security-sensitive and must be reviewed before approval.
 
 Use `runonmine lock` or **Lock all access** in the desktop application to stop the
 current user service, deny pending approvals, clear temporary grants, revoke
-active OAuth tokens, delete incomplete OAuth authorization flows, rotate Quick
-Tunnel path secrets, and remove stored OpenAI runtime keys. On a Linux system
-service use `runonmine lock --system`.
+active OAuth tokens, delete incomplete OAuth authorization flows, rotate local
+HTTP and Quick Tunnel secrets, and remove stored OpenAI runtime keys. On Linux,
+`runonmine lock --system` also stops the system service.
 
 The lock does not delete user configuration. Restoring access requires an
 explicit service restart and, where credentials were invalidated, an explicit

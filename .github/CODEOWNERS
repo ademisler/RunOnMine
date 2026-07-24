@@ -1,6 +1,14 @@
 * @ademisler
 /.github/ @ademisler
+/docs/ @ademisler
+/packaging/ @ademisler
+/apps/runonmine/ @ademisler
+/apps/runonmine-desktop/ @ademisler
+/apps/runonmine-helper/ @ademisler
+/crates/runonmine-browser/ @ademisler
+/crates/runonmine-connectors/ @ademisler
 /crates/runonmine-core/ @ademisler
 /crates/runonmine-mcp/ @ademisler
 /crates/runonmine-oauth/ @ademisler
 /crates/runonmine-platform/ @ademisler
+/xtask/ @ademisler

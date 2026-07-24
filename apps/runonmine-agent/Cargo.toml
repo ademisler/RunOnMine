@@ -13,8 +13,8 @@ desktop-control = ["runonmine-mcp/desktop-control"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-runonmine-core = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-core" }
-runonmine-mcp = { version = "=0.1.0-beta.1", path = "../../crates/runonmine-mcp", default-features = false }
+runonmine-core.workspace = true
+runonmine-mcp.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

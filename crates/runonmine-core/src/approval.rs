@@ -21,6 +21,15 @@ pub enum ApprovalDecision {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersistentGrant {
+    pub connector_id: String,
+    pub tool_name: String,
+    pub argument_summary: String,
+    pub argument_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub id: Uuid,
     pub connector_id: String,

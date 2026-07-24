@@ -7,11 +7,12 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalStatus};
+use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalStatus, PersistentGrant};
 use crate::audit::AuditEvent;
 
 pub const AUDIT_RETENTION_DAYS: i64 = 30;
 pub const AUDIT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const STATE_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct AuditRecord {
@@ -112,9 +113,49 @@ impl StateStore {
                     id.to_string()
                 ],
             )?;
+        } else if changed == 1 && decision == ApprovalDecision::Always {
+            transaction.execute(
+                "INSERT INTO persistent_grants
+                    (connector_id, tool_name, argument_hash, argument_summary, created_at)
+                 SELECT connector_id, tool_name, argument_hash, argument_summary, ?1
+                 FROM approvals WHERE id = ?2
+                 ON CONFLICT(connector_id, tool_name, argument_hash)
+                 DO UPDATE SET argument_summary = excluded.argument_summary,
+                               created_at = excluded.created_at",
+                params![Utc::now().to_rfc3339(), id.to_string()],
+            )?;
         }
         transaction.commit()?;
         Ok(changed == 1)
+    }
+
+    pub fn grant_allows(
+        &self,
+        connector_id: &str,
+        tool_name: &str,
+        argument_hash: &str,
+    ) -> Result<bool> {
+        let connection = self.lock()?;
+        let now = Utc::now().to_rfc3339();
+        connection.execute(
+            "DELETE FROM temporary_grants WHERE expires_at <= ?1",
+            [&now],
+        )?;
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM temporary_grants
+                 WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3
+                   AND expires_at > ?4
+                 UNION ALL
+                 SELECT 1 FROM persistent_grants
+                 WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3
+                 LIMIT 1",
+                params![connector_id, tool_name, argument_hash, now],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(exists)
     }
 
     pub fn temporary_grant_allows(
@@ -123,27 +164,73 @@ impl StateStore {
         tool_name: &str,
         argument_hash: &str,
     ) -> Result<bool> {
+        self.grant_allows(connector_id, tool_name, argument_hash)
+    }
+
+    pub fn persistent_grants(&self, connector_id: Option<&str>) -> Result<Vec<PersistentGrant>> {
         let connection = self.lock()?;
-        connection.execute(
-            "DELETE FROM temporary_grants WHERE expires_at <= ?1",
-            [Utc::now().to_rfc3339()],
+        let connector_filter = connector_id.map(str::to_owned);
+        let mut statement = connection.prepare(
+            "SELECT connector_id, tool_name, argument_summary, argument_hash, created_at
+             FROM persistent_grants
+             WHERE (?1 IS NULL OR connector_id = ?1)
+             ORDER BY created_at DESC, connector_id, tool_name",
         )?;
-        let exists = connection
-            .query_row(
-                "SELECT 1 FROM temporary_grants
-                 WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3
-                   AND expires_at > ?4",
-                params![
-                    connector_id,
-                    tool_name,
-                    argument_hash,
-                    Utc::now().to_rfc3339()
-                ],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        Ok(exists)
+        let rows = statement.query_map([connector_filter], |row| {
+            let created_at: String = row.get(4)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                created_at,
+            ))
+        })?;
+        rows.map(|row| {
+            let (connector_id, tool_name, argument_summary, argument_hash, created_at) = row?;
+            Ok(PersistentGrant {
+                connector_id,
+                tool_name,
+                argument_summary,
+                argument_hash,
+                created_at: DateTime::<Utc>::from_str(&created_at)
+                    .context("persistent grant has an invalid timestamp")?,
+            })
+        })
+        .collect()
+    }
+
+    pub fn delete_persistent_grant(
+        &self,
+        connector_id: &str,
+        tool_name: &str,
+        argument_hash: &str,
+    ) -> Result<bool> {
+        let changed = self.lock()?.execute(
+            "DELETE FROM persistent_grants
+             WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3",
+            params![connector_id, tool_name, argument_hash],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn clear_persistent_grants(&self, connector_id: Option<&str>) -> Result<usize> {
+        let connection = self.lock()?;
+        connector_id.map_or_else(
+            || {
+                connection
+                    .execute("DELETE FROM persistent_grants", [])
+                    .map_err(Into::into)
+            },
+            |connector_id| {
+                connection
+                    .execute(
+                        "DELETE FROM persistent_grants WHERE connector_id = ?1",
+                        [connector_id],
+                    )
+                    .map_err(Into::into)
+            },
+        )
     }
 
     pub fn approval_status(&self, id: Uuid) -> Result<Option<ApprovalRequest>> {
@@ -324,6 +411,26 @@ fn configure_connection(connection: &Connection) -> Result<()> {
 }
 
 fn migrate(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_versions (
+            component TEXT PRIMARY KEY,
+            version INTEGER NOT NULL CHECK (version >= 0)
+        );",
+    )?;
+    let current = connection
+        .query_row(
+            "SELECT version FROM schema_versions WHERE component = 'core_state'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if current > STATE_SCHEMA_VERSION {
+        bail!(
+            "state database schema version {current} is newer than supported version {STATE_SCHEMA_VERSION}"
+        );
+    }
+
     let temporary_grants_has_argument_hash = connection
         .prepare("PRAGMA table_info(temporary_grants)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -359,6 +466,16 @@ fn migrate(connection: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS temporary_grants_expiry_idx
             ON temporary_grants(expires_at);
+        CREATE TABLE IF NOT EXISTS persistent_grants (
+            connector_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            argument_hash TEXT NOT NULL,
+            argument_summary TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (connector_id, tool_name, argument_hash)
+        );
+        CREATE INDEX IF NOT EXISTS persistent_grants_connector_idx
+            ON persistent_grants(connector_id, tool_name);
         CREATE TABLE IF NOT EXISTS audit_events (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL UNIQUE,
@@ -381,6 +498,11 @@ fn migrate(connection: &Connection) -> Result<()> {
         );
         INSERT OR IGNORE INTO audit_chain_state (id, anchor_hash)
             VALUES (1, 'GENESIS');",
+    )?;
+    connection.execute(
+        "INSERT INTO schema_versions(component, version) VALUES ('core_state', ?1)
+         ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+        [STATE_SCHEMA_VERSION],
     )?;
     Ok(())
 }
@@ -702,6 +824,47 @@ mod tests {
         drop(connection);
         assert!(removed >= 2);
         assert!(store.verify_audit_chain()?);
+        Ok(())
+    }
+    #[test]
+    fn always_approval_creates_only_an_exact_persistent_grant() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let approval = ApprovalRequest::new(
+            "connector",
+            "fs_write",
+            "Path: /tmp/a.txt",
+            "exact-hash",
+            Utc::now() + Duration::seconds(90),
+        );
+        store.insert_approval(&approval)?;
+        assert!(store.resolve_approval(approval.id, ApprovalDecision::Always)?);
+        assert!(store.grant_allows("connector", "fs_write", "exact-hash")?);
+        assert!(!store.grant_allows("connector", "fs_write", "other-hash")?);
+        assert!(!store.grant_allows("connector", "shell_exec", "exact-hash")?);
+
+        let grants = store.persistent_grants(Some("connector"))?;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].argument_hash, "exact-hash");
+        assert!(store.delete_persistent_grant("connector", "fs_write", "exact-hash")?);
+        assert!(!store.grant_allows("connector", "fs_write", "exact-hash")?);
+        Ok(())
+    }
+    #[test]
+    fn state_schema_version_is_recorded_and_future_versions_are_rejected() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        configure_connection(&connection)?;
+        migrate(&connection)?;
+        let version: i64 = connection.query_row(
+            "SELECT version FROM schema_versions WHERE component = 'core_state'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, STATE_SCHEMA_VERSION);
+        connection.execute(
+            "UPDATE schema_versions SET version = 999 WHERE component = 'core_state'",
+            [],
+        )?;
+        assert!(migrate(&connection).is_err());
         Ok(())
     }
 }

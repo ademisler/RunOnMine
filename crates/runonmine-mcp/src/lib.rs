@@ -52,8 +52,9 @@ use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::process::{ProcessRequest, execute_shell};
 use runonmine_core::secrets::{SecretStore, default_secret_store};
 use runonmine_core::{
-    AppConfig, AppPaths, ApprovalRequest, ApprovalStatus, AuditEvent, AuditOutcome, Capability,
-    ConnectorConfig, ConnectorKind, PolicyEngine, PolicyMode, StateStore,
+    AppConfig, AppPaths, ApprovalRequest, ApprovalStatus, AuditEvent, AuditOutcome,
+    BrowserProfileMode, Capability, ConnectorConfig, ConnectorKind, PolicyEngine, PolicyMode,
+    StateStore,
 };
 use runonmine_oauth::{
     GitHubApiOwnerVerifier, OAuthService, OAuthServiceConfig, Scope, ScopeSet, SqliteOAuthStore,
@@ -77,9 +78,17 @@ use url::Url;
 pub const SERVER_NAME: &str = "runonmine";
 const MCP_BODY_LIMIT: usize = 2 * 1_024 * 1_024;
 const MCP_CONCURRENCY_LIMIT: usize = 64;
+const MAX_COMMAND_BYTES: usize = 256 * 1_024;
+const MAX_SCRIPT_BYTES: usize = 256 * 1_024;
+const MAX_TEXT_INPUT_BYTES: usize = 256 * 1_024;
+const MAX_URL_BYTES: usize = 16 * 1_024;
+const MAX_SELECTOR_BYTES: usize = 8 * 1_024;
+const MAX_ARGUMENT_ITEMS: usize = 256;
+const MAX_ARGUMENT_BYTES: usize = 256 * 1_024;
 
 tokio::task_local! {
     static REQUEST_RUNTIME: Runtime;
+    static REQUEST_ACCESS: RequestAccess;
 }
 
 #[derive(Debug)]
@@ -93,7 +102,7 @@ struct RuntimeInner {
     max_process_timeout: Duration,
     max_output_bytes: usize,
     calls_per_minute: usize,
-    calls: Mutex<VecDeque<Instant>>,
+    calls: Mutex<HashMap<String, VecDeque<Instant>>>,
     max_sessions: usize,
     active_sessions: Arc<AtomicUsize>,
 }
@@ -103,7 +112,8 @@ struct Runtime(Arc<RuntimeInner>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RequestPrincipal {
-    Local,
+    LocalHttp,
+    QuickTunnel,
     OAuth {
         client_id: String,
         subject: String,
@@ -115,6 +125,22 @@ enum RequestPrincipal {
 struct RequestAccess {
     connector_id: String,
     principal: RequestPrincipal,
+}
+
+#[derive(Clone)]
+struct LocalHttpConnector {
+    runtime: Runtime,
+    token: Arc<secrecy::SecretString>,
+}
+
+impl std::fmt::Debug for LocalHttpConnector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalHttpConnector")
+            .field("connector_id", &self.runtime.0.connector_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -150,12 +176,22 @@ struct SessionBinding {
 
 #[derive(Clone, Debug)]
 struct HttpConnectorState {
-    local: Option<Runtime>,
+    local: Option<LocalHttpConnector>,
     quick: Option<QuickHttpConnector>,
     oauth: Option<OAuthHttpConnector>,
     agent_port: u16,
     session_idle_ttl: Duration,
     sessions: Arc<AsyncMutex<HashMap<String, SessionBinding>>>,
+}
+
+impl RequestAccess {
+    fn rate_limit_key(&self) -> String {
+        match &self.principal {
+            RequestPrincipal::LocalHttp => "local_http".to_owned(),
+            RequestPrincipal::QuickTunnel => "quick_tunnel".to_owned(),
+            RequestPrincipal::OAuth { client_id, .. } => format!("oauth:{client_id}"),
+        }
+    }
 }
 
 impl Runtime {
@@ -186,7 +222,7 @@ impl Runtime {
             max_process_timeout: Duration::from_secs(config.limits.max_process_timeout_seconds),
             max_output_bytes: config.limits.max_output_bytes,
             calls_per_minute: usize::try_from(config.limits.calls_per_minute).unwrap_or(usize::MAX),
-            calls: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(HashMap::new()),
             max_sessions: config.limits.max_sessions,
             active_sessions: Arc::new(AtomicUsize::new(0)),
         })))
@@ -226,7 +262,7 @@ impl Runtime {
         }
     }
 
-    fn check_rate_limit(&self) -> Result<()> {
+    fn check_rate_limit(&self, principal: &str) -> Result<()> {
         let mut calls = self
             .0
             .calls
@@ -234,13 +270,17 @@ impl Runtime {
             .map_err(|_| anyhow::anyhow!("rate limit lock failed"))?;
         let now = Instant::now();
         let cutoff = now.checked_sub(Duration::from_mins(1)).unwrap_or(now);
-        while calls.front().is_some_and(|instant| *instant < cutoff) {
-            calls.pop_front();
+        for entries in calls.values_mut() {
+            while entries.front().is_some_and(|instant| *instant < cutoff) {
+                entries.pop_front();
+            }
         }
-        if calls.len() >= self.0.calls_per_minute {
-            bail!("connector rate limit reached");
+        calls.retain(|_, entries| !entries.is_empty());
+        let entries = calls.entry(principal.to_owned()).or_default();
+        if entries.len() >= self.0.calls_per_minute {
+            bail!("principal rate limit reached");
         }
-        calls.push_back(Instant::now());
+        entries.push_back(now);
         Ok(())
     }
 }
@@ -292,6 +332,28 @@ impl IdleSessionManager {
             .await
             .insert(id.clone(), Instant::now());
         Ok(())
+    }
+
+    async fn close_expired(&self) -> usize {
+        let expired = {
+            let mut last_seen = self.last_seen.write().await;
+            let expired = last_seen
+                .iter()
+                .filter(|(_, seen)| seen.elapsed() >= self.idle_ttl)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for id in &expired {
+                last_seen.remove(id);
+            }
+            expired
+        };
+        let mut closed = 0_usize;
+        for id in expired {
+            if self.inner.close_session(&id).await.is_ok() {
+                closed += 1;
+            }
+        }
+        closed
     }
 }
 
@@ -400,22 +462,37 @@ impl RunOnMineServer {
         let permit = Arc::new(runtime.acquire_session()?);
         let paths = AppPaths::discover()?;
         let app_config = AppConfig::load(&paths.config_file())?;
+        let remote_connector = matches!(
+            connector.kind,
+            ConnectorKind::CloudflareQuick
+                | ConnectorKind::CloudflareOauth
+                | ConnectorKind::OpenAiTunnel
+        );
         let browser_profile = match app_config.browser.external_cdp_url.clone() {
+            Some(_) if remote_connector => {
+                bail!("external CDP attachment is unavailable to remote connectors")
+            }
             Some(endpoint) => BrowserProfile::external(endpoint)?,
-            None => BrowserProfile::Isolated {
-                directory: paths
+            None => {
+                let base = paths
                     .browser_profiles()
                     .join(&app_config.browser.profile_name)
-                    .join(&connector.id)
-                    .join(uuid::Uuid::new_v4().to_string()),
-            },
+                    .join(&connector.id);
+                match app_config.browser.profile_mode {
+                    BrowserProfileMode::Ephemeral => BrowserProfile::isolated_ephemeral(
+                        base.join(uuid::Uuid::new_v4().to_string()),
+                    ),
+                    BrowserProfileMode::Persistent => BrowserProfile::isolated_persistent(base),
+                }
+            }
         };
         let browser_available =
             matches!(browser_profile, BrowserProfile::ExternalCdp { .. }) || chromium_available();
         let browser = Arc::new(BrowserSession::new(
             browser_profile,
             browser_should_be_headless(),
-            app_config.browser.allow_private_network,
+            app_config.browser.allow_private_network && !remote_connector,
+            runtime.0.max_output_bytes,
         ));
         let engine = PolicyEngine;
         let mut tool_router = Self::tool_router();
@@ -473,7 +550,10 @@ impl RunOnMineServer {
         summary: &str,
         arguments: &T,
     ) -> Result<(), McpError> {
-        if self.runtime.check_rate_limit().is_err() {
+        let rate_limit_key = REQUEST_ACCESS
+            .try_with(RequestAccess::rate_limit_key)
+            .unwrap_or_else(|_| "stdio".to_owned());
+        if self.runtime.check_rate_limit(&rate_limit_key).is_err() {
             self.audit(
                 tool_name,
                 capability,
@@ -489,7 +569,10 @@ impl RunOnMineServer {
         let connector = self.runtime.connector().map_err(|_| {
             McpError::invalid_request("Connector configuration is unavailable", None)
         })?;
-        let argument_hash = argument_hash(arguments);
+        let argument_hash = argument_hash(arguments).map_err(|error| {
+            tracing::error!(%error, "failed to serialize tool arguments for authorization");
+            McpError::internal_error("Tool arguments could not be safely authorized", None)
+        })?;
         let mode = PolicyEngine
             .evaluate(&connector, tool_name, capability)
             .mode;
@@ -498,7 +581,7 @@ impl RunOnMineServer {
                 .runtime
                 .0
                 .store
-                .temporary_grant_allows(&connector.id, tool_name, &argument_hash)
+                .grant_allows(&connector.id, tool_name, &argument_hash)
                 .unwrap_or(false)
         {
             self.audit_authorization_required(
@@ -653,13 +736,14 @@ impl RunOnMineServer {
         arguments: &T,
         summary: &str,
     ) {
-        self.audit_with_hash(
-            tool_name,
-            capability,
-            outcome,
-            &argument_hash(arguments),
-            summary,
-        );
+        match argument_hash(arguments) {
+            Ok(hash) => self.audit_with_hash(tool_name, capability, outcome, &hash, summary),
+            Err(error) => tracing::error!(
+                %error,
+                tool_name,
+                "failed to serialize tool arguments for audit"
+            ),
+        }
     }
 
     fn audit_with_hash(
@@ -768,12 +852,25 @@ impl RunOnMineServer {
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 struct EmptyArgs {}
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct PathArgs {
     path: PathBuf,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct ListArgs {
+    path: PathBuf,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_list_limit")]
+    limit: usize,
+}
+
+const fn default_list_limit() -> usize {
+    250
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct ReadArgs {
     path: PathBuf,
     #[serde(default = "default_read_limit")]
@@ -784,25 +881,37 @@ fn default_read_limit() -> usize {
     256 * 1_024
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct SearchArgs {
     root: PathBuf,
     query: String,
     #[serde(default = "default_search_limit")]
     limit: usize,
+    #[serde(default = "default_search_depth")]
+    max_depth: usize,
+    #[serde(default = "default_search_nodes")]
+    max_nodes: usize,
 }
 
-fn default_search_limit() -> usize {
+const fn default_search_limit() -> usize {
     100
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+const fn default_search_depth() -> usize {
+    16
+}
+
+const fn default_search_nodes() -> usize {
+    50_000
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct WriteArgs {
     path: PathBuf,
     content: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct PatchArgs {
     path: PathBuf,
     old_text: String,
@@ -815,7 +924,7 @@ const fn one() -> usize {
     1
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct MoveArgs {
     from: PathBuf,
     to: PathBuf,
@@ -972,16 +1081,30 @@ impl RunOnMineServer {
             &arguments,
         )
         .await?;
-        let hostname = hostname::get().ok().map_or_else(
-            || "unknown".to_owned(),
-            |value| value.to_string_lossy().into_owned(),
+        let connector = self.runtime.connector().map_err(|_| {
+            McpError::internal_error("Connector configuration is unavailable", None)
+        })?;
+        let remote_connector = matches!(
+            connector.kind,
+            ConnectorKind::CloudflareQuick
+                | ConnectorKind::CloudflareOauth
+                | ConnectorKind::OpenAiTunnel
         );
+        let hostname = if remote_connector {
+            None
+        } else {
+            hostname::get()
+                .ok()
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let allowed_roots = (!remote_connector).then(|| self.runtime.0.filesystem.roots());
         let admin_allowlisted_programs = self.admin_allowlisted_programs().await.unwrap_or(0);
         Self::success(&json!({
             "hostname": hostname,
             "os": std::env::consts::OS,
             "architecture": std::env::consts::ARCH,
-            "allowed_roots": self.runtime.0.filesystem.roots(),
+            "allowed_roots": allowed_roots,
+            "allowed_root_count": self.runtime.0.filesystem.roots().len(),
             "admin_helper": admin_allowlisted_programs > 0,
             "admin_allowlisted_programs": admin_allowlisted_programs,
             "desktop_capture": desktop::capture_available(),
@@ -1000,7 +1123,7 @@ impl RunOnMineServer {
     )]
     async fn fs_list(
         &self,
-        Parameters(arguments): Parameters<PathArgs>,
+        Parameters(arguments): Parameters<ListArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.authorize(
             "fs_list",
@@ -1009,9 +1132,21 @@ impl RunOnMineServer {
             &arguments,
         )
         .await?;
-        match self.runtime.0.filesystem.list(&arguments.path) {
-            Ok(entries) => Self::success(&entries),
-            Err(_) => Err(self.tool_failed("fs_list", Capability::FilesRead, &arguments)),
+        let filesystem = self.runtime.0.filesystem.clone();
+        let task_arguments = arguments.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            filesystem.list_limited(
+                &task_arguments.path,
+                task_arguments.offset.min(1_000_000),
+                task_arguments.limit.clamp(1, 1_000),
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(entries)) => Self::success(&entries),
+            Ok(Err(_)) | Err(_) => {
+                Err(self.tool_failed("fs_list", Capability::FilesRead, &arguments))
+            }
         }
     }
 
@@ -1038,9 +1173,14 @@ impl RunOnMineServer {
         let limit = arguments
             .max_bytes
             .clamp(1, self.runtime.0.max_output_bytes);
-        match self.runtime.0.filesystem.read_text(&arguments.path, limit) {
-            Ok((content, truncated)) => Self::success(&ReadOutput { content, truncated }),
-            Err(_) => Err(self.tool_failed("fs_read", Capability::FilesRead, &arguments)),
+        let filesystem = self.runtime.0.filesystem.clone();
+        let path = arguments.path.clone();
+        let result = tokio::task::spawn_blocking(move || filesystem.read_text(&path, limit)).await;
+        match result {
+            Ok(Ok((content, truncated))) => Self::success(&ReadOutput { content, truncated }),
+            Ok(Err(_)) | Err(_) => {
+                Err(self.tool_failed("fs_read", Capability::FilesRead, &arguments))
+            }
         }
     }
 
@@ -1064,15 +1204,24 @@ impl RunOnMineServer {
             &arguments,
         )
         .await?;
-        let limit = arguments.limit.clamp(1, 1_000);
-        match self
-            .runtime
-            .0
-            .filesystem
-            .search_names(&arguments.root, &arguments.query, limit)
-        {
-            Ok(matches) => Self::success(&matches),
-            Err(_) => Err(self.tool_failed("fs_search", Capability::FilesRead, &arguments)),
+        let filesystem = self.runtime.0.filesystem.clone();
+        let task_arguments = arguments.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            filesystem.search_names_bounded(
+                &task_arguments.root,
+                &task_arguments.query,
+                task_arguments.limit.clamp(1, 1_000),
+                task_arguments.max_depth.clamp(1, 64),
+                task_arguments.max_nodes.clamp(1, 1_000_000),
+                Duration::from_secs(5),
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(matches)) => Self::success(&matches),
+            Ok(Err(_)) | Err(_) => {
+                Err(self.tool_failed("fs_search", Capability::FilesRead, &arguments))
+            }
         }
     }
 
@@ -1096,14 +1245,23 @@ impl RunOnMineServer {
             &arguments,
         )
         .await?;
-        match self
-            .runtime
-            .0
-            .filesystem
-            .write_atomic(&arguments.path, arguments.content.as_bytes())
-        {
-            Ok(path) => Self::success(&json!({"path": path, "bytes": arguments.content.len()})),
-            Err(_) => Err(self.tool_failed("fs_write", Capability::FilesWrite, &arguments)),
+        if arguments.content.len() > self.runtime.0.max_output_bytes {
+            return Err(McpError::invalid_params(
+                "File content exceeds the configured size limit",
+                None,
+            ));
+        }
+        let filesystem = self.runtime.0.filesystem.clone();
+        let task_arguments = arguments.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            filesystem.write_atomic(&task_arguments.path, task_arguments.content.as_bytes())
+        })
+        .await;
+        match result {
+            Ok(Ok(path)) => Self::success(&json!({"path": path, "bytes": arguments.content.len()})),
+            Ok(Err(_)) | Err(_) => {
+                Err(self.tool_failed("fs_write", Capability::FilesWrite, &arguments))
+            }
         }
     }
 
@@ -1127,39 +1285,46 @@ impl RunOnMineServer {
             &arguments,
         )
         .await?;
-        if arguments.old_text.is_empty() || arguments.expected_replacements == 0 {
+        if arguments.old_text.is_empty()
+            || arguments.expected_replacements == 0
+            || arguments.expected_replacements > 10_000
+            || arguments.old_text.len() > self.runtime.0.max_output_bytes
+            || arguments.new_text.len() > self.runtime.0.max_output_bytes
+        {
             return Err(McpError::invalid_params(
-                "Patch match and replacement count are required",
+                "Patch parameters are missing or exceed configured limits",
                 None,
             ));
         }
-        let result = (|| -> Result<usize> {
-            let (content, truncated) = self
-                .runtime
-                .0
-                .filesystem
-                .read_text(&arguments.path, self.runtime.0.max_output_bytes)?;
+        let filesystem = self.runtime.0.filesystem.clone();
+        let maximum = self.runtime.0.max_output_bytes;
+        let task_arguments = arguments.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<usize> {
+            let (content, truncated) = filesystem.read_text(&task_arguments.path, maximum)?;
             if truncated {
                 bail!("file exceeds the patch limit");
             }
-            let count = content.matches(&arguments.old_text).count();
-            if count != arguments.expected_replacements {
+            let count = content.matches(&task_arguments.old_text).count();
+            if count != task_arguments.expected_replacements {
                 bail!("patch match count differs from the expected count");
             }
             let updated = content.replacen(
-                &arguments.old_text,
-                &arguments.new_text,
-                arguments.expected_replacements,
+                &task_arguments.old_text,
+                &task_arguments.new_text,
+                task_arguments.expected_replacements,
             );
-            self.runtime
-                .0
-                .filesystem
-                .write_atomic(&arguments.path, updated.as_bytes())?;
+            if updated.len() > maximum {
+                bail!("patched file exceeds the configured size limit");
+            }
+            filesystem.write_atomic(&task_arguments.path, updated.as_bytes())?;
             Ok(count)
-        })();
+        })
+        .await;
         match result {
-            Ok(replacements) => Self::success(&json!({"replacements": replacements})),
-            Err(_) => Err(self.tool_failed("fs_patch", Capability::FilesWrite, &arguments)),
+            Ok(Ok(replacements)) => Self::success(&json!({"replacements": replacements})),
+            Ok(Err(_)) | Err(_) => {
+                Err(self.tool_failed("fs_patch", Capability::FilesWrite, &arguments))
+            }
         }
     }
 
@@ -1183,14 +1348,17 @@ impl RunOnMineServer {
             &arguments,
         )
         .await?;
-        match self
-            .runtime
-            .0
-            .filesystem
-            .move_path(&arguments.from, &arguments.to)
-        {
-            Ok(()) => Self::success(&json!({"moved": true})),
-            Err(_) => Err(self.tool_failed("fs_move", Capability::FilesWrite, &arguments)),
+        let filesystem = self.runtime.0.filesystem.clone();
+        let task_arguments = arguments.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            filesystem.move_path(&task_arguments.from, &task_arguments.to)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => Self::success(&json!({"moved": true})),
+            Ok(Err(_)) | Err(_) => {
+                Err(self.tool_failed("fs_move", Capability::FilesWrite, &arguments))
+            }
         }
     }
 
@@ -1214,9 +1382,14 @@ impl RunOnMineServer {
             &arguments,
         )
         .await?;
-        match self.runtime.0.filesystem.move_to_trash(&arguments.path) {
-            Ok(()) => Self::success(&json!({"trashed": true})),
-            Err(_) => Err(self.tool_failed("fs_delete", Capability::FilesWrite, &arguments)),
+        let filesystem = self.runtime.0.filesystem.clone();
+        let path = arguments.path.clone();
+        let result = tokio::task::spawn_blocking(move || filesystem.move_to_trash(&path)).await;
+        match result {
+            Ok(Ok(())) => Self::success(&json!({"trashed": true})),
+            Ok(Err(_)) | Err(_) => {
+                Err(self.tool_failed("fs_delete", Capability::FilesWrite, &arguments))
+            }
         }
     }
 
@@ -1233,6 +1406,8 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<ShellArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.command, "Shell command", MAX_COMMAND_BYTES)?;
+        validate_optional_path(arguments.cwd.as_deref(), "Shell working directory")?;
         self.authorize(
             "shell_exec",
             Capability::ShellExec,
@@ -1285,6 +1460,8 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<AdminExecArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_path(&arguments.program, "Privileged program")?;
+        validate_string_arguments(&arguments.args, "Privileged arguments")?;
         self.authorize(
             "admin_exec",
             Capability::AdminExec,
@@ -1484,6 +1661,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<DesktopTypeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_text(&arguments.text, "Desktop text", MAX_TEXT_INPUT_BYTES)?;
         self.authorize(
             "desktop_type",
             Capability::DesktopControl,
@@ -1511,6 +1689,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<DesktopKeyArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.key, "Desktop key", 64)?;
         self.authorize(
             "desktop_key",
             Capability::DesktopControl,
@@ -1538,6 +1717,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<PlatformScriptArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.script, "AppleScript", MAX_SCRIPT_BYTES)?;
         self.authorize(
             "macos_applescript",
             Capability::PlatformNative,
@@ -1572,6 +1752,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<PlatformScriptArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.script, "PowerShell script", MAX_SCRIPT_BYTES)?;
         self.authorize(
             "windows_powershell",
             Capability::PlatformNative,
@@ -1606,6 +1787,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<DbusCallArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_dbus_arguments(&arguments)?;
         self.authorize(
             "linux_dbus_call",
             Capability::PlatformNative,
@@ -1646,6 +1828,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<UrlArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.url, "Browser URL", MAX_URL_BYTES)?;
         self.authorize(
             "browser_open",
             Capability::BrowserAct,
@@ -1672,6 +1855,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<UrlArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.url, "Browser URL", MAX_URL_BYTES)?;
         self.authorize(
             "browser_navigate",
             Capability::BrowserAct,
@@ -1732,10 +1916,10 @@ impl RunOnMineServer {
         )
         .await?;
         match self.browser.text().await {
-            Ok(mut text) => {
-                text.truncate(self.runtime.0.max_output_bytes);
-                Self::success(&json!({"text": text}))
-            }
+            Ok(text) => Self::success(&json!({
+                "text": text.content,
+                "truncated": text.truncated,
+            })),
             Err(_) => {
                 Err(self.tool_failed("browser_get_text", Capability::BrowserRead, &arguments))
             }
@@ -1763,10 +1947,10 @@ impl RunOnMineServer {
         )
         .await?;
         match self.browser.snapshot().await {
-            Ok(mut html) => {
-                html.truncate(self.runtime.0.max_output_bytes);
-                Self::success(&json!({"html": html}))
-            }
+            Ok(html) => Self::success(&json!({
+                "html": html.content,
+                "truncated": html.truncated,
+            })),
             Err(_) => {
                 Err(self.tool_failed("browser_snapshot", Capability::BrowserRead, &arguments))
             }
@@ -1786,6 +1970,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<SelectorArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.selector, "Browser selector", MAX_SELECTOR_BYTES)?;
         self.authorize(
             "browser_click",
             Capability::BrowserAct,
@@ -1812,6 +1997,8 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<TypeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.selector, "Browser selector", MAX_SELECTOR_BYTES)?;
+        validate_text(&arguments.text, "Browser text", MAX_TEXT_INPUT_BYTES)?;
         self.authorize(
             "browser_type",
             Capability::BrowserAct,
@@ -1842,6 +2029,7 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<KeyArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(&arguments.key, "Browser key", 64)?;
         self.authorize(
             "browser_press",
             Capability::BrowserAct,
@@ -1906,6 +2094,11 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<EvaluateArgs>,
     ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(
+            &arguments.expression,
+            "Browser JavaScript",
+            MAX_SCRIPT_BYTES,
+        )?;
         self.authorize(
             "browser_evaluate",
             Capability::BrowserAct,
@@ -1977,7 +2170,6 @@ impl RunOnMineServer {
 #[tool_handler(
     router = self.tool_router,
     name = "runonmine",
-    version = "0.1.0-beta.1",
     instructions = "RunOnMine exposes only tools allowed by the machine owner's local policy. Ask-mode tools require approval on the machine."
 )]
 impl ServerHandler for RunOnMineServer {
@@ -2124,6 +2316,12 @@ pub async fn serve_loopback() -> Result<()> {
         allowed_hosts.push(oauth.public_host.clone());
         allowed_origins.push(format!("https://{}", oauth.public_host));
     }
+    let session_manager = Arc::new(IdleSessionManager::new(connector_state.session_idle_ttl));
+    let session_sweeper = spawn_session_sweeper(
+        Arc::downgrade(&session_manager),
+        Arc::downgrade(&connector_state),
+        connector_state.session_idle_ttl,
+    );
     let service = StreamableHttpService::new(
         || {
             REQUEST_RUNTIME
@@ -2131,7 +2329,7 @@ pub async fn serve_loopback() -> Result<()> {
                 .map_err(|_| std::io::Error::other("MCP request connector context is missing"))?
                 .map_err(|_| std::io::Error::other("MCP session initialization failed"))
         },
-        Arc::new(IdleSessionManager::new(connector_state.session_idle_ttl)),
+        session_manager,
         StreamableHttpServerConfig::default()
             .with_allowed_hosts(allowed_hosts)
             .with_allowed_origins(allowed_origins),
@@ -2163,8 +2361,41 @@ pub async fn serve_loopback() -> Result<()> {
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await;
+    session_sweeper.abort();
+    let _ignored = session_sweeper.await;
     managed_connectors.stop().await;
     result.map_err(Into::into)
+}
+
+fn spawn_session_sweeper(
+    manager: std::sync::Weak<IdleSessionManager>,
+    state: std::sync::Weak<HttpConnectorState>,
+    idle_ttl: Duration,
+) -> tokio::task::JoinHandle<()> {
+    let half_ttl = idle_ttl / 2;
+    let interval = half_ttl.clamp(Duration::from_secs(5), Duration::from_mins(1));
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let (Some(manager), Some(state)) = (manager.upgrade(), state.upgrade()) else {
+                return;
+            };
+            let closed = manager.close_expired().await;
+            let mut bindings = state.sessions.lock().await;
+            let before = bindings.len();
+            bindings.retain(|_, binding| binding.last_seen.elapsed() < idle_ttl);
+            let removed_bindings = before.saturating_sub(bindings.len());
+            if closed > 0 || removed_bindings > 0 {
+                tracing::debug!(
+                    closed,
+                    removed_bindings,
+                    "expired MCP sessions were cleaned up"
+                );
+            }
+        }
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2413,7 +2644,21 @@ fn build_http_connector_state(paths: &AppPaths, config: &AppConfig) -> Result<Ht
         .filter(|connector| connector.enabled)
     {
         match connector.kind {
-            ConnectorKind::LocalHttp => local = Some(Runtime::load(&connector.id)?),
+            ConnectorKind::LocalHttp => {
+                let secret_name = format!("connector.{}.local_http_token", connector.id);
+                if let Some(token) = secrets.get(&secret_name)? {
+                    validate_local_http_token(token.expose_secret())?;
+                    local = Some(LocalHttpConnector {
+                        runtime: Runtime::load(&connector.id)?,
+                        token: Arc::new(token),
+                    });
+                } else {
+                    tracing::warn!(
+                        connector_id = %connector.id,
+                        "local HTTP connector is enabled without a bearer token and will remain unavailable"
+                    );
+                }
+            }
             ConnectorKind::CloudflareQuick => {
                 let path_secret = required_secret(
                     secrets.as_ref(),
@@ -2518,12 +2763,20 @@ fn required_secret(store: &dyn SecretStore, name: &str) -> Result<secrecy::Secre
         .with_context(|| format!("required credential {name} is missing"))
 }
 
+fn validate_local_http_token(value: &str) -> Result<()> {
+    validate_256_bit_url_secret(value, "Local HTTP bearer token")
+}
+
 fn validate_quick_path_secret(value: &str) -> Result<()> {
+    validate_256_bit_url_secret(value, "Quick Tunnel path secret")
+}
+
+fn validate_256_bit_url_secret(value: &str, label: &str) -> Result<()> {
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value)
-        .context("Quick Tunnel path secret is invalid")?;
+        .with_context(|| format!("{label} is invalid"))?;
     if decoded.len() != 32 {
-        bail!("Quick Tunnel path secret must contain 256 bits");
+        bail!("{label} must contain 256 bits");
     }
     Ok(())
 }
@@ -2554,7 +2807,12 @@ async fn http_connector_auth(
     }
     request.extensions_mut().insert(access.clone());
     let method = request.method().clone();
-    let response = REQUEST_RUNTIME.scope(runtime, next.run(request)).await;
+    let response = REQUEST_RUNTIME
+        .scope(
+            runtime,
+            REQUEST_ACCESS.scope(access.clone(), next.run(request)),
+        )
+        .await;
     if let Some(response_session) = response_session_id(response.headers()) {
         state.sessions.lock().await.insert(
             response_session,
@@ -2611,7 +2869,7 @@ fn select_http_connector(
             quick.runtime.clone(),
             RequestAccess {
                 connector_id: quick.runtime.0.connector_id.clone(),
-                principal: RequestPrincipal::Local,
+                principal: RequestPrincipal::QuickTunnel,
             },
         ));
     }
@@ -2652,11 +2910,18 @@ fn select_http_connector(
             .is_none_or(|port| port == state.agent_port)
         && let Some(local) = &state.local
     {
+        let supplied = local_bearer_token(request)?;
+        let expected = local.token.expose_secret().as_bytes();
+        let matches =
+            supplied.len() == expected.len() && bool::from(supplied.as_bytes().ct_eq(expected));
+        if !matches {
+            return Err(local_unauthorized());
+        }
         return Ok((
-            local.clone(),
+            local.runtime.clone(),
             RequestAccess {
-                connector_id: local.0.connector_id.clone(),
-                principal: RequestPrincipal::Local,
+                connector_id: local.runtime.0.connector_id.clone(),
+                principal: RequestPrincipal::LocalHttp,
             },
         ));
     }
@@ -2682,18 +2947,33 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 #[allow(clippy::result_large_err)]
+fn local_bearer_token(request: &Request) -> Result<&str, Response> {
+    parse_bearer_token(request).map_err(|()| local_unauthorized())
+}
+
+fn local_unauthorized() -> Response {
+    let mut response = StatusCode::UNAUTHORIZED.into_response();
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
+}
+
+#[allow(clippy::result_large_err)]
 fn bearer_token<'a>(request: &'a Request, resource_metadata: &Url) -> Result<&'a str, Response> {
-    let Some(value) = request.headers().get(AUTHORIZATION) else {
-        return Err(unauthorized(resource_metadata));
-    };
-    let value = value
+    parse_bearer_token(request).map_err(|()| unauthorized(resource_metadata))
+}
+
+fn parse_bearer_token(request: &Request) -> Result<&str, ()> {
+    let value = request
+        .headers()
+        .get(AUTHORIZATION)
+        .ok_or(())?
         .to_str()
-        .map_err(|_| unauthorized(resource_metadata))?;
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return Err(unauthorized(resource_metadata));
-    };
+        .map_err(|_| ())?;
+    let token = value.strip_prefix("Bearer ").ok_or(())?;
     if token.is_empty() || token.contains(char::is_whitespace) {
-        return Err(unauthorized(resource_metadata));
+        return Err(());
     }
     Ok(token)
 }
@@ -2945,9 +3225,78 @@ const fn capability_requires_reliable_audit(capability: Capability) -> bool {
     )
 }
 
-fn argument_hash(value: &impl Serialize) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    blake3::hash(&bytes).to_hex().to_string()
+fn argument_hash(value: &impl Serialize) -> Result<String> {
+    let bytes = serde_json::to_vec(value).context("tool argument serialization failed")?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn validate_text(value: &str, label: &str, maximum: usize) -> Result<(), McpError> {
+    if value.len() > maximum {
+        return Err(McpError::invalid_params(
+            format!("{label} exceeds the configured size limit"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_nonempty_text(value: &str, label: &str, maximum: usize) -> Result<(), McpError> {
+    if value.trim().is_empty() {
+        return Err(McpError::invalid_params(
+            format!("{label} must not be empty"),
+            None,
+        ));
+    }
+    validate_text(value, label, maximum)
+}
+
+fn validate_path(path: &std::path::Path, label: &str) -> Result<(), McpError> {
+    if path.as_os_str().is_empty() || path.as_os_str().len() > 32 * 1_024 {
+        return Err(McpError::invalid_params(
+            format!("{label} is empty or exceeds the size limit"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_path(path: Option<&std::path::Path>, label: &str) -> Result<(), McpError> {
+    if let Some(path) = path {
+        validate_path(path, label)?;
+    }
+    Ok(())
+}
+
+fn validate_string_arguments(values: &[String], label: &str) -> Result<(), McpError> {
+    if values.len() > MAX_ARGUMENT_ITEMS
+        || values
+            .iter()
+            .try_fold(0_usize, |total, value| total.checked_add(value.len()))
+            .is_none_or(|total| total > MAX_ARGUMENT_BYTES)
+    {
+        return Err(McpError::invalid_params(
+            format!("{label} exceed the configured limits"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dbus_arguments(arguments: &DbusCallArgs) -> Result<(), McpError> {
+    for (label, value, maximum) in [
+        (
+            "D-Bus destination",
+            arguments.destination.as_str(),
+            512_usize,
+        ),
+        ("D-Bus object path", arguments.object_path.as_str(), 4_096),
+        ("D-Bus interface", arguments.interface.as_str(), 512),
+        ("D-Bus method", arguments.method.as_str(), 512),
+    ] {
+        validate_nonempty_text(value, label, maximum)?;
+    }
+    validate_text(&arguments.signature, "D-Bus signature", 1_024)?;
+    validate_string_arguments(&arguments.arguments, "D-Bus arguments")
 }
 
 const fn capability_name(capability: Capability) -> &'static str {
@@ -2980,10 +3329,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn argument_hash_does_not_expose_arguments() {
-        let hash = argument_hash(&json!({"token": "secret-value"}));
+    fn argument_hash_does_not_expose_arguments() -> Result<()> {
+        let hash = argument_hash(&json!({"token": "secret-value"}))?;
         assert_eq!(hash.len(), 64);
         assert!(!hash.contains("secret-value"));
+        Ok(())
     }
 
     #[test]
@@ -3046,5 +3396,66 @@ mod tests {
 
         assert!(!manager.has_session(&id).await?);
         Ok(())
+    }
+    #[test]
+    fn argument_hash_fails_closed_on_serialization_error() {
+        struct Broken;
+
+        impl Serialize for Broken {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                use serde::ser::Error as _;
+                Err(S::Error::custom("broken"))
+            }
+        }
+
+        assert!(argument_hash(&Broken).is_err());
+    }
+
+    #[test]
+    fn bearer_parser_requires_exact_bearer_syntax() -> Result<()> {
+        let request = Request::builder()
+            .header(AUTHORIZATION, "Bearer secret-token")
+            .body(axum::body::Body::empty())?;
+        assert_eq!(parse_bearer_token(&request), Ok("secret-token"));
+
+        let malformed = Request::builder()
+            .header(AUTHORIZATION, "bearer secret-token")
+            .body(axum::body::Body::empty())?;
+        assert!(parse_bearer_token(&malformed).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn local_http_token_requires_256_bits() {
+        let valid = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        assert!(validate_local_http_token(&valid).is_ok());
+        assert!(validate_local_http_token("too-short").is_err());
+    }
+
+    #[test]
+    fn dbus_validation_accepts_an_empty_signature_for_no_arguments() {
+        let arguments = DbusCallArgs {
+            destination: "org.example.Service".to_owned(),
+            object_path: "/org/example/Service".to_owned(),
+            interface: "org.example.Service".to_owned(),
+            method: "Ping".to_owned(),
+            signature: String::new(),
+            arguments: Vec::new(),
+            timeout_seconds: None,
+        };
+        assert!(validate_dbus_arguments(&arguments).is_ok());
+    }
+
+    #[test]
+    fn input_validators_reject_oversized_values() {
+        assert!(validate_nonempty_text("", "value", 10).is_err());
+        assert!(validate_text(&"x".repeat(11), "value", 10).is_err());
+        assert!(
+            validate_string_arguments(&vec!["x".to_owned(); MAX_ARGUMENT_ITEMS + 1], "args")
+                .is_err()
+        );
     }
 }

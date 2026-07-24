@@ -11,11 +11,11 @@ pub mod process;
 pub mod secrets;
 pub mod storage;
 
-pub use approval::{ApprovalDecision, ApprovalRequest, ApprovalStatus};
+pub use approval::{ApprovalDecision, ApprovalRequest, ApprovalStatus, PersistentGrant};
 pub use audit::{AuditEvent, AuditOutcome};
 pub use config::{
-    AppConfig, CloudflareNamedSettings, CloudflareQuickSettings, ConnectorConfig, ConnectorKind,
-    OAuthOwnerSettings, OpenAiTunnelSettings,
+    AppConfig, BrowserProfileMode, CloudflareNamedSettings, CloudflareQuickSettings,
+    ConnectorConfig, ConnectorKind, OAuthOwnerSettings, OpenAiTunnelSettings,
 };
 pub use paths::AppPaths;
 pub use policy::{Capability, PolicyDecision, PolicyEngine, PolicyMode, PolicyPreset};

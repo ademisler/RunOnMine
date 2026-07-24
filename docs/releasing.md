@@ -7,7 +7,7 @@ separate owner decision and is never changed by CI.
 
 Before creating a tag:
 
-1. run formatting, Clippy with warnings denied, and the complete test suite;
+1. run formatting, `xtask verify-versions`, Clippy with warnings denied, and the complete test suite;
 2. run `cargo audit`, `cargo deny check`, and a full-history secret scan;
 3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, and Windows x86_64 builds;
 4. complete install, restart, connect, tool-call, and uninstall acceptance on a Mac, clean Linux VPS, and Windows VM;
@@ -40,6 +40,8 @@ separate owner approval.
 ## Local packaging helpers
 
 ```console
+cargo run --locked -p xtask -- verify-versions
+cargo run --locked -p xtask -- sync-versions
 cargo run -p xtask -- package --target <rust-target>
 cargo run -p xtask -- stage-packager --target <rust-target>
 cargo run -p xtask -- checksums
