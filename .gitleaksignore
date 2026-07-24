@@ -1,0 +1,2 @@
+# Intentional fake credential used to verify approval-preview redaction.
+20a2408a67e9a80ca924c410b717438e9c69b39a:crates/runonmine-mcp/src/lib.rs:curl-auth-header:2973
