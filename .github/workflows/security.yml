@@ -50,13 +50,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install pinned Gitleaks
-        run: go install github.com/gitleaks/gitleaks/v8@v8.24.3
       - name: Verify Gitleaks version
-        run: |
-          GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks"
-          "$GITLEAKS_BIN" version | grep -Fx '8.24.3'
+        run: gitleaks version | grep -Fx '8.24.3'
       - name: Scan complete Git history
-        run: |
-          GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks"
-          "$GITLEAKS_BIN" git --redact --no-banner --verbose
+        run: gitleaks git --redact --no-banner --verbose
