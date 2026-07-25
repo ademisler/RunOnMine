@@ -2087,22 +2087,38 @@ mod desktop {
             });
             content.add_space(20.0);
 
-            egui::ScrollArea::vertical()
-                .id_salt("main-content-scroll")
-                .auto_shrink([false, false])
-                .show(&mut content, |ui| {
-                    ui.set_width(ui.available_width());
-                    match self.selected_tab {
-                        Tab::Overview => self.show_overview(ui),
-                        Tab::Approvals => self.show_approvals(ui),
-                        Tab::Connections => self.show_connections(ui),
-                        Tab::Permissions => self.show_permissions(ui),
-                        Tab::OAuth => self.show_oauth(ui),
-                        Tab::Audit => self.show_audit(ui),
-                        Tab::Diagnostics => self.show_diagnostics(ui),
-                    }
-                    ui.add_space(20.0);
-                });
+            // The sticky header and scrolling page body use independent clipping
+            // regions so custom-painted cards can never draw under the header.
+            let body_rect = content.available_rect_before_wrap();
+            if body_rect.height() > 1.0 {
+                let mut body = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(body_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                body.set_clip_rect(body_rect);
+                body.set_width(body_rect.width());
+                body.set_height(body_rect.height());
+
+                egui::ScrollArea::vertical()
+                    .id_salt("main-content-scroll")
+                    .auto_shrink([false, false])
+                    .max_height(body_rect.height())
+                    .show(&mut body, |ui| {
+                        ui.set_clip_rect(ui.clip_rect().intersect(body_rect));
+                        ui.set_width(ui.available_width());
+                        match self.selected_tab {
+                            Tab::Overview => self.show_overview(ui),
+                            Tab::Approvals => self.show_approvals(ui),
+                            Tab::Connections => self.show_connections(ui),
+                            Tab::Permissions => self.show_permissions(ui),
+                            Tab::OAuth => self.show_oauth(ui),
+                            Tab::Audit => self.show_audit(ui),
+                            Tab::Diagnostics => self.show_diagnostics(ui),
+                        }
+                        ui.add_space(20.0);
+                    });
+            }
 
             if lock_requested {
                 let result = self.emergency_lock();
