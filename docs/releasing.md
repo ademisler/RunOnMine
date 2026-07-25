@@ -37,7 +37,7 @@ The workflow opens a draft prerelease only. Artifacts are deliberately unsigned 
 
 ## Hosted platform validation
 
-`Platform CI` always runs its Linux platform contract on the hardened self-hosted runner. The GitHub-hosted macOS, Windows, and ARM matrix runs for manual dispatches, or automatically when the repository variable `ENABLE_GITHUB_HOSTED_PLATFORM_CI` is set to `true`. This guard prevents account billing or spending-limit failures from appearing as product failures while keeping the full matrix ready to enable without changing workflow code.
+`CI` always runs the supported Linux headless workspace plus the desktop crate's no-UI contract on the hardened self-hosted runner. `Platform CI` also runs the Linux platform contract there. The full desktop-enabled macOS/Windows and ARM headless matrix runs for manual dispatches, or automatically when the repository variable `ENABLE_GITHUB_HOSTED_PLATFORM_CI` is set to `true`. This guard prevents account billing or spending-limit failures from appearing as product failures while keeping the full matrix ready to enable without changing workflow code. Linux desktop UI dependencies are intentionally not part of the product's headless Linux target.
 
 ## Local packaging helpers
 
