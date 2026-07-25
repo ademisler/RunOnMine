@@ -1,3 +1,5 @@
+- Rebuilt the desktop control center around a professional dashboard layout with custom vector icons, balanced navigation, six overview metrics, security posture scoring, recent activity, and resilient first-run setup states.
+
 # Changelog
 
 All notable changes to RunOnMine are documented here. The project is still in
