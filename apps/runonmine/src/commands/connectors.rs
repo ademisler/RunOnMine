@@ -1,5 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use std::io::Read as _;
 
 pub(crate) fn setup(roots: &[PathBuf]) -> Result<()> {
     let paths = AppPaths::discover()?;
@@ -254,7 +255,8 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 .canonicalize()
                 .context("Cloudflare credentials file does not exist")?;
             let client_id = value_or_prompt(args.github_client_id, "GitHub OAuth client ID: ")?;
-            let client_secret = rpassword::prompt_password("GitHub OAuth client secret: ")?;
+            let client_secret =
+                read_secret(args.client_secret_stdin, "GitHub OAuth client secret: ")?;
             if client_secret.trim().is_empty() {
                 bail!("GitHub OAuth client secret must not be empty");
             }
@@ -329,7 +331,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             )
             .await?;
             let tunnel_id = value_or_prompt(args.tunnel_id, "OpenAI tunnel ID: ")?;
-            let api_key = rpassword::prompt_password("OpenAI runtime API key: ")?;
+            let api_key = read_secret(args.api_key_stdin, "OpenAI runtime API key: ")?;
             if api_key.trim().is_empty() {
                 bail!("runtime API key must not be empty");
             }
@@ -527,6 +529,21 @@ pub(super) fn print_local_http_credentials(port: u16, connector_id: &str, token:
     println!("Endpoint: http://127.0.0.1:{port}/mcp");
     println!("Bearer token: {token}");
     println!("Store this token now; it is kept in the operating system credential store.");
+}
+
+pub(super) fn read_secret(from_stdin: bool, prompt: &str) -> Result<String> {
+    if !from_stdin {
+        return rpassword::prompt_password(prompt).map_err(Into::into);
+    }
+    let mut value = String::new();
+    std::io::stdin()
+        .take(16 * 1_024)
+        .read_to_string(&mut value)
+        .context("failed to read secret from standard input")?;
+    while value.ends_with(['\n', '\r']) {
+        value.pop();
+    }
+    Ok(value)
 }
 
 pub(super) fn value_or_prompt(value: Option<String>, prompt: &str) -> Result<String> {

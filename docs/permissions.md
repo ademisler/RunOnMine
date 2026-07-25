@@ -10,7 +10,7 @@ Every connector resolves a tool in this order:
 
 Principal matchers can target local requests, a specific OAuth client, or a
 specific OAuth subject. Resource matchers can restrict a rule to a filesystem
-prefix, browser origin, executable path, or command prefix. At equal
+prefix, browser origin, executable path, or command prefix. The desktop Permissions tab includes a visual rule builder for these combinations and validates the complete configuration before saving. The desktop Permissions tab includes a visual rule builder for these combinations and validates the complete configuration before saving. At equal
 specificity, `deny` wins over `ask`, which wins over `allow`. Rules are stored
 in the connector's `policy_rules` configuration and are validated when the
 configuration is loaded.

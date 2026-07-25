@@ -93,7 +93,7 @@ persists a private installation receipt and re-verifies the executable path and
 SHA-256 digest whenever the managed binary is loaded. Explicit user-supplied
 absolute paths remain an advanced local trust decision; PATH fallback is not used.
 
-Connector lifecycle commands are available without editing configuration files:
+The desktop application includes guided setup for Quick Tunnel, Cloudflare OAuth, and OpenAI Secure MCP Tunnel. Secrets are passed to the local CLI over standard input and stored in the operating-system credential store. Connector lifecycle commands remain available without editing configuration files:
 
 ```console
 runonmine connect list

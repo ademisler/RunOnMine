@@ -179,6 +179,9 @@ struct CloudflareOAuthArgs {
     github_owner_id: Option<u64>,
     #[arg(long)]
     cloudflared: Option<PathBuf>,
+    /// Read the GitHub OAuth client secret from standard input.
+    #[arg(long, hide = true)]
+    client_secret_stdin: bool,
 }
 
 #[derive(Debug, Args)]
@@ -189,6 +192,9 @@ struct OpenAiConnectArgs {
     profile: String,
     #[arg(long)]
     tunnel_client: Option<PathBuf>,
+    /// Read the `OpenAI` runtime API key from standard input.
+    #[arg(long, hide = true)]
+    api_key_stdin: bool,
 }
 
 #[derive(Debug, Subcommand)]

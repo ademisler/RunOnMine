@@ -19,6 +19,8 @@ runonmine-oauth.workspace = true
 serde_json.workspace = true
 tray-icon = { workspace = true, optional = true }
 uuid.workspace = true
+url.workspace = true
+secrecy.workspace = true
 
 [lints]
 workspace = true

@@ -9,8 +9,6 @@ pre-release development and does not yet provide compatibility guarantees.
 
 - Replace canonicalize-then-open filesystem operations with capability-based, descriptor-relative access and managed in-root trash.
 - Add principal/resource policy rules for OAuth clients and subjects, filesystem prefixes, browser origins, executable paths, and command prefixes.
-- Replace canonicalize-then-open filesystem operations with capability-based, descriptor-relative access and managed in-root trash.
-- Add principal/resource policy rules for OAuth clients and subjects, filesystem prefixes, browser origins, executable paths, and command prefixes.
 - Require bearer authentication for opt-in local HTTP MCP access and keep it disabled by default.
 - Intercept browser redirects and subresources, block private destinations for remote connectors, and clean disposable profiles.
 - Store persistent approvals as exact connector/tool/argument grants instead of broad tool-wide policy changes.
@@ -27,10 +25,18 @@ pre-release development and does not yet provide compatibility guarantees.
 - Add an emergency lock that stops access, denies pending approvals, clears temporary grants, revokes OAuth state, rotates Quick Tunnel secrets, and removes OpenAI runtime keys.
 - Harden the temporary self-hosted CI runner with a dedicated unprivileged account; migration to GitHub-hosted runners remains planned.
 
+### User experience
+
+- Add a desktop connector setup wizard for Cloudflare Quick Tunnel, Cloudflare OAuth, and OpenAI Secure MCP Tunnel without placing secrets in process arguments.
+- Add visual principal/resource policy rule creation and removal, connector credential rotation, secret-path rotation, and confirmed connector removal.
+
+### User experience
+
+- Add a desktop connector setup wizard for Cloudflare Quick Tunnel, Cloudflare OAuth, and OpenAI Secure MCP Tunnel without placing secrets in process arguments.
+- Add visual principal/resource policy rule creation and removal, connector credential rotation, secret-path rotation, and confirmed connector removal.
+
 ### Maintenance
 
-- Move core state and OAuth SQLite connections to dedicated serialized database workers and use asynchronous replies on MCP authorization paths.
-- Split CLI connector commands and MCP authorization, argument, and validation layers into focused modules.
 - Move core state and OAuth SQLite connections to dedicated serialized database workers and use asynchronous replies on MCP authorization paths.
 - Split CLI connector commands and MCP authorization, argument, and validation layers into focused modules.
 - Add component-scoped SQLite schema versions and future-version rejection.

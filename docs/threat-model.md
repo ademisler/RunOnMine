@@ -67,7 +67,6 @@ with user-accessible files and UI outside RunOnMine's control.
 
 Quick Tunnel with no user identity is a temporary development mode, not a
 substitute for OAuth. Its secret path is a bearer credential and is rotated by
-the emergency lock. Browser destination validation occurs before navigation;
-redirect-chain enforcement is still an explicit pre-release limitation.
+the emergency lock. Browser destination validation occurs before navigation and CDP Fetch interception revalidates redirect and subresource requests. This reduces SSRF exposure but is not a complete network sandbox.
 Unsigned beta packages provide checksums and SBOMs but no publisher identity,
 notarization, or code-signing guarantee.
