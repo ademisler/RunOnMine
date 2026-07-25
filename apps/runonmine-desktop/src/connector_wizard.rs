@@ -1,6 +1,8 @@
 use eframe::egui;
 use runonmine_core::ConnectorKind;
 
+use crate::theme;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum WizardKind {
     #[default]
@@ -31,6 +33,7 @@ pub(crate) struct ConnectorCommand {
 }
 
 impl ConnectorWizardState {
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn show(
         &mut self,
         context: &egui::Context,
@@ -44,40 +47,102 @@ impl ConnectorWizardState {
         egui::Window::new("Add secure connector")
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
+            .resizable(false)
+            .default_width(620.0)
             .show(context, |ui| {
-                ui.label("Secrets are sent to the local RunOnMine CLI over standard input and stored in the operating-system credential store. They are never placed in process arguments.");
-                ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut self.kind, WizardKind::Quick, "Cloudflare Quick");
-                    ui.selectable_value(&mut self.kind, WizardKind::CloudflareOAuth, "Cloudflare OAuth");
-                    ui.selectable_value(&mut self.kind, WizardKind::OpenAi, "OpenAI Secure Tunnel");
+                theme::section_header(
+                    ui,
+                    "Connect this machine",
+                    "Choose a transport. Sensitive values go to the local CLI over stdin and are never placed in process arguments.",
+                );
+
+                ui.horizontal(|ui| {
+                    connector_choice(
+                        ui,
+                        &mut self.kind,
+                        WizardKind::Quick,
+                        "Quick tunnel",
+                        "Temporary testing",
+                    );
+                    connector_choice(
+                        ui,
+                        &mut self.kind,
+                        WizardKind::CloudflareOAuth,
+                        "Cloudflare OAuth",
+                        "Recommended remote",
+                    );
+                    connector_choice(
+                        ui,
+                        &mut self.kind,
+                        WizardKind::OpenAi,
+                        "OpenAI tunnel",
+                        "Official client",
+                    );
                 });
-                ui.separator();
-                match self.kind {
+                ui.add_space(16.0);
+
+                theme::card(ui, |ui| match self.kind {
                     WizardKind::Quick => {
-                        ui.label("Creates a temporary Cloudflare tunnel with a random 256-bit secret path. Recommended only for testing.");
+                        theme::section_header(
+                            ui,
+                            "Cloudflare Quick Tunnel",
+                            "Creates a temporary public URL with a random 256-bit secret path.",
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Use this for short tests only. It does not provide a durable user identity layer.",
+                            )
+                            .size(12.0)
+                            .color(theme::WARNING),
+                        );
                     }
                     WizardKind::CloudflareOAuth => {
-                        field(ui, "Public hostname", &mut self.hostname, false);
-                        field(ui, "Cloudflare tunnel UUID", &mut self.tunnel_id, false);
-                        field(ui, "Credentials JSON path", &mut self.credentials_file, false);
-                        field(ui, "GitHub OAuth client ID", &mut self.github_client_id, false);
-                        field(ui, "GitHub OAuth client secret", &mut self.github_client_secret, true);
-                        field(ui, "GitHub owner login", &mut self.github_owner, false);
-                        field(ui, "GitHub owner numeric ID", &mut self.github_owner_id, false);
+                        theme::section_header(
+                            ui,
+                            "Cloudflare Named Tunnel + OAuth",
+                            "GitHub verifies the configured machine owner while RunOnMine owns the OAuth flow.",
+                        );
+                        field(ui, "Public hostname", &mut self.hostname, false, "mcp.example.com");
+                        field(ui, "Cloudflare tunnel UUID", &mut self.tunnel_id, false, "00000000-0000-0000-0000-000000000000");
+                        field(ui, "Credentials JSON path", &mut self.credentials_file, false, "/absolute/path/credentials.json");
+                        field(ui, "GitHub OAuth client ID", &mut self.github_client_id, false, "Client ID");
+                        field(ui, "GitHub OAuth client secret", &mut self.github_client_secret, true, "Stored securely");
+                        field(ui, "GitHub owner login", &mut self.github_owner, false, "username");
+                        field(ui, "GitHub owner numeric ID", &mut self.github_owner_id, false, "123456");
                     }
                     WizardKind::OpenAi => {
-                        field(ui, "OpenAI tunnel ID", &mut self.tunnel_id, false);
-                        field(ui, "Profile name", &mut self.openai_profile, false);
-                        field(ui, "Runtime API key", &mut self.openai_api_key, true);
+                        theme::section_header(
+                            ui,
+                            "OpenAI Secure MCP Tunnel",
+                            "Initializes the official tunnel client against the local stdio connector.",
+                        );
+                        field(ui, "OpenAI tunnel ID", &mut self.tunnel_id, false, "Tunnel ID");
+                        field(ui, "Profile name", &mut self.openai_profile, false, "runonmine");
+                        field(ui, "Runtime API key", &mut self.openai_api_key, true, "Stored securely");
                     }
-                }
-                ui.add_space(8.0);
-                if ui.add_enabled(!running, egui::Button::new(if running { "Working…" } else { "Create connector" })).clicked() {
-                    command = Some(self.command());
-                }
+                });
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !running,
+                            theme::primary_button(if running {
+                                "Creating connector…"
+                            } else {
+                                "Create connector"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        command = Some(self.command());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.open = false;
+                    }
+                });
             });
-        self.open = open;
+        self.open = open && self.open;
         command
     }
 
@@ -142,14 +207,50 @@ pub(crate) fn rotation_label(kind: ConnectorKind) -> Option<&'static str> {
     }
 }
 
-fn field(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let edit = egui::TextEdit::singleline(value)
-            .desired_width(420.0)
-            .password(secret);
-        ui.add(edit);
-    });
+fn connector_choice(
+    ui: &mut egui::Ui,
+    selected: &mut WizardKind,
+    value: WizardKind,
+    title: &str,
+    subtitle: &str,
+) {
+    let active = *selected == value;
+    let response = egui::Frame::new()
+        .fill(if active {
+            theme::ACCENT_SOFT
+        } else {
+            theme::SURFACE
+        })
+        .stroke(egui::Stroke::new(
+            1.0,
+            if active { theme::ACCENT } else { theme::BORDER },
+        ))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(160.0);
+            ui.label(egui::RichText::new(title).strong().color(if active {
+                theme::ACCENT
+            } else {
+                theme::TEXT
+            }));
+            ui.label(egui::RichText::new(subtitle).size(11.0).color(theme::MUTED));
+        })
+        .response
+        .interact(egui::Sense::click());
+    if response.clicked() {
+        *selected = value;
+    }
+}
+
+fn field(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool, hint: &str) {
+    ui.label(egui::RichText::new(label).size(12.0).color(theme::MUTED));
+    let edit = egui::TextEdit::singleline(value)
+        .desired_width(ui.available_width())
+        .password(secret)
+        .hint_text(hint);
+    ui.add_sized([ui.available_width(), 36.0], edit);
+    ui.add_space(9.0);
 }
 
 #[cfg(test)]

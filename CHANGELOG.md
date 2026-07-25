@@ -37,6 +37,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Redesign the desktop control center with a cohesive dark theme, persistent sidebar navigation, status cards, improved empty states, modern connector and policy workflows, and clearer destructive-action confirmation.
 - Move core state and OAuth SQLite connections to dedicated serialized database workers and use asynchronous replies on MCP authorization paths.
 - Split CLI connector commands and MCP authorization, argument, and validation layers into focused modules.
 - Add component-scoped SQLite schema versions and future-version rejection.
