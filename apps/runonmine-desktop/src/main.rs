@@ -720,17 +720,20 @@ mod desktop {
             ];
 
             let mut navigate_to = None;
-            ui.columns(metrics.len(), |columns| {
-                for (column, metric) in columns.iter_mut().zip(metrics.iter()) {
-                    let response = theme::metric_card(
-                        column, metric.0, metric.1, &metric.2, metric.3, metric.4, metric.5,
-                    );
-                    if response.clicked() {
-                        navigate_to = Some(metric.6);
+            let metric_columns = if ui.available_width() >= 1120.0 { 6 } else { 3 };
+            for row in metrics.chunks(metric_columns) {
+                ui.columns(row.len(), |columns| {
+                    for (column, metric) in columns.iter_mut().zip(row.iter()) {
+                        let response = theme::metric_card(
+                            column, metric.0, metric.1, &metric.2, metric.3, metric.4, metric.5,
+                        );
+                        if response.clicked() {
+                            navigate_to = Some(metric.6);
+                        }
                     }
-                }
-            });
-            ui.add_space(10.0);
+                });
+                ui.add_space(10.0);
+            }
             if let Some(tab) = navigate_to {
                 self.selected_tab = tab;
             }
@@ -1981,49 +1984,78 @@ mod desktop {
                     Tab::Overview
                 };
             }
-            sidebar.add_space(18.0);
-
-            for (tab, icon, label) in Tab::ALL {
-                let badge = (tab == Tab::Approvals).then_some(self.pending.len());
-                if theme::nav_item(&mut sidebar, icon, label, self.selected_tab == tab, badge)
-                    .clicked()
-                {
-                    self.selected_tab = tab;
-                }
-                sidebar.add_space(4.0);
+            let navigation_top = sidebar.cursor().top() + 18.0;
+            let footer_height = 76.0;
+            let footer_rect = egui::Rect::from_min_max(
+                egui::pos2(sidebar_inner.left(), sidebar_inner.bottom() - footer_height),
+                sidebar_inner.max,
+            );
+            let navigation_rect = egui::Rect::from_min_max(
+                egui::pos2(sidebar_inner.left(), navigation_top),
+                egui::pos2(sidebar_inner.right(), footer_rect.top() - 8.0),
+            );
+            if navigation_rect.height() > 1.0 {
+                let mut navigation = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(navigation_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                navigation.set_clip_rect(navigation_rect);
+                navigation.set_width(navigation_rect.width());
+                egui::ScrollArea::vertical()
+                    .id_salt("sidebar-navigation")
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(&mut navigation, |ui| {
+                        ui.set_width(ui.available_width());
+                        for (tab, icon, label) in Tab::ALL {
+                            let badge = (tab == Tab::Approvals).then_some(self.pending.len());
+                            if theme::nav_item(ui, icon, label, self.selected_tab == tab, badge)
+                                .clicked()
+                            {
+                                self.selected_tab = tab;
+                            }
+                            ui.add_space(4.0);
+                        }
+                    });
             }
 
             let mut lock_requested = false;
-            sidebar.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                let lock = egui::Frame::new()
-                    .fill(theme::DANGER_SOFT)
-                    .stroke(egui::Stroke::new(1.0, theme::DANGER.gamma_multiply(0.55)))
-                    .corner_radius(egui::CornerRadius::same(7))
-                    .inner_margin(egui::Margin::symmetric(12, 10))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal_centered(|ui| {
-                            theme::icon(ui, UiIcon::Lock, 16.0, theme::DANGER);
-                            ui.label(
-                                egui::RichText::new("Lock all access")
-                                    .size(12.5)
-                                    .strong()
-                                    .color(theme::DANGER),
-                            );
-                        });
-                    })
-                    .response
-                    .interact(egui::Sense::click());
-                if lock.clicked() {
-                    lock_requested = true;
-                }
-                ui.add_space(10.0);
-                ui.label(
-                    egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                        .size(10.5)
-                        .color(theme::MUTED),
-                );
-            });
+            let mut footer = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(footer_rect)
+                    .layout(egui::Layout::bottom_up(egui::Align::Min)),
+            );
+            footer.set_clip_rect(footer_rect);
+            footer.set_width(footer_rect.width());
+            let lock = egui::Frame::new()
+                .fill(theme::DANGER_SOFT)
+                .stroke(egui::Stroke::new(1.0, theme::DANGER.gamma_multiply(0.55)))
+                .corner_radius(egui::CornerRadius::same(7))
+                .inner_margin(egui::Margin::symmetric(12, 10))
+                .show(&mut footer, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_centered(|ui| {
+                        theme::icon(ui, UiIcon::Lock, 16.0, theme::DANGER);
+                        ui.label(
+                            egui::RichText::new("Lock all access")
+                                .size(12.5)
+                                .strong()
+                                .color(theme::DANGER),
+                        );
+                    });
+                })
+                .response
+                .interact(egui::Sense::click());
+            if lock.clicked() {
+                lock_requested = true;
+            }
+            footer.add_space(9.0);
+            footer.label(
+                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .size(10.5)
+                    .color(theme::MUTED),
+            );
 
             let content_inner = content_rect.shrink2(egui::vec2(26.0, 20.0));
             let mut content = ui.new_child(
