@@ -25,7 +25,7 @@ mod desktop {
 
     use crate::connector_wizard::{ConnectorCommand, ConnectorWizardState, rotation_label};
     use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
-    use crate::theme::{self, StatusTone};
+    use crate::theme::{self, Icon as UiIcon, StatusTone};
     use runonmine_oauth::{OAuthSession, RegisteredClient, SqliteOAuthStore};
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -34,8 +34,8 @@ mod desktop {
     pub fn run() -> Result<()> {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1180.0, 780.0])
-                .with_min_inner_size([920.0, 620.0]),
+                .with_inner_size([1320.0, 860.0])
+                .with_min_inner_size([1040.0, 680.0]),
             ..Default::default()
         };
         eframe::run_native(
@@ -62,14 +62,14 @@ mod desktop {
     }
 
     impl Tab {
-        const ALL: [(Self, &'static str, &'static str); 7] = [
-            (Self::Overview, "◫", "Overview"),
-            (Self::Approvals, "✓", "Approvals"),
-            (Self::Connections, "⌁", "Connections"),
-            (Self::Permissions, "◈", "Permissions"),
-            (Self::OAuth, "◎", "OAuth"),
-            (Self::Audit, "≡", "Audit log"),
-            (Self::Diagnostics, "◇", "Diagnostics"),
+        const ALL: [(Self, UiIcon, &'static str); 7] = [
+            (Self::Overview, UiIcon::Home, "Overview"),
+            (Self::Approvals, UiIcon::Clipboard, "Approvals"),
+            (Self::Connections, UiIcon::Link, "Connections"),
+            (Self::Permissions, UiIcon::Shield, "Permissions"),
+            (Self::OAuth, UiIcon::Key, "OAuth"),
+            (Self::Audit, UiIcon::FileText, "Audit log"),
+            (Self::Diagnostics, UiIcon::Wrench, "Diagnostics"),
         ];
 
         const fn title(self) -> &'static str {
@@ -177,10 +177,9 @@ mod desktop {
         fn initialize(&mut self) -> Result<()> {
             let paths = AppPaths::discover()?;
             paths.ensure()?;
-            let config =
-                AppConfig::load(&paths.config_file()).context("Run `runonmine setup` first")?;
+            self.paths = Some(paths.clone());
+            let config = AppConfig::load_or_create(&paths.config_file())?;
             let store = StateStore::open(&paths.state_db())?;
-            self.paths = Some(paths);
             self.config = Some(config);
             self.store = Some(store);
             self.create_tray();
@@ -603,138 +602,395 @@ mod desktop {
 
         #[allow(clippy::too_many_lines)]
         fn show_overview(&mut self, ui: &mut egui::Ui) {
-            let Some(config) = &self.config else {
-                theme::empty_state(
-                    ui,
-                    "◇",
-                    "Configuration unavailable",
-                    "Run setup before opening the control center.",
-                );
-                return;
-            };
+            let enabled_connectors = self
+                .config
+                .as_ref()
+                .map(|config| config.connectors.iter().filter(|item| item.enabled).count())
+                .unwrap_or_default();
+            let allowed_roots = self
+                .config
+                .as_ref()
+                .map(|config| config.allowed_roots.len())
+                .unwrap_or_default();
+            let audit_integrity = matches!(self.audit_valid, Some(true));
 
-            ui.horizontal_wrapped(|ui| {
-                theme::metric(
-                    ui,
-                    "Enabled connectors",
-                    config.connectors.iter().filter(|item| item.enabled).count(),
+            let metrics = [
+                (
+                    UiIcon::Monitor,
+                    "Agent status",
+                    if self.agent_reachable {
+                        "Online".to_owned()
+                    } else {
+                        "Offline".to_owned()
+                    },
+                    if self.agent_reachable {
+                        "Service is reachable"
+                    } else {
+                        "No active agent"
+                    },
+                    "View diagnostics",
+                    if self.agent_reachable {
+                        StatusTone::Success
+                    } else {
+                        StatusTone::Neutral
+                    },
+                    Tab::Diagnostics,
+                ),
+                (
+                    UiIcon::Link,
+                    "Active connectors",
+                    enabled_connectors.to_string(),
+                    if enabled_connectors == 1 {
+                        "Connector enabled"
+                    } else {
+                        "Connectors enabled"
+                    },
+                    "View connections",
                     StatusTone::Info,
-                );
-                theme::metric(
-                    ui,
+                    Tab::Connections,
+                ),
+                (
+                    UiIcon::Folder,
                     "Allowed roots",
-                    config.allowed_roots.len(),
-                    StatusTone::Neutral,
-                );
-                theme::metric(
-                    ui,
+                    allowed_roots.to_string(),
+                    if allowed_roots == 1 {
+                        "Path configured"
+                    } else {
+                        "Paths configured"
+                    },
+                    "Manage allowed roots",
+                    if allowed_roots > 0 {
+                        StatusTone::Success
+                    } else {
+                        StatusTone::Warning
+                    },
+                    Tab::Permissions,
+                ),
+                (
+                    UiIcon::Clipboard,
                     "Pending approvals",
-                    self.pending.len(),
+                    self.pending.len().to_string(),
+                    if self.pending.is_empty() {
+                        "Nothing awaiting review"
+                    } else {
+                        "Awaiting local review"
+                    },
+                    "View approvals",
                     if self.pending.is_empty() {
                         StatusTone::Success
                     } else {
                         StatusTone::Warning
                     },
-                );
-                theme::metric(
-                    ui,
+                    Tab::Approvals,
+                ),
+                (
+                    UiIcon::Key,
                     "OAuth clients",
-                    self.oauth_clients.len(),
-                    StatusTone::Neutral,
-                );
+                    self.oauth_clients.len().to_string(),
+                    if self.oauth_clients.len() == 1 {
+                        "Registered client"
+                    } else {
+                        "Registered clients"
+                    },
+                    "Manage OAuth",
+                    StatusTone::Purple,
+                    Tab::OAuth,
+                ),
+                (
+                    UiIcon::Shield,
+                    "Audit integrity",
+                    if audit_integrity {
+                        "100%".to_owned()
+                    } else {
+                        "Check".to_owned()
+                    },
+                    if audit_integrity {
+                        "Hash chain verified"
+                    } else {
+                        "Integrity needs review"
+                    },
+                    "View audit log",
+                    if audit_integrity {
+                        StatusTone::Success
+                    } else {
+                        StatusTone::Danger
+                    },
+                    Tab::Audit,
+                ),
+            ];
+
+            let mut navigate_to = None;
+            ui.columns(metrics.len(), |columns| {
+                for (column, metric) in columns.iter_mut().zip(metrics.iter()) {
+                    let response = theme::metric_card(
+                        column, metric.0, metric.1, &metric.2, metric.3, metric.4, metric.5,
+                    );
+                    if response.clicked() {
+                        navigate_to = Some(metric.6);
+                    }
+                }
             });
-            ui.add_space(18.0);
+            ui.add_space(10.0);
+            if let Some(tab) = navigate_to {
+                self.selected_tab = tab;
+            }
+
+            let mut score = 0_u32;
+            if audit_integrity {
+                score += 30;
+            }
+            if allowed_roots > 0 {
+                score += 25;
+            }
+            if enabled_connectors > 0 {
+                score += 20;
+            }
+            if self.agent_reachable {
+                score += 15;
+            }
+            if self.pending.is_empty() {
+                score += 10;
+            }
+            let score_label = if score >= 80 {
+                "Good"
+            } else if score >= 50 {
+                "Needs attention"
+            } else {
+                "Setup required"
+            };
 
             ui.columns(2, |columns| {
                 theme::card(&mut columns[0], |ui| {
-                    theme::section_header(
-                        ui,
-                        "Security posture",
-                        "Live checks for the local agent and audit store.",
-                    );
-                    status_row(
-                        ui,
-                        "Agent service",
-                        if self.agent_reachable {
-                            ("Online", StatusTone::Success)
-                        } else {
-                            ("Stopped", StatusTone::Neutral)
-                        },
-                    );
-                    status_row(
-                        ui,
-                        "Audit chain",
-                        match self.audit_valid {
-                            Some(true) => ("Verified", StatusTone::Success),
-                            Some(false) => ("Failed", StatusTone::Danger),
-                            None => ("Unknown", StatusTone::Warning),
-                        },
-                    );
-                    status_row(
-                        ui,
-                        "Exact-action grants",
-                        if self.persistent_grants.is_empty() {
-                            ("None", StatusTone::Neutral)
-                        } else {
-                            ("Active", StatusTone::Warning)
-                        },
-                    );
+                    ui.set_min_height(275.0);
+                    ui.horizontal(|ui| {
+                        theme::icon(ui, UiIcon::Shield, 19.0, theme::TEXT);
+                        ui.label(
+                            egui::RichText::new("Security posture")
+                                .size(16.0)
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                    });
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        theme::ring_gauge(ui, score, score_label);
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(if score >= 80 {
+                                    "Your posture is good"
+                                } else {
+                                    "A few items need attention"
+                                })
+                                .size(14.0)
+                                .strong()
+                                .color(if score >= 80 {
+                                    theme::ACCENT
+                                } else {
+                                    theme::WARNING
+                                }),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Review the controls below to improve machine access safety.",
+                                )
+                                .size(11.5)
+                                .color(theme::MUTED),
+                            );
+                            ui.add_space(12.0);
+                            overview_check(
+                                ui,
+                                "Audit log integrity",
+                                if audit_integrity {
+                                    "Good"
+                                } else {
+                                    "Action required"
+                                },
+                                if audit_integrity {
+                                    StatusTone::Success
+                                } else {
+                                    StatusTone::Danger
+                                },
+                            );
+                            overview_check(
+                                ui,
+                                "Allowed roots configured",
+                                if allowed_roots > 0 {
+                                    "Good"
+                                } else {
+                                    "Action required"
+                                },
+                                if allowed_roots > 0 {
+                                    StatusTone::Success
+                                } else {
+                                    StatusTone::Warning
+                                },
+                            );
+                            overview_check(
+                                ui,
+                                "Active connectors",
+                                if enabled_connectors > 0 {
+                                    "Ready"
+                                } else {
+                                    "None"
+                                },
+                                if enabled_connectors > 0 {
+                                    StatusTone::Info
+                                } else {
+                                    StatusTone::Neutral
+                                },
+                            );
+                            overview_check(
+                                ui,
+                                "Agent service",
+                                if self.agent_reachable {
+                                    "Online"
+                                } else {
+                                    "Offline"
+                                },
+                                if self.agent_reachable {
+                                    StatusTone::Success
+                                } else {
+                                    StatusTone::Neutral
+                                },
+                            );
+                        });
+                    });
                 });
 
                 theme::card(&mut columns[1], |ui| {
-                    theme::section_header(
-                        ui,
-                        "Protection model",
-                        "The boundaries that remain enforced for every connector.",
-                    );
-                    for item in [
-                        "Remote connectors cannot run administrator actions.",
-                        "Destructive remote actions always require local approval.",
-                        "File access stays inside explicitly selected roots.",
-                        "Secrets remain in the operating-system credential store.",
-                    ] {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("✓").color(theme::ACCENT));
-                            ui.label(egui::RichText::new(item).size(13.0).color(theme::TEXT));
+                    ui.set_min_height(275.0);
+                    ui.horizontal(|ui| {
+                        theme::icon(ui, UiIcon::Activity, 19.0, theme::TEXT);
+                        ui.label(
+                            egui::RichText::new("Recent activity")
+                                .size(16.0)
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.link("View full audit log").clicked() {
+                                self.selected_tab = Tab::Audit;
+                            }
                         });
+                    });
+                    ui.add_space(12.0);
+                    if self.audit.is_empty() {
+                        activity_row(
+                            ui,
+                            UiIcon::Server,
+                            "Control center initialized",
+                            "System",
+                            "Current session",
+                            StatusTone::Info,
+                        );
+                        activity_row(
+                            ui,
+                            if allowed_roots > 0 {
+                                UiIcon::Check
+                            } else {
+                                UiIcon::AlertTriangle
+                            },
+                            if allowed_roots > 0 {
+                                "Allowed roots configured"
+                            } else {
+                                "No allowed roots configured"
+                            },
+                            "Security",
+                            "Current state",
+                            if allowed_roots > 0 {
+                                StatusTone::Success
+                            } else {
+                                StatusTone::Warning
+                            },
+                        );
+                        activity_row(
+                            ui,
+                            if audit_integrity {
+                                UiIcon::Check
+                            } else {
+                                UiIcon::AlertTriangle
+                            },
+                            if audit_integrity {
+                                "Audit chain verified"
+                            } else {
+                                "Audit chain unavailable"
+                            },
+                            "Audit",
+                            "Current state",
+                            if audit_integrity {
+                                StatusTone::Success
+                            } else {
+                                StatusTone::Danger
+                            },
+                        );
+                    } else {
+                        for record in self.audit.iter().rev().take(5) {
+                            activity_row(
+                                ui,
+                                UiIcon::Activity,
+                                &record.event.tool_name,
+                                &record.event.summary,
+                                &record.event.timestamp.format("%H:%M").to_string(),
+                                StatusTone::Info,
+                            );
+                        }
                     }
                 });
             });
 
-            ui.add_space(18.0);
+            ui.add_space(10.0);
             theme::card(ui, |ui| {
-                theme::section_header(
-                    ui,
-                    "Recent activity",
-                    "The latest locally recorded tool decisions.",
-                );
-                if self.audit.is_empty() {
+                ui.horizontal(|ui| {
+                    theme::icon(ui, UiIcon::Clipboard, 19.0, theme::TEXT);
                     ui.label(
-                        egui::RichText::new("No activity has been recorded yet.")
-                            .color(theme::MUTED),
+                        egui::RichText::new("Recent approvals")
+                            .size(16.0)
+                            .strong()
+                            .color(theme::TEXT),
                     );
-                } else {
-                    for record in self.audit.iter().rev().take(5) {
-                        ui.horizontal(|ui| {
-                            theme::status_badge(
-                                ui,
-                                &format!("{:?}", record.event.outcome),
-                                StatusTone::Neutral,
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.link("View all approvals").clicked() {
+                            self.selected_tab = Tab::Approvals;
+                        }
+                    });
+                });
+                ui.add_space(10.0);
+                if self.pending.is_empty() {
+                    ui.horizontal_centered(|ui| {
+                        theme::icon(ui, UiIcon::Clipboard, 34.0, theme::MUTED);
+                        ui.add_space(10.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("No pending approvals")
+                                    .size(14.0)
+                                    .strong()
+                                    .color(theme::TEXT),
                             );
+                            ui.label(
+                                egui::RichText::new("You are all caught up.")
+                                    .size(12.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                    });
+                } else {
+                    for request in self.pending.iter().take(3) {
+                        ui.horizontal(|ui| {
+                            theme::icon_box(ui, UiIcon::AlertTriangle, StatusTone::Warning);
                             ui.vertical(|ui| {
                                 ui.label(
-                                    egui::RichText::new(&record.event.tool_name)
+                                    egui::RichText::new(&request.tool_name)
                                         .strong()
                                         .color(theme::TEXT),
                                 );
                                 ui.label(
-                                    egui::RichText::new(&record.event.summary)
-                                        .size(12.0)
+                                    egui::RichText::new(&request.argument_summary)
+                                        .size(11.5)
                                         .color(theme::MUTED),
                                 );
                             });
                         });
-                        ui.add_space(8.0);
                     }
                 }
             });
@@ -751,7 +1007,7 @@ mod desktop {
             if self.pending.is_empty() {
                 theme::empty_state(
                     ui,
-                    "✓",
+                    UiIcon::Check,
                     "Nothing needs approval",
                     "New sensitive actions will appear here with their exact target.",
                 );
@@ -828,7 +1084,7 @@ mod desktop {
             if self.persistent_grants.is_empty() {
                 theme::empty_state(
                     ui,
-                    "◇",
+                    UiIcon::Shield,
                     "No persistent grants",
                     "Approving an exact action permanently will add it here.",
                 );
@@ -1282,7 +1538,7 @@ mod desktop {
             if clients.is_empty() {
                 theme::empty_state(
                     ui,
-                    "◎",
+                    UiIcon::Key,
                     "No OAuth clients",
                     "A client will appear after completing dynamic registration.",
                 );
@@ -1373,7 +1629,7 @@ mod desktop {
             if sessions.is_empty() {
                 theme::empty_state(
                     ui,
-                    "◇",
+                    UiIcon::Activity,
                     "No sessions",
                     "Active authorization sessions will appear here.",
                 );
@@ -1463,7 +1719,7 @@ mod desktop {
             if self.audit.is_empty() {
                 theme::empty_state(
                     ui,
-                    "≡",
+                    UiIcon::FileText,
                     "No audit events",
                     "Tool decisions will be recorded here.",
                 );
@@ -1608,163 +1864,245 @@ mod desktop {
                 self.apply_result(result);
             }
 
-            let mut lock_requested = false;
-            ui.horizontal(|ui| {
-                ui.set_height(ui.available_height());
+            let full_rect = ui.available_rect_before_wrap();
+            ui.allocate_rect(full_rect, egui::Sense::hover());
+            let sidebar_width = 232.0_f32.min(full_rect.width() * 0.25);
+            let sidebar_rect = egui::Rect::from_min_max(
+                full_rect.min,
+                egui::pos2(full_rect.left() + sidebar_width, full_rect.bottom()),
+            );
+            let content_rect = egui::Rect::from_min_max(
+                egui::pos2(sidebar_rect.right(), full_rect.top()),
+                full_rect.max,
+            );
+            ui.painter().rect_filled(sidebar_rect, 0.0, theme::SIDEBAR);
+            ui.painter().rect_filled(content_rect, 0.0, theme::BG);
+            ui.painter().line_segment(
+                [sidebar_rect.right_top(), sidebar_rect.right_bottom()],
+                egui::Stroke::new(1.0, theme::BORDER),
+            );
 
-                let sidebar_width = 236.0;
-                let sidebar_rect = ui
-                    .allocate_space(egui::vec2(sidebar_width, ui.available_height()))
-                    .1;
-                let mut sidebar = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(sidebar_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
+            let sidebar_inner = sidebar_rect.shrink2(egui::vec2(17.0, 18.0));
+            let mut sidebar = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(sidebar_inner)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            sidebar.set_width(sidebar_inner.width());
+            sidebar.set_height(sidebar_inner.height());
+
+            sidebar.horizontal(|ui| {
                 egui::Frame::new()
-                    .fill(theme::SIDEBAR)
-                    .inner_margin(egui::Margin::same(18))
-                    .show(&mut sidebar, |ui| {
-                        ui.set_width(sidebar_width - 36.0);
-                        ui.horizontal(|ui| {
-                            egui::Frame::new()
-                                .fill(theme::ACCENT)
-                                .corner_radius(egui::CornerRadius::same(8))
-                                .inner_margin(egui::Margin::symmetric(9, 7))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new("R")
-                                            .size(18.0)
-                                            .strong()
-                                            .color(egui::Color32::from_rgb(8, 20, 14)),
-                                    );
-                                });
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new("RunOnMine")
-                                        .size(18.0)
-                                        .strong()
-                                        .color(theme::TEXT),
-                                );
-                                ui.label(
-                                    egui::RichText::new("Security control center")
-                                        .size(11.0)
-                                        .color(theme::MUTED),
-                                );
-                            });
-                        });
-                        ui.add_space(20.0);
-
-                        theme::subtle_card(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let tone = if self.agent_reachable {
-                                    StatusTone::Success
-                                } else if self.pending.is_empty() {
-                                    StatusTone::Neutral
-                                } else {
-                                    StatusTone::Warning
-                                };
-                                theme::status_badge(ui, &self.status, tone);
-                            });
-                        });
-                        ui.add_space(18.0);
-
-                        for (tab, icon, label) in Tab::ALL {
-                            let selected = self.selected_tab == tab;
-                            let text = egui::RichText::new(format!("{icon}   {label}"))
-                                .size(14.0)
+                    .fill(theme::ACCENT)
+                    .corner_radius(egui::CornerRadius::same(9))
+                    .inner_margin(egui::Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("R")
+                                .size(19.0)
                                 .strong()
-                                .color(if selected { theme::TEXT } else { theme::MUTED });
-                            let response = ui.add_sized(
-                                [ui.available_width(), 40.0],
-                                egui::Button::new(text)
-                                    .fill(if selected {
-                                        theme::ACCENT_SOFT
-                                    } else {
-                                        egui::Color32::TRANSPARENT
-                                    })
-                                    .stroke(if selected {
-                                        egui::Stroke::new(1.0, theme::ACCENT)
-                                    } else {
-                                        egui::Stroke::NONE
-                                    })
-                                    .corner_radius(egui::CornerRadius::same(9)),
-                            );
-                            if response.clicked() {
-                                self.selected_tab = tab;
-                            }
-                            ui.add_space(3.0);
-                        }
+                                .color(egui::Color32::from_rgb(4, 32, 23)),
+                        );
+                    });
+                ui.add_space(3.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("RunOnMine")
+                            .size(17.0)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new("Security control center")
+                            .size(10.5)
+                            .color(theme::MUTED),
+                    );
+                });
+            });
+            sidebar.add_space(20.0);
 
-                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 40.0],
-                                    theme::danger_button("Lock all access"),
-                                )
-                                .clicked()
-                            {
-                                lock_requested = true;
-                            }
-                            ui.add_space(8.0);
+            let setup_required = self.config.is_none();
+            let setup_response = egui::Frame::new()
+                .fill(theme::SURFACE_ALT)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(12, 11))
+                .show(&mut sidebar, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        theme::icon_box(
+                            ui,
+                            if setup_required {
+                                UiIcon::AlertTriangle
+                            } else {
+                                UiIcon::Shield
+                            },
+                            if setup_required {
+                                StatusTone::Warning
+                            } else {
+                                StatusTone::Success
+                            },
+                        );
+                        ui.add_space(3.0);
+                        ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                    .size(11.0)
-                                    .color(theme::MUTED),
+                                egui::RichText::new(if setup_required {
+                                    "Setup required"
+                                } else if self.agent_reachable {
+                                    "System ready"
+                                } else {
+                                    "Agent offline"
+                                })
+                                .size(12.5)
+                                .strong()
+                                .color(theme::TEXT),
                             );
+                            ui.label(
+                                egui::RichText::new(if setup_required {
+                                    "Complete initial configuration"
+                                } else {
+                                    &self.status
+                                })
+                                .size(10.5)
+                                .color(theme::MUTED),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            theme::icon(ui, UiIcon::ChevronRight, 13.0, theme::MUTED);
                         });
                     });
+                })
+                .response
+                .interact(egui::Sense::click());
+            if setup_response.clicked() {
+                self.selected_tab = if setup_required {
+                    Tab::Permissions
+                } else {
+                    Tab::Overview
+                };
+            }
+            sidebar.add_space(18.0);
 
-                ui.add_space(1.0);
-                let content_rect = ui.available_rect_before_wrap();
-                let mut content = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(content_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
+            for (tab, icon, label) in Tab::ALL {
+                let badge = (tab == Tab::Approvals).then_some(self.pending.len());
+                if theme::nav_item(&mut sidebar, icon, label, self.selected_tab == tab, badge)
+                    .clicked()
+                {
+                    self.selected_tab = tab;
+                }
+                sidebar.add_space(4.0);
+            }
+
+            let mut lock_requested = false;
+            sidebar.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                let lock = egui::Frame::new()
+                    .fill(theme::DANGER_SOFT)
+                    .stroke(egui::Stroke::new(1.0, theme::DANGER.gamma_multiply(0.55)))
+                    .corner_radius(egui::CornerRadius::same(7))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_centered(|ui| {
+                            theme::icon(ui, UiIcon::Lock, 16.0, theme::DANGER);
+                            ui.label(
+                                egui::RichText::new("Lock all access")
+                                    .size(12.5)
+                                    .strong()
+                                    .color(theme::DANGER),
+                            );
+                        });
+                    })
+                    .response
+                    .interact(egui::Sense::click());
+                if lock.clicked() {
+                    lock_requested = true;
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        .size(10.5)
+                        .color(theme::MUTED),
                 );
+            });
+
+            let content_inner = content_rect.shrink2(egui::vec2(26.0, 20.0));
+            let mut content = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(content_inner)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            content.set_width(content_inner.width());
+            content.set_height(content_inner.height());
+
+            if let Some(error) = self.error.clone() {
                 egui::Frame::new()
-                    .fill(theme::BG)
-                    .inner_margin(egui::Margin::same(24))
+                    .fill(theme::DANGER_SOFT)
+                    .stroke(egui::Stroke::new(1.0, theme::DANGER.gamma_multiply(0.65)))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(14, 11))
                     .show(&mut content, |ui| {
                         ui.set_width(ui.available_width());
-                        if let Some(error) = &self.error {
-                            egui::Frame::new()
-                                .fill(theme::DANGER_SOFT)
-                                .stroke(egui::Stroke::new(1.0, theme::DANGER))
-                                .corner_radius(egui::CornerRadius::same(10))
-                                .inner_margin(egui::Margin::same(12))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("!").strong().color(theme::DANGER),
-                                        );
-                                        ui.label(egui::RichText::new(error).color(theme::TEXT));
-                                    });
-                                });
-                            ui.add_space(14.0);
-                        }
-
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                theme::page_header(
-                                    ui,
-                                    self.selected_tab.title(),
-                                    self.selected_tab.subtitle(),
+                        ui.horizontal(|ui| {
+                            theme::icon(ui, UiIcon::AlertTriangle, 20.0, theme::DANGER);
+                            ui.add_space(4.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("RunOnMine needs attention")
+                                        .size(12.5)
+                                        .strong()
+                                        .color(theme::DANGER),
                                 );
-                                match self.selected_tab {
-                                    Tab::Overview => self.show_overview(ui),
-                                    Tab::Approvals => self.show_approvals(ui),
-                                    Tab::Connections => self.show_connections(ui),
-                                    Tab::Permissions => self.show_permissions(ui),
-                                    Tab::OAuth => self.show_oauth(ui),
-                                    Tab::Audit => self.show_audit(ui),
-                                    Tab::Diagnostics => self.show_diagnostics(ui),
-                                }
+                                ui.label(egui::RichText::new(error).size(11.5).color(theme::MUTED));
                             });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(theme::danger_button("Manage allowed roots"))
+                                        .clicked()
+                                    {
+                                        self.selected_tab = Tab::Permissions;
+                                    }
+                                },
+                            );
+                        });
                     });
+                content.add_space(16.0);
+            }
+
+            content.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    theme::page_header(ui, self.selected_tab.title(), self.selected_tab.subtitle());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if theme::toolbar_button(ui, UiIcon::FileText, "Open audit", 104.0).clicked() {
+                        self.selected_tab = Tab::Audit;
+                    }
+                    ui.add_space(7.0);
+                    if theme::toolbar_button(ui, UiIcon::Refresh, "Refresh", 92.0).clicked() {
+                        let result = self.refresh();
+                        self.apply_result(result);
+                    }
+                });
             });
+            content.add_space(20.0);
+
+            egui::ScrollArea::vertical()
+                .id_salt("main-content-scroll")
+                .auto_shrink([false, false])
+                .show(&mut content, |ui| {
+                    ui.set_width(ui.available_width());
+                    match self.selected_tab {
+                        Tab::Overview => self.show_overview(ui),
+                        Tab::Approvals => self.show_approvals(ui),
+                        Tab::Connections => self.show_connections(ui),
+                        Tab::Permissions => self.show_permissions(ui),
+                        Tab::OAuth => self.show_oauth(ui),
+                        Tab::Audit => self.show_audit(ui),
+                        Tab::Diagnostics => self.show_diagnostics(ui),
+                    }
+                    ui.add_space(20.0);
+                });
 
             if lock_requested {
                 let result = self.emergency_lock();
@@ -1773,14 +2111,51 @@ mod desktop {
         }
     }
 
-    fn status_row(ui: &mut egui::Ui, label: &str, status: (&str, StatusTone)) {
+    fn overview_check(ui: &mut egui::Ui, label: &str, value: &str, tone: StatusTone) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(label).size(13.0).color(theme::MUTED));
+            let icon = match tone {
+                StatusTone::Success => UiIcon::Check,
+                StatusTone::Warning | StatusTone::Danger => UiIcon::AlertTriangle,
+                StatusTone::Info | StatusTone::Purple | StatusTone::Neutral => UiIcon::Activity,
+            };
+            let (_, color) = theme::tone_colors(tone);
+            theme::icon(ui, icon, 15.0, color);
+            ui.label(egui::RichText::new(label).size(11.5).color(theme::TEXT));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::status_badge(ui, status.0, status.1);
+                ui.label(egui::RichText::new(value).size(11.0).strong().color(color));
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(5.0);
+    }
+
+    fn activity_row(
+        ui: &mut egui::Ui,
+        icon: UiIcon,
+        title: &str,
+        subtitle: &str,
+        time: &str,
+        tone: StatusTone,
+    ) {
+        ui.horizontal(|ui| {
+            let (_, color) = theme::tone_colors(tone);
+            theme::icon(ui, icon, 17.0, color);
+            ui.add_space(3.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(11.5)
+                        .strong()
+                        .color(theme::TEXT),
+                );
+                ui.label(egui::RichText::new(subtitle).size(10.0).color(theme::MUTED));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(time).size(10.0).color(theme::MUTED));
+            });
+        });
+        ui.add_space(7.0);
+        ui.separator();
+        ui.add_space(4.0);
     }
 
     fn sibling_cli() -> Result<PathBuf> {

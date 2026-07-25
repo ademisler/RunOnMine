@@ -8,7 +8,7 @@ use runonmine_core::{
 use url::Url;
 
 use crate::theme;
-use crate::theme::StatusTone;
+use crate::theme::{Icon, StatusTone};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum PrincipalKind {
@@ -70,7 +70,7 @@ impl PolicyEditorState {
         if config.connectors.is_empty() {
             theme::empty_state(
                 ui,
-                "◈",
+                Icon::Link,
                 "No connector available",
                 "Create a connector before adding advanced policy rules.",
             );
@@ -262,7 +262,7 @@ impl PolicyEditorState {
         if connector.policy_rules.is_empty() {
             theme::empty_state(
                 ui,
-                "◇",
+                Icon::Shield,
                 "No advanced rules",
                 "This connector currently relies on its preset and overrides.",
             );
