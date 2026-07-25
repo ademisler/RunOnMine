@@ -35,6 +35,10 @@ It produces:
 
 The workflow opens a draft prerelease only. Artifacts are deliberately unsigned and must not be described as signed, notarized, or trusted by the operating system. Signing and notarization require external publisher credentials and a separate owner decision; CI cannot manufacture those credentials. Publishing the draft and making the repository public both require separate owner approval.
 
+## Hosted platform validation
+
+`Platform CI` always runs its Linux platform contract on the hardened self-hosted runner. The GitHub-hosted macOS, Windows, and ARM matrix runs for manual dispatches, or automatically when the repository variable `ENABLE_GITHUB_HOSTED_PLATFORM_CI` is set to `true`. This guard prevents account billing or spending-limit failures from appearing as product failures while keeping the full matrix ready to enable without changing workflow code.
+
 ## Local packaging helpers
 
 ```console

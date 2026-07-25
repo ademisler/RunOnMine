@@ -528,15 +528,12 @@ impl UserService {
             ensure_private_directory(writable_path)?;
         }
         let executable = systemd_escape(&self.agent_executable.to_string_lossy());
-        let writable_directives = writable_paths
-            .iter()
-            .map(|item| {
-                format!(
-                    "ReadWritePaths={}\n",
-                    systemd_escape(&item.to_string_lossy())
-                )
-            })
-            .collect::<String>();
+        let mut writable_directives = String::new();
+        for item in &writable_paths {
+            writable_directives.push_str("ReadWritePaths=");
+            writable_directives.push_str(&systemd_escape(&item.to_string_lossy()));
+            writable_directives.push('\n');
+        }
         let unit = format!(
             "[Unit]\nDescription=RunOnMine MCP Agent\nAfter=network-online.target\n\n\
              [Service]\nType=simple\nExecStart={executable} run\nRestart=on-failure\nRestartSec=3\n\

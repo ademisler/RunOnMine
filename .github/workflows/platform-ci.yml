@@ -18,7 +18,26 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  platform-contract-linux:
+    runs-on: [self-hosted, Linux, X64, runonmine]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - name: Lint Linux platform contract
+        run: >-
+          cargo clippy -p runonmine-platform --no-default-features
+          --all-targets --locked -- -D warnings
+      - name: Test Linux platform contract
+        run: cargo test -p runonmine-platform --no-default-features --locked
+
   test-headless:
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_GITHUB_HOSTED_PLATFORM_CI == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +73,7 @@ jobs:
           --no-default-features --target ${{ matrix.target }} --locked
 
   desktop-build:
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_GITHUB_HOSTED_PLATFORM_CI == 'true'
     strategy:
       fail-fast: false
       matrix:
