@@ -62,8 +62,10 @@ jobs:
         with:
           components: clippy
       - name: Lint complete workspace
-        run: >-
-          cargo clippy --workspace --all-targets --all-features
-          --locked -- -D warnings
+        run: |
+          export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test complete workspace
-        run: cargo test --workspace --all-features --locked
+        run: |
+          export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          cargo test --workspace --all-features --locked
