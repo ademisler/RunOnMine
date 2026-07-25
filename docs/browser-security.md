@@ -30,8 +30,7 @@ explicitly with:
 runonmine browser attach http://127.0.0.1:<port>
 ```
 
-HTTP and WebSocket CDP URLs must use `localhost`, `127.0.0.1`, or `::1`.
-External CDP is unavailable to remote connectors. The endpoint is treated as expert mode: every page, cookie, and account visible
+HTTP and WebSocket CDP URLs must use `localhost`, `127.0.0.1`, or `::1`; embedded credentials, query strings, and fragments are rejected. External CDP is unavailable to remote connectors. The endpoint is treated as expert mode: every page, cookie, and account visible
 to that browser may be reachable through browser actions. Start a dedicated
 temporary browser profile whenever possible.
 
@@ -56,8 +55,7 @@ runonmine browser private-network deny
 
 Enabling this option allows local connector browser actions to reach services on
 the machine and local network. Remote Cloudflare and OpenAI connectors remain
-blocked even when the local option is enabled. CDP Fetch interception validates
-navigations, redirects, and subresources before they are continued. This reduces
+blocked even when the local option is enabled. RunOnMine validates the requested URL, the final URL reported after navigation, and CDP Fetch interception events for navigations, redirects, and subresources before they are continued. This reduces
 SSRF exposure but does not make an authenticated browser session harmless.
 
 ## Output and policy

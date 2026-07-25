@@ -3,7 +3,6 @@
 use std::fs;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -132,14 +131,12 @@ fn prepare_socket_path(owner_uid: u32) -> Result<()> {
 }
 
 fn assign_socket_owner(owner_uid: u32) -> Result<()> {
-    let output = Command::new("chown")
-        .arg(owner_uid.to_string())
-        .arg(socket_path())
-        .output()
-        .context("failed to set helper socket owner")?;
-    if !output.status.success() {
-        bail!("failed to restrict helper socket to the installing user");
-    }
+    nix::unistd::chown(
+        &socket_path(),
+        Some(nix::unistd::Uid::from_raw(owner_uid)),
+        None,
+    )
+    .context("failed to set helper socket owner")?;
     let metadata =
         fs::symlink_metadata(socket_path()).context("failed to verify helper socket ownership")?;
     if !metadata.file_type().is_socket()

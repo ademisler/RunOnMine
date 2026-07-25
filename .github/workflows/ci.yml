@@ -49,3 +49,21 @@ jobs:
         run: >-
           cargo test --workspace --exclude runonmine-desktop
           --no-default-features --locked
+
+
+  test-full-linux:
+    runs-on: [self-hosted, Linux, X64, runonmine]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
+        with:
+          components: clippy
+      - name: Lint complete workspace
+        run: >-
+          cargo clippy --workspace --all-targets --all-features
+          --locked -- -D warnings
+      - name: Test complete workspace
+        run: cargo test --workspace --all-features --locked

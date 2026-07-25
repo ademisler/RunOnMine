@@ -1,10 +1,6 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-  { id = "RUSTSEC-2026-0194", reason = "quick-xml is pinned by xcb/wayland-scanner in desktop-control build/proc-macro paths and is not used for RunOnMine runtime XML parsing. Remove when upstream allows quick-xml >=0.41." },
-  { id = "RUSTSEC-2026-0195", reason = "quick-xml is pinned by xcb/wayland-scanner in desktop-control build/proc-macro paths and is not used for RunOnMine runtime XML parsing. Remove when upstream allows quick-xml >=0.41." },
-]
 
 [licenses]
 version = 2
@@ -34,3 +30,4 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = ["https://github.com/rust-x-bindings/rust-xcb.git"]

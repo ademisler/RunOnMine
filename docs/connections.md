@@ -61,10 +61,7 @@ dynamic client registration, authorization code flow, PKCE S256, consent, CSRF
 protection, token rotation, and revocation. GitHub proves the configured machine
 owner's identity.
 
-Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days;
-reuse revokes the token family. Only keyed, domain-separated token hashes are
-stored in SQLite. The GitHub client secret and hashing key remain in the
-platform credential store.
+Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days; reuse revokes the token family. Dynamic client registration uses an atomic SQLite-backed time window that survives agent restarts, in addition to the total registered-client cap. Only keyed, domain-separated token hashes are stored in SQLite. The GitHub client secret and hashing key remain in the platform credential store.
 
 The public hostname, Cloudflare tunnel ID, credentials file, GitHub OAuth client
 ID, expected GitHub owner login, and immutable positive GitHub numeric owner ID are required. The CLI prompts for secrets rather
@@ -93,7 +90,7 @@ persists a private installation receipt and re-verifies the executable path and
 SHA-256 digest whenever the managed binary is loaded. Explicit user-supplied
 absolute paths remain an advanced local trust decision; PATH fallback is not used.
 
-The desktop application includes guided setup for Quick Tunnel, Cloudflare OAuth, and OpenAI Secure MCP Tunnel. Secrets are passed to the local CLI over standard input and stored in the operating-system credential store. Connector lifecycle commands remain available without editing configuration files:
+The desktop application includes guided setup for Quick Tunnel, Cloudflare OAuth, and OpenAI Secure MCP Tunnel. Secrets are passed to the local CLI over bounded standard input and stored in the operating-system credential store. Multi-value credential replacement rolls back if any write or follow-up revocation fails. Child output is bounded and redacted, and background commands are canceled and joined when the desktop exits. Connector lifecycle commands remain available without editing configuration files:
 
 ```console
 runonmine connect list

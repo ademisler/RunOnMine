@@ -7,11 +7,15 @@ profiles, logs, or generated MCP URLs to the repository.
 Before opening a pull request, run:
 
 ```console
-cargo fmt --check
+cargo fmt --all --check
+cargo run --locked -p xtask -- verify-versions
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
+cargo clippy --workspace --exclude runonmine-desktop --no-default-features --all-targets --locked -- -D warnings
+cargo test --workspace --exclude runonmine-desktop --no-default-features --locked
 cargo audit --deny warnings
 cargo deny check
+gitleaks git --redact --no-banner --verbose
 ```
 
 Changes to authentication, policy evaluation, privileged IPC, process

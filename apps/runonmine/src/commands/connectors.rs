@@ -295,7 +295,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 }),
                 oauth_owner: Some(OAuthOwnerSettings {
                     github_login: owner_login,
-                    github_id: Some(owner_id),
+                    github_id: owner_id,
                 }),
                 openai_tunnel: None,
             });
@@ -471,7 +471,7 @@ pub(super) fn ensure_connector_credentials(
         && connector
             .oauth_owner
             .as_ref()
-            .and_then(|owner| owner.github_id)
+            .map(|owner| owner.github_id)
             .is_none_or(|id| id == 0)
     {
         bail!("OAuth connector must pin the machine owner's immutable GitHub numeric ID");

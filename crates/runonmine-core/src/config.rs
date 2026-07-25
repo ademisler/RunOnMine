@@ -58,7 +58,7 @@ pub struct CloudflareNamedSettings {
 pub struct OAuthOwnerSettings {
     pub github_login: String,
     #[serde(default)]
-    pub github_id: Option<u64>,
+    pub github_id: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -339,6 +339,8 @@ fn validate_limits(limits: &LimitsConfig) -> Result<()> {
         || limits.max_output_bytes == 0
         || limits.max_output_bytes > 64 * 1_024 * 1_024
         || limits.default_process_timeout_seconds == 0
+        || limits.max_process_timeout_seconds == 0
+        || limits.max_process_timeout_seconds > 86_400
         || limits.default_process_timeout_seconds > limits.max_process_timeout_seconds
     {
         bail!("configured limits are invalid or exceed safe bounds");
@@ -360,8 +362,14 @@ fn validate_browser(browser: &BrowserConfig) -> Result<()> {
         let host = endpoint.host_str().unwrap_or_default();
         if !matches!(endpoint.scheme(), "http" | "https" | "ws" | "wss")
             || !matches!(host, "127.0.0.1" | "::1" | "localhost")
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
         {
-            bail!("external browser CDP endpoint must use loopback HTTP or WebSocket transport");
+            bail!(
+                "external browser CDP endpoint must use credential-free loopback HTTP or WebSocket transport without query or fragment data"
+            );
         }
     }
     Ok(())
@@ -570,8 +578,13 @@ fn validate_connector_settings(connector: &ConnectorConfig, agent_port: u16) -> 
             .oauth_owner
             .as_ref()
             .context("OAuth connector owner is missing")?;
-        if owner.github_login.trim().is_empty() || owner.github_login.len() > 39 {
-            bail!("OAuth connector GitHub owner login is invalid");
+        if owner.github_login.trim().is_empty()
+            || owner.github_login.len() > 39
+            || owner.github_id == 0
+        {
+            bail!(
+                "OAuth connector owner must include a valid GitHub login and immutable numeric ID; rerun connector setup to migrate older configurations"
+            );
         }
     }
     if let Some(settings) = &connector.openai_tunnel {

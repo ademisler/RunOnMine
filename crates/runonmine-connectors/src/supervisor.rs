@@ -110,7 +110,7 @@ impl ProcessSupervisor {
         let (event_tx, _) = broadcast::channel(256);
         let initial_events = event_tx.subscribe();
         let task_events = event_tx.clone();
-        runtime.spawn(async move {
+        let task = runtime.spawn(async move {
             run_supervisor(
                 command,
                 health,
@@ -127,6 +127,7 @@ impl ProcessSupervisor {
             state: state_rx,
             events: event_tx,
             initial_events: Some(initial_events),
+            task: Some(task),
         })
     }
 }
@@ -136,6 +137,7 @@ pub struct SupervisorHandle {
     state: watch::Receiver<ProcessState>,
     events: broadcast::Sender<ProcessEvent>,
     initial_events: Option<broadcast::Receiver<ProcessEvent>>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl fmt::Debug for SupervisorHandle {
@@ -164,21 +166,28 @@ impl SupervisorHandle {
         self.stop
             .send(true)
             .context("connector supervisor has already stopped")?;
-        loop {
+        let final_state = loop {
             let state = self.state.borrow().clone();
             if matches!(state, ProcessState::Stopped | ProcessState::Failed { .. }) {
-                return Ok(state);
+                break state;
             }
             if self.state.changed().await.is_err() {
-                return Ok(self.state.borrow().clone());
+                break self.state.borrow().clone();
             }
+        };
+        if let Some(task) = self.task.take() {
+            task.await.context("connector supervisor task failed")?;
         }
+        Ok(final_state)
     }
 }
 
 impl Drop for SupervisorHandle {
     fn drop(&mut self) {
         let _ignored = self.stop.send(true);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 

@@ -34,3 +34,29 @@ async fn main() -> Result<()> {
         AgentCommand::Stdio { connector } => runonmine_mcp::serve_stdio(&connector).await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::*;
+
+    #[test]
+    fn stdio_requires_and_preserves_connector_identity() -> Result<()> {
+        let cli =
+            Cli::try_parse_from(["runonmine-agent", "stdio", "--connector", "connector-123"])?;
+        let AgentCommand::Stdio { connector } = cli.command else {
+            anyhow::bail!("unexpected run command");
+        };
+        assert_eq!(connector, "connector-123");
+        assert!(Cli::try_parse_from(["runonmine-agent", "stdio"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn run_command_parses_without_extra_arguments() -> Result<()> {
+        let cli = Cli::try_parse_from(["runonmine-agent", "run"])?;
+        assert!(matches!(cli.command, AgentCommand::Run));
+        Ok(())
+    }
+}

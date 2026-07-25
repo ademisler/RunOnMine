@@ -26,6 +26,9 @@ tokio.workspace = true
 uuid.workspace = true
 xcap = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8.0"
 windows-sys = { version = "0.61.2", features = [

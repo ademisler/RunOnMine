@@ -1,7 +1,6 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration as StdDuration, Instant};
+use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use secrecy::{ExposeSecret, SecretString};
@@ -26,7 +25,7 @@ const REFRESH_TOKEN_TTL: Duration = Duration::days(30);
 const AUTHORIZATION_TRANSACTION_TTL: Duration = Duration::minutes(10);
 const CONSENT_TTL: Duration = Duration::minutes(5);
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
-const REGISTRATION_WINDOW: StdDuration = StdDuration::from_mins(1);
+const REGISTRATION_WINDOW_SECONDS: i64 = 60;
 const REGISTRATIONS_PER_WINDOW: usize = 20;
 const MAX_REGISTERED_CLIENTS: usize = 256;
 
@@ -63,7 +62,6 @@ pub struct OAuthService {
     store: Arc<dyn OAuthStore>,
     hasher: TokenHasher,
     github: Arc<dyn GitHubOwnerVerifier>,
-    registration_attempts: Mutex<VecDeque<Instant>>,
 }
 
 impl std::fmt::Debug for OAuthService {
@@ -74,7 +72,6 @@ impl std::fmt::Debug for OAuthService {
             .field("store", &"dyn OAuthStore")
             .field("hasher", &self.hasher)
             .field("github", &"dyn GitHubOwnerVerifier")
-            .field("registration_attempts", &"rate limited")
             .finish()
     }
 }
@@ -92,7 +89,6 @@ impl OAuthService {
             store,
             hasher,
             github,
-            registration_attempts: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -206,21 +202,17 @@ impl OAuthService {
         {
             return Err(OAuthError::temporarily_unavailable());
         }
-        let mut attempts = self
-            .registration_attempts
-            .lock()
-            .map_err(|_| OAuthError::temporarily_unavailable())?;
-        let now = Instant::now();
-        while attempts
-            .front()
-            .is_some_and(|attempt| now.duration_since(*attempt) >= REGISTRATION_WINDOW)
-        {
-            attempts.pop_front();
-        }
-        if attempts.len() >= REGISTRATIONS_PER_WINDOW {
+        let allowed = self
+            .store
+            .consume_registration_slot(
+                Utc::now(),
+                REGISTRATION_WINDOW_SECONDS,
+                REGISTRATIONS_PER_WINDOW,
+            )
+            .map_err(map_store_server_error)?;
+        if !allowed {
             return Err(OAuthError::temporarily_unavailable());
         }
-        attempts.push_back(now);
         Ok(())
     }
 
@@ -615,7 +607,7 @@ mod tests {
         }
     }
 
-    fn service() -> Result<OAuthService, OAuthError> {
+    fn service_with_store(store: Arc<dyn OAuthStore>) -> Result<OAuthService, OAuthError> {
         let config = OAuthServiceConfig {
             issuer: Url::parse("https://mine.example").map_err(|_| OAuthError::configuration())?,
             protected_resource: Url::parse("https://mine.example/mcp")
@@ -624,13 +616,17 @@ mod tests {
             github_callback_url: Url::parse("https://mine.example/oauth/github/callback")
                 .map_err(|_| OAuthError::configuration())?,
         };
-        let store = SqliteOAuthStore::in_memory().map_err(map_store_server_error)?;
         OAuthService::new(
             config,
-            Arc::new(store),
+            store,
             TokenHasher::new([9_u8; 32])?,
             Arc::new(Owner),
         )
+    }
+
+    fn service() -> Result<OAuthService, OAuthError> {
+        let store = SqliteOAuthStore::in_memory().map_err(map_store_server_error)?;
+        service_with_store(Arc::new(store))
     }
 
     fn verifier() -> String {
@@ -742,6 +738,26 @@ mod tests {
         let result = register(&service);
         assert!(matches!(
             result,
+            Err(error) if error.code == crate::OAuthErrorCode::TemporarilyUnavailable
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_registration_limit_survives_service_restart() -> Result<(), OAuthError> {
+        let directory = tempfile::tempdir().map_err(|_| OAuthError::server())?;
+        let database = directory.path().join("state").join("state.db");
+        {
+            let store = SqliteOAuthStore::open(&database).map_err(map_store_server_error)?;
+            let service = service_with_store(Arc::new(store))?;
+            for _ in 0..REGISTRATIONS_PER_WINDOW {
+                register(&service)?;
+            }
+        }
+        let store = SqliteOAuthStore::open(&database).map_err(map_store_server_error)?;
+        let restarted = service_with_store(Arc::new(store))?;
+        assert!(matches!(
+            register(&restarted),
             Err(error) if error.code == crate::OAuthErrorCode::TemporarilyUnavailable
         ));
         Ok(())

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -151,12 +152,21 @@ fn verify_release_tag(tag: &str) -> Result<()> {
     Ok(())
 }
 
-const BINARIES: [&str; 4] = [
+const HEADLESS_BINARIES: [&str; 3] = ["runonmine", "runonmine-agent", "runonmine-helper"];
+const DESKTOP_BINARIES: [&str; 4] = [
     "runonmine",
     "runonmine-agent",
     "runonmine-desktop",
     "runonmine-helper",
 ];
+
+fn expected_binaries(target: &str) -> &'static [&'static str] {
+    if target.contains("linux") {
+        &HEADLESS_BINARIES
+    } else {
+        &DESKTOP_BINARIES
+    }
+}
 
 fn package(target: &str) -> Result<()> {
     validate_target(target)?;
@@ -180,16 +190,14 @@ fn package(target: &str) -> Result<()> {
         ""
     };
     let mut included = Vec::new();
-    for binary in BINARIES {
+    for binary in expected_binaries(target) {
         let filename = format!("{binary}{suffix}");
         let source = release_dir.join(&filename);
-        if source.is_file() {
-            fs::copy(&source, staging.join(&filename))?;
-            included.push(filename);
+        if !source.is_file() {
+            bail!("required release binary is missing for {target}: {filename}");
         }
-    }
-    if included.len() < 3 {
-        bail!("expected release binaries are missing for {target}");
+        fs::copy(&source, staging.join(&filename))?;
+        included.push(filename);
     }
     fs::copy(root.join("LICENSE"), staging.join("LICENSE"))?;
     fs::copy(root.join("README.md"), staging.join("README.md"))?;
@@ -227,7 +235,7 @@ fn universal_macos() -> Result<()> {
     }
     fs::create_dir_all(&output)?;
 
-    for binary in BINARIES {
+    for binary in DESKTOP_BINARIES {
         let arm_binary = arm.join(binary);
         let intel_binary = intel.join(binary);
         if !arm_binary.is_file() || !intel_binary.is_file() {
@@ -274,7 +282,7 @@ fn stage_packager(target: &str) -> Result<()> {
     };
     let expected = if target.contains("linux") { 3 } else { 4 };
     let mut copied = 0_usize;
-    for binary in BINARIES {
+    for binary in DESKTOP_BINARIES {
         let filename = format!("{binary}{suffix}");
         let path = source.join(&filename);
         if path.is_file() {
@@ -354,36 +362,147 @@ fn cyclonedx_sbom(root: &Path) -> Result<Value> {
         bail!("cargo metadata failed while generating the SBOM");
     }
     let metadata: Value = serde_json::from_slice(&output.stdout)?;
+    let lock_path = root.join("Cargo.lock");
+    let lock_bytes = fs::read(&lock_path)?;
+    let lock: toml::Value = toml::from_slice(&lock_bytes)?;
+    build_cyclonedx_sbom(&metadata, &lock, &sha256_hex(&lock_bytes))
+}
+
+fn build_cyclonedx_sbom(metadata: &Value, lock: &toml::Value, lock_sha256: &str) -> Result<Value> {
+    let checksums = cargo_lock_checksums(lock)?;
     let packages = metadata["packages"]
         .as_array()
         .context("cargo metadata has no packages")?;
-    let components = packages
-        .iter()
-        .map(|package| {
-            let name = package["name"].as_str().unwrap_or("unknown");
-            let version = package["version"].as_str().unwrap_or("unknown");
-            let license = package["license"].as_str();
-            let mut component = json!({
-                "type": "library",
-                "name": name,
-                "version": version,
-                "purl": format!("pkg:cargo/{name}@{version}")
-            });
-            if let Some(license) = license {
-                component["licenses"] = json!([{"expression": license}]);
+    let mut components = Vec::with_capacity(packages.len());
+    for package in packages {
+        let name = package["name"].as_str().unwrap_or("unknown");
+        let version = package["version"].as_str().unwrap_or("unknown");
+        let id = package["id"]
+            .as_str()
+            .with_context(|| format!("cargo metadata package {name} has no id"))?;
+        let source = package["source"].as_str();
+        let license = package["license"].as_str();
+        let mut component = json!({
+            "type": if source.is_some() { "library" } else { "application" },
+            "bom-ref": id,
+            "name": name,
+            "version": version,
+            "purl": format!("pkg:cargo/{name}@{version}")
+        });
+        if let Some(license) = license {
+            component["licenses"] = json!([{"expression": license}]);
+        }
+        if let Some(source) = source {
+            component["properties"] = json!([{
+                "name": "cargo:source",
+                "value": source
+            }]);
+            if source.starts_with("git+") {
+                component["externalReferences"] = json!([{
+                    "type": "vcs",
+                    "url": source.trim_start_matches("git+")
+                }]);
             }
-            component
+        }
+        let key = CargoPackageKey {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            source: source.map(str::to_owned),
+        };
+        if let Some(checksum) = checksums.get(&key) {
+            component["hashes"] = json!([{
+                "alg": "SHA-256",
+                "content": checksum
+            }]);
+        }
+        components.push(component);
+    }
+
+    let nodes = metadata["resolve"]["nodes"]
+        .as_array()
+        .context("cargo metadata has no dependency resolution graph")?;
+    let dependencies = nodes
+        .iter()
+        .map(|node| {
+            let reference = node["id"].as_str().unwrap_or("unknown");
+            let mut depends_on = node["dependencies"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            depends_on.sort_unstable();
+            depends_on.dedup();
+            json!({"ref": reference, "dependsOn": depends_on})
         })
         .collect::<Vec<_>>();
+
     Ok(json!({
         "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
         "bomFormat": "CycloneDX",
         "specVersion": "1.6",
         "serialNumber": format!("urn:uuid:{}", Uuid::new_v4()),
         "version": 1,
-        "metadata": {"component": {"type": "application", "name": "RunOnMine", "version": VERSION}},
-        "components": components
+        "metadata": {
+            "component": {
+                "type": "application",
+                "name": "RunOnMine",
+                "version": VERSION
+            },
+            "properties": [{
+                "name": "runonmine:cargo-lock-sha256",
+                "value": lock_sha256
+            }]
+        },
+        "components": components,
+        "dependencies": dependencies
     }))
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CargoPackageKey {
+    name: String,
+    version: String,
+    source: Option<String>,
+}
+
+fn cargo_lock_checksums(lock: &toml::Value) -> Result<BTreeMap<CargoPackageKey, String>> {
+    let packages = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .context("Cargo.lock has no package list")?;
+    let mut checksums = BTreeMap::new();
+    for package in packages {
+        let Some(table) = package.as_table() else {
+            continue;
+        };
+        let Some(name) = table.get("name").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let Some(version) = table.get("version").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let Some(checksum) = table.get("checksum").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let source = table
+            .get("source")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned);
+        checksums.insert(
+            CargoPackageKey {
+                name: name.to_owned(),
+                version: version.to_owned(),
+                source,
+            },
+            checksum.to_owned(),
+        );
+    }
+    Ok(checksums)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn write_tar_gz(staging: &Path, output: &Path, package_name: &str) -> Result<()> {
@@ -434,4 +553,83 @@ fn write_checksum(path: &Path) -> Result<()> {
     output.write_all(checksum.as_bytes())?;
     output.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sbom_contains_dependency_edges_and_lockfile_checksums() -> Result<()> {
+        let metadata = json!({
+            "packages": [
+                {
+                    "name": "app",
+                    "version": "1.0.0",
+                    "id": "path+file:///app#1.0.0",
+                    "source": null,
+                    "license": "MIT"
+                },
+                {
+                    "name": "dependency",
+                    "version": "2.0.0",
+                    "id": "registry+https://github.com/rust-lang/crates.io-index#dependency@2.0.0",
+                    "source": "registry+https://github.com/rust-lang/crates.io-index",
+                    "license": "Apache-2.0"
+                }
+            ],
+            "resolve": {
+                "nodes": [
+                    {
+                        "id": "path+file:///app#1.0.0",
+                        "dependencies": ["registry+https://github.com/rust-lang/crates.io-index#dependency@2.0.0"]
+                    },
+                    {
+                        "id": "registry+https://github.com/rust-lang/crates.io-index#dependency@2.0.0",
+                        "dependencies": []
+                    }
+                ]
+            }
+        });
+        let lock: toml::Value = toml::from_str(
+            r#"
+                version = 4
+
+                [[package]]
+                name = "dependency"
+                version = "2.0.0"
+                source = "registry+https://github.com/rust-lang/crates.io-index"
+                checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "#,
+        )?;
+        let sbom = build_cyclonedx_sbom(&metadata, &lock, "lock-hash")?;
+        assert_eq!(
+            sbom["dependencies"][0]["dependsOn"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            sbom["components"][1]["hashes"][0]["content"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(sbom["metadata"]["properties"][0]["value"], "lock-hash");
+        Ok(())
+    }
+
+    #[test]
+    fn package_manifest_is_exact_for_each_platform_family() {
+        assert_eq!(
+            expected_binaries("x86_64-unknown-linux-gnu"),
+            &HEADLESS_BINARIES
+        );
+        assert_eq!(
+            expected_binaries("universal-apple-darwin"),
+            &DESKTOP_BINARIES
+        );
+        assert_eq!(
+            expected_binaries("x86_64-pc-windows-msvc"),
+            &DESKTOP_BINARIES
+        );
+    }
 }

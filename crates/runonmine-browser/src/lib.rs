@@ -46,8 +46,14 @@ impl BrowserProfile {
         let host = endpoint.host_str().unwrap_or_default();
         if !matches!(endpoint.scheme(), "http" | "https" | "ws" | "wss")
             || !matches!(host, "127.0.0.1" | "::1" | "localhost")
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
         {
-            bail!("external CDP endpoints must use loopback HTTP or WebSocket transport");
+            bail!(
+                "external CDP endpoints must use credential-free loopback HTTP or WebSocket transport without query or fragment data"
+            );
         }
         Ok(Self::ExternalCdp { endpoint })
     }
@@ -129,6 +135,12 @@ impl BrowserSession {
             return Err(error.into());
         }
         let current_url = page.url().await?.unwrap_or_else(|| url.to_owned());
+        if let Err(error) = validate_navigation_url(&current_url, self.allow_private_network).await
+        {
+            stop_request_guard(&page, &interceptor_task).await;
+            let _ignored = page.close().await;
+            return Err(error.context("browser navigation ended at a disallowed destination"));
+        }
         stop_request_guard(&active.page, &active.interceptor_task).await;
         if active.page_owned {
             let _ignored = active.page.clone().close().await;
@@ -639,11 +651,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn external_cdp_rejects_remote_host_and_unsupported_scheme() -> Result<()> {
-        let endpoint = Url::parse("http://example.com:9222")?;
-        assert!(BrowserProfile::external(endpoint).is_err());
-        let endpoint = Url::parse("ftp://127.0.0.1:9222")?;
-        assert!(BrowserProfile::external(endpoint).is_err());
+    fn external_cdp_rejects_remote_host_unsupported_scheme_and_sensitive_url_data() -> Result<()> {
+        for endpoint in [
+            "http://example.com:9222",
+            "ftp://127.0.0.1:9222",
+            "http://user:pass@localhost:9222",
+            "http://localhost:9222?token=secret",
+            "ws://localhost:9222/#session",
+        ] {
+            assert!(BrowserProfile::external(Url::parse(endpoint)?).is_err());
+        }
+        assert!(
+            BrowserProfile::external(Url::parse("http://localhost:9222/devtools/browser")?).is_ok()
+        );
         Ok(())
     }
 

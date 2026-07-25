@@ -24,12 +24,12 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 cargo clippy --workspace --exclude runonmine-desktop --no-default-features --all-targets --locked -- -D warnings
 cargo test --workspace --exclude runonmine-desktop --no-default-features --locked
-cargo audit --no-yanked --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+cargo audit --deny warnings
 cargo deny check
 gitleaks git --redact --no-banner --verbose
 ```
 
-The two ignored `quick-xml` advisories must remain confined to the documented build/proc-macro dependency paths. Remove the exceptions as soon as upstream dependencies permit it.
+Dependency advisories are release blockers. Do not add an advisory exception without an owner-approved, time-bounded risk record and an automated dependency-path assertion.
 
 ## Change discipline
 

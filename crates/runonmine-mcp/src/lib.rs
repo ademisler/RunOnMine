@@ -579,17 +579,26 @@ impl RunOnMineServer {
             }) => PrincipalContext::OAuth { client_id, subject },
             _ => PrincipalContext::Local,
         };
-        let resource = policy_resource(tool_name, arguments).map_err(|error| {
-            tracing::error!(%error, "failed to derive policy resource");
-            McpError::internal_error("Tool resource could not be safely authorized", None)
+        let resources = policy_resources(tool_name, arguments).map_err(|error| {
+            tracing::error!(%error, "failed to derive policy resources");
+            McpError::internal_error("Tool resources could not be safely authorized", None)
         })?;
-        let policy_context = PolicyContext {
-            principal,
-            resource: resource.as_context(),
-        };
-        let mode = PolicyEngine
-            .evaluate_context(&connector, tool_name, capability, &policy_context)
-            .mode;
+        let modes = resources
+            .contexts()
+            .map(|resource| {
+                PolicyEngine
+                    .evaluate_context(
+                        &connector,
+                        tool_name,
+                        capability,
+                        &PolicyContext {
+                            principal: principal.clone(),
+                            resource,
+                        },
+                    )
+                    .mode
+            })
+            .collect::<Vec<_>>();
         let grant_allows = self
             .runtime
             .0
@@ -601,30 +610,33 @@ impl RunOnMineServer {
             )
             .await
             .unwrap_or(false);
-        if mode == PolicyMode::Allow || grant_allows {
-            self.audit_authorization_required(
-                tool_name,
-                capability,
-                AuditOutcome::Allowed,
-                &argument_hash,
-                summary,
-            )
-            .await?;
-            return Ok(());
-        }
-        if mode == PolicyMode::Deny {
-            self.audit_authorization_required(
-                tool_name,
-                capability,
-                AuditOutcome::Denied,
-                &argument_hash,
-                summary,
-            )
-            .await?;
-            return Err(McpError::invalid_request(
-                "Tool is denied by local policy",
-                None,
-            ));
+        match pre_approval_decision(modes, grant_allows) {
+            PreApprovalDecision::Allow => {
+                self.audit_authorization_required(
+                    tool_name,
+                    capability,
+                    AuditOutcome::Allowed,
+                    &argument_hash,
+                    summary,
+                )
+                .await?;
+                return Ok(());
+            }
+            PreApprovalDecision::Deny => {
+                self.audit_authorization_required(
+                    tool_name,
+                    capability,
+                    AuditOutcome::Denied,
+                    &argument_hash,
+                    summary,
+                )
+                .await?;
+                return Err(McpError::invalid_request(
+                    "Tool is denied by local policy",
+                    None,
+                ));
+            }
+            PreApprovalDecision::Ask => {}
         }
 
         let chrono_timeout = chrono::Duration::from_std(self.runtime.0.approval_timeout)
@@ -883,7 +895,7 @@ impl RunOnMineServer {
 }
 
 mod authorization;
-use authorization::policy_resource;
+use authorization::{PreApprovalDecision, policy_resources, pre_approval_decision};
 
 mod arguments;
 use arguments::{

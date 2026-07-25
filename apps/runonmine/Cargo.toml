@@ -31,5 +31,8 @@ tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
 [lints]
 workspace = true

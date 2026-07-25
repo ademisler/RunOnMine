@@ -10,7 +10,7 @@ Every connector resolves a tool in this order:
 
 Principal matchers can target local requests, a specific OAuth client, or a
 specific OAuth subject. Resource matchers can restrict a rule to a filesystem
-prefix, browser origin, executable path, or command prefix. The desktop Permissions tab includes a visual rule builder for these combinations and validates the complete configuration before saving. The desktop Permissions tab includes a visual rule builder for these combinations and validates the complete configuration before saving. At equal
+prefix, browser origin, executable path, or command prefix. The desktop Permissions tab includes a visual rule builder for these combinations and validates the complete configuration before saving. At equal
 specificity, `deny` wins over `ask`, which wins over `allow`. Rules are stored
 in the connector's `policy_rules` configuration and are validated when the
 configuration is loaded.
@@ -53,8 +53,7 @@ before storage and display. Persistent exact-action grants can be listed and
 revoked with `runonmine approvals grants ...`. MCP clients cannot list, grant,
 or deny approvals.
 
-For an internet-facing connector, a connector policy still cannot bypass the
-remote safety ceiling. Exact grants authorize only the reviewed argument hash.
+For an internet-facing connector, a connector policy still cannot bypass the remote safety ceiling. Exact grants authorize only the reviewed argument hash. Explicit `deny` rules are checked before grants, so a grant created earlier cannot override a later policy revocation. Tools with multiple security-relevant resources authorize all of them; for example, `fs_move` evaluates both its source and destination paths.
 
 ```console
 runonmine approvals list
