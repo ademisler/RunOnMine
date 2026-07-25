@@ -4433,8 +4433,10 @@ dependencies = [
  "egui",
  "runonmine-core",
  "runonmine-oauth",
+ "secrecy",
  "serde_json",
  "tray-icon",
+ "url",
  "uuid",
 ]
 

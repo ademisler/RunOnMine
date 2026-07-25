@@ -33,7 +33,7 @@ connect outward to the loopback listener at `127.0.0.1:47821`.
 
 - `runonmine`: setup, connectors, policy, approvals, services, audit, and diagnostics;
 - `runonmine-agent`: MCP server and connector supervisor;
-- `runonmine-desktop`: local security control center for approvals, connectors, roots, policies, OAuth, audit, and diagnostics;
+- `runonmine-desktop`: local security control center for approvals, connector setup and credential rotation, roots, visual principal/resource policy rules, OAuth, audit, and diagnostics;
 - `runonmine-helper`: optional, separately installed privileged helper.
 
 The helper is absent by default. Normal setup and user-service installation do
@@ -92,7 +92,6 @@ runonmine lock
   access is a local-connector-only opt-in and remains blocked for remote connectors.
 - Secrets use the operating-system credential store, with an explicit encrypted
   headless Linux fallback.
-- Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. MCP authorization, approval, and audit paths use asynchronous worker replies.
 - Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. MCP authorization, approval, and audit paths use asynchronous worker replies.
 - Audit records contain argument summaries and hashes rather than raw command,
   token, cookie, or stdin contents.

@@ -1,16 +1,28 @@
 #[cfg(feature = "desktop-ui")]
+mod connector_wizard;
+#[cfg(feature = "desktop-ui")]
+mod policy_editor;
+
+#[cfg(feature = "desktop-ui")]
 mod desktop {
     use std::collections::HashSet;
+    use std::io::Write as _;
     use std::path::PathBuf;
+    use std::process::Stdio;
     use std::sync::mpsc::{self, Receiver};
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
     use eframe::egui;
+    use runonmine_core::secrets::default_secret_store;
     use runonmine_core::{
-        AppConfig, AppPaths, ApprovalDecision, ApprovalRequest, AuditRecord, PersistentGrant,
-        PolicyPreset, StateStore,
+        AppConfig, AppPaths, ApprovalDecision, ApprovalRequest, AuditRecord, ConnectorKind,
+        PersistentGrant, PolicyPreset, StateStore,
     };
+    use secrecy::SecretString;
+
+    use crate::connector_wizard::{ConnectorCommand, ConnectorWizardState, rotation_label};
+    use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
     use runonmine_oauth::{OAuthSession, RegisteredClient, SqliteOAuthStore};
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -63,6 +75,13 @@ mod desktop {
         diagnostics: String,
         diagnostic_rx: Option<Receiver<std::result::Result<String, String>>>,
         pending_client_delete: Option<String>,
+        pending_connector_delete: Option<String>,
+        pending_credential_update: Option<(String, ConnectorKind)>,
+        credential_client_id: String,
+        credential_secret: String,
+        policy_editor: PolicyEditorState,
+        connector_wizard: ConnectorWizardState,
+        connector_rx: Option<Receiver<std::result::Result<String, String>>>,
         tray: Option<TrayIcon>,
         open_menu_id: Option<MenuId>,
         lock_menu_id: Option<MenuId>,
@@ -92,6 +111,13 @@ mod desktop {
                 diagnostics: String::new(),
                 diagnostic_rx: None,
                 pending_client_delete: None,
+                pending_connector_delete: None,
+                pending_credential_update: None,
+                credential_client_id: String::new(),
+                credential_secret: String::new(),
+                policy_editor: PolicyEditorState::default(),
+                connector_wizard: ConnectorWizardState::default(),
+                connector_rx: None,
                 tray: None,
                 open_menu_id: None,
                 lock_menu_id: None,
@@ -327,6 +353,153 @@ mod desktop {
             self.refresh()
         }
 
+        fn apply_policy_action(&mut self, action: PolicyEditorAction) -> Result<()> {
+            let mut config = self
+                .config
+                .clone()
+                .context("Configuration is unavailable")?;
+            match action {
+                PolicyEditorAction::Add { connector_id, rule } => {
+                    config
+                        .connector_mut(&connector_id)
+                        .context("Connector no longer exists")?
+                        .policy_rules
+                        .push(rule);
+                }
+                PolicyEditorAction::Remove {
+                    connector_id,
+                    index,
+                } => {
+                    let rules = &mut config
+                        .connector_mut(&connector_id)
+                        .context("Connector no longer exists")?
+                        .policy_rules;
+                    if index >= rules.len() {
+                        bail!("Policy rule no longer exists");
+                    }
+                    rules.remove(index);
+                }
+            }
+            self.save_config(config)
+        }
+
+        fn start_connector_command(&mut self, command: ConnectorCommand) -> Result<()> {
+            if self.connector_rx.is_some() {
+                bail!("Another connector operation is already running");
+            }
+            let cli = sibling_cli()?;
+            let (sender, receiver) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result =
+                    run_cli_with_input(&cli, &command.arguments, command.stdin_secret.as_deref())
+                        .map_err(|error| error.to_string());
+                let _ignored = sender.send(result);
+            });
+            self.connector_rx = Some(receiver);
+            "Connector operation is running…".clone_into(&mut self.diagnostics);
+            Ok(())
+        }
+
+        fn poll_connector_command(&mut self) {
+            let result = self
+                .connector_rx
+                .as_ref()
+                .and_then(|receiver| receiver.try_recv().ok());
+            if let Some(result) = result {
+                self.connector_rx = None;
+                self.connector_wizard.clear_secrets();
+                match result {
+                    Ok(output) => {
+                        self.diagnostics = output;
+                        self.connector_wizard.open = false;
+                        if let Err(error) = self.refresh() {
+                            self.error = Some(error.to_string());
+                        } else {
+                            self.error = None;
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        }
+
+        fn rotate_quick_connector(&mut self, connector_id: &str) -> Result<()> {
+            self.start_connector_command(ConnectorCommand {
+                arguments: vec![
+                    "connect".to_owned(),
+                    "cloudflare".to_owned(),
+                    "quick".to_owned(),
+                    "--rotate".to_owned(),
+                    connector_id.to_owned(),
+                ],
+                stdin_secret: None,
+            })
+        }
+
+        fn remove_connector(&mut self, connector_id: &str) -> Result<()> {
+            self.start_connector_command(ConnectorCommand {
+                arguments: vec![
+                    "connect".to_owned(),
+                    "remove".to_owned(),
+                    connector_id.to_owned(),
+                    "--confirm".to_owned(),
+                    "REMOVE".to_owned(),
+                ],
+                stdin_secret: None,
+            })
+        }
+
+        fn update_connector_credentials(
+            &mut self,
+            connector_id: &str,
+            kind: ConnectorKind,
+        ) -> Result<()> {
+            let paths = self
+                .paths
+                .as_ref()
+                .context("RunOnMine paths are unavailable")?;
+            let secrets = default_secret_store(paths)?;
+            match kind {
+                ConnectorKind::CloudflareOauth => {
+                    let client_id = self.credential_client_id.trim();
+                    let secret = self.credential_secret.trim();
+                    if client_id.is_empty() || secret.is_empty() {
+                        bail!("GitHub client ID and client secret are required");
+                    }
+                    secrets.set(
+                        &format!("connector.{connector_id}.github_client_id"),
+                        &SecretString::from(client_id.to_owned()),
+                    )?;
+                    secrets.set(
+                        &format!("connector.{connector_id}.github_client_secret"),
+                        &SecretString::from(secret.to_owned()),
+                    )?;
+                    let revoked =
+                        SqliteOAuthStore::open(&paths.state_db())?.emergency_revoke_all()?;
+                    self.diagnostics = format!(
+                        "Updated GitHub credentials and revoked {revoked} OAuth token(s). Restart the agent to apply the new credentials."
+                    );
+                }
+                ConnectorKind::OpenAiTunnel => {
+                    let secret = self.credential_secret.trim();
+                    if secret.is_empty() {
+                        bail!("OpenAI runtime API key is required");
+                    }
+                    secrets.set(
+                        &format!("connector.{connector_id}.runtime_api_key"),
+                        &SecretString::from(secret.to_owned()),
+                    )?;
+                    "Updated the OpenAI runtime API key. Restart the agent to reconnect."
+                        .clone_into(&mut self.diagnostics);
+                }
+                _ => bail!("This connector does not support credential updates"),
+            }
+            self.credential_client_id.clear();
+            self.credential_secret.clear();
+            self.pending_credential_update = None;
+            self.refresh()
+        }
+
         fn start_doctor(&mut self) -> Result<()> {
             if self.diagnostic_rx.is_some() {
                 return Ok(());
@@ -517,39 +690,81 @@ mod desktop {
             }
         }
 
+        #[allow(clippy::too_many_lines)]
         fn show_connections(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Connections");
+            ui.horizontal(|ui| {
+                ui.heading("Connections");
+                if ui
+                    .add_enabled(
+                        self.connector_rx.is_none(),
+                        egui::Button::new("Add connector…"),
+                    )
+                    .clicked()
+                {
+                    self.connector_wizard.open = true;
+                }
+            });
+            ui.label("Connector secrets remain masked and are stored in the operating-system credential store.");
             let connectors = self
                 .config
                 .as_ref()
                 .map(|config| config.connectors.clone())
                 .unwrap_or_default();
             let mut toggle = None;
+            let mut rotate_quick = None;
+            let mut remove = None;
+            let mut update_credentials = None;
             for connector in connectors {
+                let confirming_delete =
+                    self.pending_connector_delete.as_deref() == Some(&connector.id);
                 ui.group(|ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.strong(&connector.name);
                         ui.label(format!("{:?}", connector.kind));
-                        ui.label(if connector.enabled {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        });
+                        ui.label(if connector.enabled { "Enabled" } else { "Disabled" });
                         if ui
-                            .button(if connector.enabled {
-                                "Disable"
-                            } else {
-                                "Enable"
-                            })
+                            .add_enabled(
+                                self.connector_rx.is_none(),
+                                egui::Button::new(if connector.enabled { "Disable" } else { "Enable" }),
+                            )
                             .clicked()
                         {
                             toggle = Some((connector.id.clone(), !connector.enabled));
+                        }
+                        if let Some(label) = rotation_label(connector.kind)
+                            && ui.add_enabled(self.connector_rx.is_none(), egui::Button::new(label)).clicked()
+                        {
+                            match connector.kind {
+                                ConnectorKind::CloudflareQuick => rotate_quick = Some(connector.id.clone()),
+                                ConnectorKind::CloudflareOauth | ConnectorKind::OpenAiTunnel => {
+                                    update_credentials = Some((connector.id.clone(), connector.kind));
+                                }
+                                _ => {}
+                            }
+                        }
+                        if confirming_delete {
+                            if ui.button("Confirm permanent removal").clicked() {
+                                remove = Some(connector.id.clone());
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.pending_connector_delete = None;
+                            }
+                        } else if !matches!(connector.kind, ConnectorKind::LocalStdio | ConnectorKind::LocalHttp)
+                            && ui.button("Remove…").clicked()
+                        {
+                            self.pending_connector_delete = Some(connector.id.clone());
                         }
                     });
                     ui.small(format!("ID: {}", connector.id));
                     ui.label(format!("Policy: {:?}", connector.policy_preset));
                     if let Some(url) = connector.public_base_url {
                         ui.label(format!("Public URL: {url}"));
+                    }
+                    if confirming_delete {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(190, 45, 45),
+                            "This removes local credentials, persistent grants, and connector state. Live transports close after agent restart.",
+                        );
                     }
                 });
                 ui.add_space(6.0);
@@ -558,7 +773,49 @@ mod desktop {
                 let result = self.toggle_connector(&id, enable);
                 self.apply_result(result);
             }
-            ui.label("Creating, rotating, or permanently removing connectors remains available through the CLI so secrets are never rendered in this window.");
+            if let Some(id) = rotate_quick {
+                let result = self.rotate_quick_connector(&id);
+                self.apply_result(result);
+            }
+            if let Some((id, kind)) = update_credentials {
+                self.pending_credential_update = Some((id, kind));
+                self.credential_client_id.clear();
+                self.credential_secret.clear();
+            }
+            if let Some(id) = remove {
+                self.pending_connector_delete = None;
+                let result = self.remove_connector(&id);
+                self.apply_result(result);
+            }
+
+            if let Some((connector_id, kind)) = self.pending_credential_update.clone() {
+                let mut open = true;
+                egui::Window::new("Update connector credentials")
+                    .open(&mut open)
+                    .collapsible(false)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("The new secret is written directly to the operating-system credential store and is never displayed after saving.");
+                        if kind == ConnectorKind::CloudflareOauth {
+                            ui.horizontal(|ui| {
+                                ui.label("GitHub client ID");
+                                ui.text_edit_singleline(&mut self.credential_client_id);
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(if kind == ConnectorKind::CloudflareOauth { "GitHub client secret" } else { "Runtime API key" });
+                            ui.add(egui::TextEdit::singleline(&mut self.credential_secret).password(true));
+                        });
+                        if ui.button("Save and revoke old sessions").clicked() {
+                            let result = self.update_connector_credentials(&connector_id, kind);
+                            self.apply_result(result);
+                        }
+                    });
+                if !open {
+                    self.pending_credential_update = None;
+                    self.credential_client_id.clear();
+                    self.credential_secret.clear();
+                }
+            }
         }
 
         fn show_permissions(&mut self, ui: &mut egui::Ui) {
@@ -622,6 +879,17 @@ mod desktop {
                 self.apply_result(result);
             }
             ui.label("Changing a preset clears connector-specific overrides. Remote safety ceilings still apply.");
+            ui.separator();
+            if let Some(config) = self.config.clone() {
+                match self.policy_editor.show(ui, &config) {
+                    Ok(Some(action)) => {
+                        let result = self.apply_policy_action(action);
+                        self.apply_result(result);
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.error = Some(error.to_string()),
+                }
+            }
         }
 
         fn show_oauth(&mut self, ui: &mut egui::Ui) {
@@ -752,6 +1020,7 @@ mod desktop {
         fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
             self.process_menu(context);
             self.poll_doctor();
+            self.poll_connector_command();
             if self.last_refresh.elapsed() >= Duration::from_secs(2) {
                 let result = self.refresh();
                 self.apply_result(result);
@@ -760,6 +1029,13 @@ mod desktop {
         }
 
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            if let Some(command) = self
+                .connector_wizard
+                .show(ui.ctx(), self.connector_rx.is_some())
+            {
+                let result = self.start_connector_command(command);
+                self.apply_result(result);
+            }
             egui::Frame::central_panel(ui.style()).show(ui, |ui| {
                 let mut lock_requested = false;
                 ui.horizontal(|ui| {
@@ -815,6 +1091,41 @@ mod desktop {
         let output = std::process::Command::new(sibling_cli()?)
             .args(arguments)
             .output()?;
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        if !output.stderr.is_empty() {
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+        if !output.status.success() {
+            bail!("{text}");
+        }
+        Ok(text)
+    }
+
+    fn run_cli_with_input(
+        cli: &PathBuf,
+        arguments: &[String],
+        secret: Option<&str>,
+    ) -> Result<String> {
+        let mut command = std::process::Command::new(cli);
+        command
+            .args(arguments)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if secret.is_some() {
+            command.stdin(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null());
+        }
+        let mut child = command.spawn()?;
+        if let Some(secret) = secret {
+            let mut stdin = child
+                .stdin
+                .take()
+                .context("Failed to open connector command input")?;
+            stdin.write_all(secret.as_bytes())?;
+            stdin.write_all(b"\n")?;
+        }
+        let output = child.wait_with_output()?;
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         if !output.stderr.is_empty() {
             text.push_str(&String::from_utf8_lossy(&output.stderr));
