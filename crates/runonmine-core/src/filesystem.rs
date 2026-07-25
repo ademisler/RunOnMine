@@ -1,16 +1,32 @@
-use std::fs;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::fmt;
+use std::io::{Read as _, Write as _};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use walkdir::WalkDir;
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions};
 
-use crate::atomic;
-
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ScopedFilesystem {
-    roots: Vec<PathBuf>,
+    roots: Vec<RootCapability>,
+}
+
+#[derive(Clone)]
+struct RootCapability {
+    path: PathBuf,
+    dir: Arc<Dir>,
+}
+
+impl fmt::Debug for ScopedFilesystem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedFilesystem")
+            .field("roots", &self.roots())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -37,41 +53,69 @@ pub struct SearchResults {
 
 impl ScopedFilesystem {
     pub fn new(roots: &[PathBuf]) -> Result<Self> {
-        let mut canonical = Vec::with_capacity(roots.len());
+        let mut capabilities = Vec::with_capacity(roots.len());
+        let mut canonical_roots = Vec::with_capacity(roots.len());
         for root in roots {
-            let resolved = fs::canonicalize(root)
+            let requested = if root.is_absolute() {
+                root.clone()
+            } else {
+                std::env::current_dir()?.join(root)
+            };
+            validate_lexical_path(&requested)?;
+            let resolved = std::fs::canonicalize(&requested)
                 .with_context(|| format!("allowed root does not exist: {}", root.display()))?;
             if !resolved.is_dir() {
                 bail!("allowed root is not a directory: {}", resolved.display());
             }
-            canonical.push(resolved);
+            if canonical_roots.contains(&resolved) {
+                continue;
+            }
+            let dir = Dir::open_ambient_dir(&resolved, ambient_authority())
+                .with_context(|| format!("failed to open allowed root: {}", resolved.display()))?;
+            if !dir.dir_metadata()?.is_dir() {
+                bail!("allowed root is not a directory: {}", resolved.display());
+            }
+            canonical_roots.push(resolved);
+            capabilities.push(RootCapability {
+                path: requested,
+                dir: Arc::new(dir),
+            });
         }
-        canonical.sort();
-        canonical.dedup();
-        Ok(Self { roots: canonical })
+        capabilities.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(Self {
+            roots: capabilities,
+        })
     }
 
-    pub fn roots(&self) -> &[PathBuf] {
-        &self.roots
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.roots.iter().map(|root| root.path.clone()).collect()
     }
 
     pub fn resolve_existing(&self, path: &Path) -> Result<PathBuf> {
-        let resolved = fs::canonicalize(path)
-            .with_context(|| format!("path does not exist: {}", path.display()))?;
-        self.ensure_allowed(&resolved)?;
-        Ok(resolved)
+        let (root, relative) = self.select_root(path)?;
+        let metadata = root.dir.symlink_metadata(&relative).with_context(|| {
+            format!("path does not exist or is inaccessible: {}", path.display())
+        })?;
+        if metadata.is_symlink() {
+            bail!("symbolic links and reparse points are not allowed");
+        }
+        validate_existing_components(root, &relative)?;
+        Ok(root.path.join(relative))
     }
 
     pub fn resolve_for_write(&self, path: &Path) -> Result<PathBuf> {
-        if path.exists() {
-            return self.resolve_existing(path);
+        let (root, relative) = self.select_root(path)?;
+        let (parent, name, _) = open_parent(root, &relative)?;
+        match parent.symlink_metadata(&name) {
+            Ok(metadata) => {
+                if metadata.is_symlink() || !metadata.is_file() {
+                    bail!("write target must be a regular non-symlink file");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-        let parent = path.parent().context("write path has no parent")?;
-        let resolved_parent = fs::canonicalize(parent)
-            .with_context(|| format!("parent does not exist: {}", parent.display()))?;
-        self.ensure_allowed(&resolved_parent)?;
-        let name = path.file_name().context("write path has no file name")?;
-        Ok(resolved_parent.join(name))
+        Ok(root.path.join(relative))
     }
 
     pub fn list(&self, path: &Path) -> Result<Vec<DirectoryEntry>> {
@@ -87,24 +131,18 @@ impl ScopedFilesystem {
         if limit == 0 {
             bail!("directory listing limit must be greater than zero");
         }
-        let resolved = self.resolve_existing(path)?;
-        if !resolved.is_dir() {
-            bail!("not a directory: {}", resolved.display());
-        }
+        let (root, relative) = self.select_root(path)?;
+        let directory = open_directory(root, &relative)?;
         let mut entries = Vec::with_capacity(limit.min(1_024));
         let mut truncated = false;
-        for entry in fs::read_dir(&resolved)?.skip(offset) {
+        for entry in directory.read_dir(".")?.skip(offset) {
             let entry = entry?;
             if entries.len() >= limit {
                 truncated = true;
                 break;
             }
             let file_type = entry.file_type()?;
-            let metadata = if file_type.is_symlink() {
-                fs::symlink_metadata(entry.path())?
-            } else {
-                entry.metadata()?
-            };
+            let metadata = entry.metadata()?;
             let kind = if file_type.is_symlink() {
                 "symlink"
             } else if file_type.is_dir() {
@@ -114,9 +152,10 @@ impl ScopedFilesystem {
             } else {
                 "other"
             };
+            let name = entry.file_name();
             entries.push(DirectoryEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                path: entry.path(),
+                name: name.to_string_lossy().into_owned(),
+                path: root.path.join(&relative).join(&name),
                 kind: kind.to_owned(),
                 bytes: file_type.is_file().then_some(metadata.len()),
             });
@@ -133,20 +172,24 @@ impl ScopedFilesystem {
         if max_bytes == 0 {
             bail!("read limit must be greater than zero");
         }
-        let resolved = self.resolve_existing(path)?;
-        let metadata = fs::metadata(&resolved)?;
-        if !metadata.is_file() {
-            bail!("path is not a regular file: {}", resolved.display());
+        let (root, relative) = self.select_root(path)?;
+        let (parent, name, _) = open_parent(root, &relative)?;
+        let before = parent.symlink_metadata(&name)?;
+        if before.is_symlink() || !before.is_file() {
+            bail!("path is not a regular non-symlink file: {}", path.display());
         }
-        let mut file = fs::File::open(&resolved)?;
-        if !file.metadata()?.is_file() {
+        let mut file = parent.open(&name)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() {
             bail!("path changed before it could be read safely");
         }
 
         let capture_limit = u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX);
         let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1_024).saturating_add(1));
-        file.by_ref().take(capture_limit).read_to_end(&mut bytes)?;
-        let truncated = bytes.len() > max_bytes || metadata.len() > max_bytes as u64;
+        std::io::Read::by_ref(&mut file)
+            .take(capture_limit)
+            .read_to_end(&mut bytes)?;
+        let truncated = bytes.len() > max_bytes || opened.len() > max_bytes as u64;
         bytes.truncate(max_bytes);
 
         let valid_length = match std::str::from_utf8(&bytes) {
@@ -160,10 +203,32 @@ impl ScopedFilesystem {
     }
 
     pub fn write_atomic(&self, path: &Path, contents: &[u8]) -> Result<PathBuf> {
-        let resolved = self.resolve_for_write(path)?;
-        let unix_mode = existing_unix_mode(&resolved)?.unwrap_or(0o600);
-        atomic::write(&resolved, contents, unix_mode)?;
-        Ok(resolved)
+        let (root, relative) = self.select_root(path)?;
+        let (parent, name, _) = open_parent(root, &relative)?;
+        let permissions = existing_permissions(&parent, &name)?;
+        let temporary = OsString::from(format!(
+            ".runonmine-write-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = parent.open_with(&temporary, &options)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        } else {
+            set_private_permissions(&file)?;
+        }
+        if let Err(error) = (|| -> Result<()> {
+            file.write_all(contents)?;
+            file.sync_all()?;
+            parent.rename(&temporary, &parent, &name)?;
+            Ok(())
+        })() {
+            let _ignored = parent.remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(root.path.join(relative))
     }
 
     pub fn search_names(&self, root: &Path, pattern: &str, limit: usize) -> Result<Vec<PathBuf>> {
@@ -174,7 +239,7 @@ impl ScopedFilesystem {
 
     pub fn search_names_bounded(
         &self,
-        root: &Path,
+        root_path: &Path,
         pattern: &str,
         limit: usize,
         max_depth: usize,
@@ -187,94 +252,266 @@ impl ScopedFilesystem {
         if limit == 0 || max_depth == 0 || max_nodes == 0 || max_duration.is_zero() {
             bail!("search limits must be greater than zero");
         }
-        let resolved = self.resolve_existing(root)?;
+        let (root, relative) = self.select_root(root_path)?;
+        let directory = open_directory(root, &relative)?;
         let needle = pattern.to_lowercase();
         let started = Instant::now();
-        let mut matches = Vec::with_capacity(limit.min(1_000));
-        let mut visited = 0_usize;
-        let mut truncated = false;
-        for entry in WalkDir::new(resolved)
-            .follow_links(false)
-            .max_depth(max_depth)
-        {
-            if visited >= max_nodes || started.elapsed() >= max_duration {
-                truncated = true;
-                break;
-            }
-            let entry = entry?;
-            visited = visited.saturating_add(1);
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .to_lowercase()
-                .contains(&needle)
-            {
-                matches.push(entry.path().to_path_buf());
-                if matches.len() >= limit {
-                    truncated = true;
-                    break;
-                }
-            }
-        }
+        let mut state = SearchState {
+            matches: Vec::with_capacity(limit.min(1_000)),
+            visited: 0,
+            truncated: false,
+        };
+        let display_root = root.path.join(&relative);
+        search_directory(
+            &directory,
+            &display_root,
+            &needle,
+            0,
+            limit,
+            max_depth,
+            max_nodes,
+            max_duration,
+            started,
+            &mut state,
+        )?;
         Ok(SearchResults {
-            matches,
-            visited,
-            truncated,
+            matches: state.matches,
+            visited: state.visited,
+            truncated: state.truncated,
         })
     }
 
     pub fn move_path(&self, from: &Path, to: &Path) -> Result<()> {
-        let from = self.resolve_existing(from)?;
-        let to = self.resolve_for_write(to)?;
-        fs::rename(from, to)?;
+        let (from_root, from_relative) = self.select_root(from)?;
+        let (to_root, to_relative) = self.select_root(to)?;
+        let (from_parent, from_name, _) = open_parent(from_root, &from_relative)?;
+        let from_metadata = from_parent.symlink_metadata(&from_name)?;
+        if from_metadata.is_symlink() {
+            bail!("symbolic links and reparse points are not allowed");
+        }
+        let (to_parent, to_name, _) = open_parent(to_root, &to_relative)?;
+        if let Ok(metadata) = to_parent.symlink_metadata(&to_name)
+            && metadata.is_symlink()
+        {
+            bail!("destination symbolic links and reparse points are not allowed");
+        }
+        from_parent.rename(&from_name, &to_parent, &to_name)?;
         Ok(())
     }
 
     pub fn move_to_trash(&self, path: &Path) -> Result<()> {
-        let resolved = self.resolve_existing(path)?;
-        trash::delete(&resolved)
-            .with_context(|| format!("failed to move {} to trash", resolved.display()))
+        let (root, relative) = self.select_root(path)?;
+        let (parent, name, _) = open_parent(root, &relative)?;
+        let metadata = parent.symlink_metadata(&name)?;
+        if metadata.is_symlink() {
+            bail!("symbolic links and reparse points are not allowed");
+        }
+        let trash_name = Path::new(".runonmine-trash");
+        match root.dir.symlink_metadata(trash_name) {
+            Ok(metadata) if metadata.is_dir() && !metadata.is_symlink() => {}
+            Ok(_) => bail!("managed trash path is not a safe directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                root.dir.create_dir(trash_name)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let trash_dir = root.dir.open_dir(trash_name)?;
+        let destination = OsString::from(format!(
+            "{}-{}",
+            uuid::Uuid::new_v4(),
+            name.to_string_lossy()
+        ));
+        parent.rename(&name, &trash_dir, destination)?;
+        Ok(())
     }
 
-    fn ensure_allowed(&self, resolved: &Path) -> Result<()> {
-        if self
-            .roots
-            .iter()
-            .any(|root| resolved == root || resolved.starts_with(root))
-        {
+    fn select_root<'a>(&'a self, path: &Path) -> Result<(&'a RootCapability, PathBuf)> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else if self.roots.len() == 1 {
+            self.roots[0].path.join(path)
+        } else {
+            bail!("relative paths require exactly one configured root");
+        };
+        validate_lexical_path(&absolute)?;
+        let mut selected: Option<(&RootCapability, PathBuf)> = None;
+        for root in &self.roots {
+            if let Ok(relative) = absolute.strip_prefix(&root.path) {
+                let relative = relative.to_path_buf();
+                if selected.as_ref().is_none_or(|(current, _)| {
+                    root.path.as_os_str().len() > current.path.as_os_str().len()
+                }) {
+                    selected = Some((root, relative));
+                }
+            }
+        }
+        selected.context("path is outside the configured roots")
+    }
+}
+
+struct SearchState {
+    matches: Vec<PathBuf>,
+    visited: usize,
+    truncated: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_directory(
+    directory: &Dir,
+    display_path: &Path,
+    needle: &str,
+    depth: usize,
+    limit: usize,
+    max_depth: usize,
+    max_nodes: usize,
+    max_duration: Duration,
+    started: Instant,
+    state: &mut SearchState,
+) -> Result<()> {
+    if depth >= max_depth {
+        return Ok(());
+    }
+    for entry in directory.read_dir(".")? {
+        if state.visited >= max_nodes || started.elapsed() >= max_duration {
+            state.truncated = true;
             return Ok(());
         }
-        bail!("path is outside the configured roots")
+        let entry = entry?;
+        state.visited = state.visited.saturating_add(1);
+        let name = entry.file_name();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let child_path = display_path.join(&name);
+        if name.to_string_lossy().to_lowercase().contains(needle) {
+            state.matches.push(child_path.clone());
+            if state.matches.len() >= limit {
+                state.truncated = true;
+                return Ok(());
+            }
+        }
+        if file_type.is_dir() {
+            let child = directory.open_dir(&name)?;
+            search_directory(
+                &child,
+                &child_path,
+                needle,
+                depth.saturating_add(1),
+                limit,
+                max_depth,
+                max_nodes,
+                max_duration,
+                started,
+                state,
+            )?;
+            if state.truncated {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_lexical_path(path: &Path) -> Result<()> {
+    for component in path.components() {
+        if matches!(component, Component::ParentDir | Component::CurDir) {
+            bail!("path traversal components are not allowed");
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_path(path: &Path) -> Result<()> {
+    if path.is_absolute() {
+        bail!("capability-relative path must not be absolute");
+    }
+    for component in path.components() {
+        if !matches!(component, Component::Normal(_)) {
+            bail!("path traversal components are not allowed");
+        }
+    }
+    Ok(())
+}
+
+fn validate_existing_components(root: &RootCapability, relative: &Path) -> Result<()> {
+    if relative.as_os_str().is_empty() {
+        return Ok(());
+    }
+    validate_relative_path(relative)?;
+    let mut current = root.dir.try_clone()?;
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            bail!("path traversal components are not allowed");
+        };
+        let metadata = current.symlink_metadata(name)?;
+        if metadata.is_symlink() {
+            bail!("symbolic links and reparse points are not allowed");
+        }
+        if index + 1 < components.len() {
+            if !metadata.is_dir() {
+                bail!("intermediate path component is not a directory");
+            }
+            current = current.open_dir(name)?;
+        }
+    }
+    Ok(())
+}
+
+fn open_directory(root: &RootCapability, relative: &Path) -> Result<Dir> {
+    if relative.as_os_str().is_empty() {
+        return Ok(root.dir.try_clone()?);
+    }
+    validate_relative_path(relative)?;
+    let mut current = root.dir.try_clone()?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            bail!("path traversal components are not allowed");
+        };
+        let metadata = current.symlink_metadata(name)?;
+        if metadata.is_symlink() || !metadata.is_dir() {
+            bail!("directory path contains a symlink, reparse point, or non-directory component");
+        }
+        current = current.open_dir(name)?;
+    }
+    Ok(current)
+}
+
+fn open_parent(root: &RootCapability, relative: &Path) -> Result<(Dir, OsString, PathBuf)> {
+    validate_relative_path(relative)?;
+    let name = relative
+        .file_name()
+        .context("path must identify an entry below an allowed root")?
+        .to_os_string();
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = open_directory(root, parent_relative)?;
+    Ok((parent, name, parent_relative.to_path_buf()))
+}
+
+fn existing_permissions(parent: &Dir, name: &OsStr) -> Result<Option<cap_std::fs::Permissions>> {
+    match parent.symlink_metadata(name) {
+        Ok(metadata) => {
+            if metadata.is_symlink() || !metadata.is_file() {
+                bail!("write target must be a regular non-symlink file");
+            }
+            Ok(Some(metadata.permissions()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
 #[cfg(unix)]
-fn existing_unix_mode(path: &Path) -> Result<Option<u32>> {
-    use std::os::unix::fs::PermissionsExt;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("write target must be a regular non-symlink file");
-            }
-            Ok(Some(metadata.permissions().mode() & 0o777))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+fn set_private_permissions(file: &cap_std::fs::File) -> Result<()> {
+    use cap_std::fs::PermissionsExt as _;
+    file.set_permissions(cap_std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn existing_unix_mode(path: &Path) -> Result<Option<u32>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("write target must be a regular non-symlink file");
-            }
-            Ok(Some(0o600))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+fn set_private_permissions(_file: &cap_std::fs::File) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -291,12 +528,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_parent_traversal() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        assert!(
+            scoped
+                .resolve_for_write(&root.path().join("nested/../escape"))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn writes_atomically_inside_root() -> Result<()> {
         let root = tempfile::tempdir()?;
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
         let target = root.path().join("hello.txt");
         scoped.write_atomic(&target, b"hello")?;
-        assert_eq!(fs::read_to_string(target)?, "hello");
+        assert_eq!(std::fs::read_to_string(target)?, "hello");
         Ok(())
     }
 
@@ -313,7 +562,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
         let target = root.path().join("large.txt");
-        fs::write(&target, "x".repeat(32 * 1_024))?;
+        std::fs::write(&target, "x".repeat(32 * 1_024))?;
         let (content, truncated) = scoped.read_text(&target, 1_024)?;
         assert_eq!(content.len(), 1_024);
         assert!(truncated);
@@ -325,7 +574,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
         let target = root.path().join("utf8.txt");
-        fs::write(&target, "abcé")?;
+        std::fs::write(&target, "abcé")?;
         let (content, truncated) = scoped.read_text(&target, 4)?;
         assert_eq!(content, "abc");
         assert!(truncated);
@@ -334,23 +583,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlink_escape() -> Result<()> {
+    fn rejects_nested_symlink_escape() -> Result<()> {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir()?;
         let outside = tempfile::tempdir()?;
         let outside_file = outside.path().join("secret.txt");
-        fs::write(&outside_file, "secret")?;
-        let link = root.path().join("link.txt");
-        symlink(&outside_file, &link)?;
+        std::fs::write(&outside_file, "secret")?;
+        std::fs::create_dir(root.path().join("nested"))?;
+        symlink(outside.path(), root.path().join("nested/link"))?;
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
-        assert!(scoped.resolve_existing(&link).is_err());
+        assert!(
+            scoped
+                .read_text(&root.path().join("nested/link/secret.txt"), 1_024)
+                .is_err()
+        );
         Ok(())
     }
+
     #[test]
     fn directory_listing_and_search_are_bounded() -> Result<()> {
         let root = tempfile::tempdir()?;
         for index in 0..6 {
-            fs::write(root.path().join(format!("match-{index}.txt")), "data")?;
+            std::fs::write(root.path().join(format!("match-{index}.txt")), "data")?;
         }
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
         let listing = scoped.list_limited(root.path(), 0, 2)?;
@@ -372,11 +626,29 @@ mod tests {
 
         let root = tempfile::tempdir()?;
         let target = root.path().join("script.sh");
-        fs::write(&target, "old")?;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o750))?;
+        std::fs::write(&target, "old")?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750))?;
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
         scoped.write_atomic(&target, b"new")?;
-        assert_eq!(fs::metadata(&target)?.permissions().mode() & 0o777, 0o750);
+        assert_eq!(
+            std::fs::metadata(&target)?.permissions().mode() & 0o777,
+            0o750
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_trash_is_descriptor_relative() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("delete-me.txt");
+        std::fs::write(&target, "data")?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        scoped.move_to_trash(&target)?;
+        assert!(!target.exists());
+        assert_eq!(
+            std::fs::read_dir(root.path().join(".runonmine-trash"))?.count(),
+            1
+        );
         Ok(())
     }
 }

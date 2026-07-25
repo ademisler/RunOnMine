@@ -80,18 +80,20 @@ runonmine lock
 
 ## Security model
 
-- Connector policy resolves as tool override, capability override, preset, then deny.
+- Connector policy first evaluates principal/resource rules, then tool override, capability override, preset, and finally deny.
 - Internet-facing connectors have a non-bypassable safety ceiling: destructive
   capabilities can require local approval but cannot be configured to auto-run;
   administrator execution remains denied.
 - Denied tools are omitted from MCP discovery and rejected if called directly.
-- File operations are restricted to explicitly selected canonical roots.
+- File operations use open directory capabilities and descriptor-relative traversal inside explicitly selected roots; path checks and file access are not separated by a canonicalize-then-open race.
 - The default browser profile is disposable and isolated from the user's daily
   browser profile. Redirects and subresources are intercepted; private,
   loopback, link-local, and non-routable targets are denied. Private-network
   access is a local-connector-only opt-in and remains blocked for remote connectors.
 - Secrets use the operating-system credential store, with an explicit encrypted
   headless Linux fallback.
+- Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. MCP authorization, approval, and audit paths use asynchronous worker replies.
+- Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. MCP authorization, approval, and audit paths use asynchronous worker replies.
 - Audit records contain argument summaries and hashes rather than raw command,
   token, cookie, or stdin contents.
 - Audit records form a tamper-evident chain and retain 30 days or 100 MiB by default.

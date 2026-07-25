@@ -57,7 +57,7 @@ jobs:
       - run: cargo run --locked -p xtask -- universal-macos
       - run: cargo run --locked -p xtask -- package --target universal-apple-darwin
       - run: cargo run --locked -p xtask -- stage-packager --target universal-apple-darwin
-      - run: cargo packager --release --config packaging/Packager.macos.toml
+      - run: ./packaging/package-macos.sh
       - run: cargo run --locked -p xtask -- checksums
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

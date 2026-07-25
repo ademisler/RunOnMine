@@ -1,13 +1,13 @@
-product-name = "RunOnMine"
+productName = "RunOnMine"
 version = "0.1.0-beta.1"
 identifier = "dev.runonmine.app"
 description = "Let AI work on the machines you own."
 homepage = "https://github.com/ademisler/RunOnMine"
 authors = ["RunOnMine contributors"]
-license-file = "LICENSE"
-binaries-dir = "target/packager-input"
-out-dir = "dist"
-target-triple = "universal-apple-darwin"
+licenseFile = "LICENSE"
+binariesDir = "target/packager-input"
+outDir = "dist"
+targetTriple = "universal-apple-darwin"
 formats = ["dmg"]
 resources = ["README.md"]
 binaries = [
@@ -18,4 +18,4 @@ binaries = [
 ]
 
 [macos]
-minimum-system-version = "12.0"
+minimumSystemVersion = "12.0"

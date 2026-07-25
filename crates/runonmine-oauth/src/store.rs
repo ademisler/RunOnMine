@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -15,6 +15,48 @@ use crate::model::{
 use crate::{ScopeSet, SecretHash, StoreError};
 
 const OAUTH_SCHEMA_VERSION: i64 = 1;
+type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
+
+#[derive(Debug)]
+struct SqliteWorker {
+    sender: mpsc::Sender<DbJob>,
+}
+
+impl SqliteWorker {
+    fn start(mut connection: Connection) -> Result<Self, StoreError> {
+        let (sender, receiver) = mpsc::channel::<DbJob>();
+        std::thread::Builder::new()
+            .name("runonmine-oauth-db".to_owned())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    job(&mut connection);
+                }
+            })?;
+        Ok(Self { sender })
+    }
+
+    fn call<T, F>(&self, operation: F) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, StoreError> + Send + 'static,
+    {
+        let (reply, receive) = mpsc::sync_channel(1);
+        self.sender
+            .send(Box::new(move |connection| {
+                let _ignored = reply.send(operation(connection));
+            }))
+            .map_err(|_| {
+                StoreError::Io(std::io::Error::other(
+                    "OAuth database worker is unavailable",
+                ))
+            })?;
+        receive.recv().map_err(|_| {
+            StoreError::Io(std::io::Error::other(
+                "OAuth database worker stopped unexpectedly",
+            ))
+        })?
+    }
+}
 
 pub trait OAuthStore: Send + Sync {
     fn registered_client_count(&self) -> Result<usize, StoreError>;
@@ -60,7 +102,7 @@ pub trait OAuthStore: Send + Sync {
 }
 
 pub struct SqliteOAuthStore {
-    connection: Mutex<Connection>,
+    worker: Arc<SqliteWorker>,
 }
 
 impl std::fmt::Debug for SqliteOAuthStore {
@@ -94,7 +136,7 @@ impl SqliteOAuthStore {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
-    fn from_connection(connection: Connection) -> Result<Self, StoreError> {
+    fn from_connection(mut connection: Connection) -> Result<Self, StoreError> {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -175,230 +217,124 @@ impl SqliteOAuthStore {
              ON CONFLICT(component) DO UPDATE SET version = excluded.version",
             [OAUTH_SCHEMA_VERSION],
         )?;
-        let store = Self {
-            connection: Mutex::new(connection),
-        };
-        store.cleanup_expired(Utc::now())?;
-        Ok(store)
+        cleanup_expired_connection(&mut connection, Utc::now())?;
+        Ok(Self {
+            worker: Arc::new(SqliteWorker::start(connection)?),
+        })
     }
 
     pub fn registered_clients(&self) -> Result<Vec<RegisteredClient>, StoreError> {
-        let connection = self.lock()?;
-        let mut statement = connection.prepare(
-            "SELECT client_id, client_name, redirect_uris, scopes, issued_at
-             FROM oauth_clients ORDER BY issued_at DESC, client_id ASC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (client_id, client_name, redirect_json, scopes, issued_at) = row?;
-            Ok(RegisteredClient {
-                client_id,
-                client_name,
-                redirect_uris: serde_json::from_str(&redirect_json)
-                    .map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?,
-                scopes: parse_scopes(&scopes)?,
-                issued_at: from_timestamp(issued_at)?,
-            })
-        })
-        .collect()
+        self.call(registered_clients_connection)
     }
 
     pub fn revoke_client_tokens(&self, client_id: &str) -> Result<usize, StoreError> {
-        let changed = self.lock()?.execute(
-            "UPDATE oauth_tokens SET status = 'revoked'
-             WHERE client_id = ?1 AND status = 'active'",
-            [client_id],
-        )?;
-        Ok(changed)
+        let client_id = client_id.to_owned();
+        self.call(move |connection| {
+            Ok(connection.execute(
+                "UPDATE oauth_tokens SET status = 'revoked' WHERE client_id = ?1 AND status = 'active'",
+                [client_id],
+            )?)
+        })
     }
 
     pub fn delete_client(&self, client_id: &str) -> Result<bool, StoreError> {
-        let changed = self.lock()?.execute(
-            "DELETE FROM oauth_clients WHERE client_id = ?1",
-            [client_id],
-        )?;
-        Ok(changed == 1)
+        let client_id = client_id.to_owned();
+        self.call(move |connection| {
+            Ok(connection.execute(
+                "DELETE FROM oauth_clients WHERE client_id = ?1",
+                [client_id],
+            )? == 1)
+        })
     }
 
     pub fn sessions(&self, client_id: Option<&str>) -> Result<Vec<OAuthSession>, StoreError> {
-        let connection = self.lock()?;
-        let client_filter = client_id.map(str::to_owned);
-        let mut statement = connection.prepare(
-            "SELECT family_id, client_id, subject, scopes,
-                    MIN(issued_at), MAX(expires_at),
-                    MAX(CASE WHEN status = 'active' AND expires_at > ?1 THEN 1 ELSE 0 END)
-             FROM oauth_tokens
-             WHERE (?2 IS NULL OR client_id = ?2)
-             GROUP BY family_id, client_id, subject, scopes
-             ORDER BY MAX(issued_at) DESC, family_id ASC",
-        )?;
-        let rows = statement.query_map(params![Utc::now().timestamp(), client_filter], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, bool>(6)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (family_id, client_id, subject, scopes, issued_at, expires_at, active) = row?;
-            Ok(OAuthSession {
-                family_id: Uuid::parse_str(&family_id)
-                    .map_err(|_| StoreError::Corrupt("invalid token family"))?,
-                client_id,
-                subject,
-                scopes: parse_scopes(&scopes)?,
-                issued_at: from_timestamp(issued_at)?,
-                expires_at: from_timestamp(expires_at)?,
-                active,
-            })
-        })
-        .collect()
+        let client_id = client_id.map(str::to_owned);
+        self.call(move |connection| sessions_connection(connection, client_id.as_deref()))
     }
 
     pub fn revoke_session(&self, family_id: Uuid) -> Result<usize, StoreError> {
-        let changed = self.lock()?.execute(
-            "UPDATE oauth_tokens SET status = 'revoked'
-             WHERE family_id = ?1 AND status = 'active'",
-            [family_id.to_string()],
-        )?;
-        Ok(changed)
+        self.call(move |connection| {
+            Ok(connection.execute(
+                "UPDATE oauth_tokens SET status = 'revoked' WHERE family_id = ?1 AND status = 'active'",
+                [family_id.to_string()],
+            )?)
+        })
     }
 
-    /// Revoke every active token and remove incomplete authorization flows.
     pub fn emergency_revoke_all(&self) -> Result<usize, StoreError> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        transaction.execute("DELETE FROM oauth_authorizations", [])?;
-        transaction.execute("DELETE FROM oauth_consents", [])?;
-        transaction.execute("DELETE FROM oauth_codes", [])?;
-        let revoked = transaction.execute(
-            "UPDATE oauth_tokens SET status = 'revoked' WHERE status = 'active'",
-            [],
-        )?;
-        transaction.commit()?;
-        Ok(revoked)
-    }
-
-    /// Remove expired OAuth state without deleting live refresh-token reuse
-    /// evidence before its natural expiry.
-    pub fn cleanup_expired(&self, now: DateTime<Utc>) -> Result<usize, StoreError> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let mut removed = 0;
-        for table in [
-            "oauth_authorizations",
-            "oauth_consents",
-            "oauth_codes",
-            "oauth_tokens",
-        ] {
-            removed += transaction.execute(
-                &format!("DELETE FROM {table} WHERE expires_at <= ?1"),
-                [now.timestamp()],
+        self.call(|connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute("DELETE FROM oauth_authorizations", [])?;
+            transaction.execute("DELETE FROM oauth_consents", [])?;
+            transaction.execute("DELETE FROM oauth_codes", [])?;
+            let revoked = transaction.execute(
+                "UPDATE oauth_tokens SET status = 'revoked' WHERE status = 'active'",
+                [],
             )?;
-        }
-        transaction.commit()?;
-        Ok(removed)
+            transaction.commit()?;
+            Ok(revoked)
+        })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
-        self.connection
-            .lock()
-            .map_err(|_| StoreError::Io(std::io::Error::other("OAuth database lock is poisoned")))
+    pub fn cleanup_expired(&self, now: DateTime<Utc>) -> Result<usize, StoreError> {
+        self.call(move |connection| cleanup_expired_connection(connection, now))
+    }
+
+    fn call<T, F>(&self, operation: F) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, StoreError> + Send + 'static,
+    {
+        self.worker.call(operation)
+    }
+
+    #[cfg(test)]
+    fn test_call<T, F>(&self, operation: F) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, StoreError> + Send + 'static,
+    {
+        self.call(operation)
     }
 }
 
 impl OAuthStore for SqliteOAuthStore {
     fn registered_client_count(&self) -> Result<usize, StoreError> {
-        let count = self
-            .lock()?
-            .query_row("SELECT COUNT(*) FROM oauth_clients", [], |row| {
+        self.call(|connection| {
+            let count = connection.query_row("SELECT COUNT(*) FROM oauth_clients", [], |row| {
                 row.get::<_, i64>(0)
             })?;
-        usize::try_from(count).map_err(|_| StoreError::Corrupt("invalid OAuth client count"))
+            usize::try_from(count).map_err(|_| StoreError::Corrupt("invalid OAuth client count"))
+        })
     }
 
     fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError> {
-        let redirects = serde_json::to_string(&client.redirect_uris)
-            .map_err(|_| StoreError::Corrupt("client redirect URI serialization failed"))?;
-        self.lock()?.execute(
-            "INSERT INTO oauth_clients
-             (client_id, client_name, redirect_uris, scopes, issued_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                client.client_id,
-                client.client_name,
-                redirects,
-                client.scopes.to_space_delimited(),
-                client.issued_at.timestamp(),
-            ],
-        )?;
-        Ok(())
+        let client = client.clone();
+        self.call(move |connection| {
+            let redirects = serde_json::to_string(&client.redirect_uris)
+                .map_err(|_| StoreError::Corrupt("client redirect URI serialization failed"))?;
+            connection.execute(
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![client.client_id, client.client_name, redirects, client.scopes.to_space_delimited(), client.issued_at.timestamp()],
+            )?;
+            Ok(())
+        })
     }
 
     fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError> {
-        self.lock()?
-            .query_row(
-                "SELECT client_id, client_name, redirect_uris, scopes, issued_at
-                 FROM oauth_clients WHERE client_id = ?1",
-                [client_id],
-                |row| {
-                    let redirect_json: String = row.get(2)?;
-                    let scopes: String = row.get(3)?;
-                    let timestamp: i64 = row.get(4)?;
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        redirect_json,
-                        scopes,
-                        timestamp,
-                    ))
-                },
-            )
-            .optional()?
-            .map(
-                |(client_id, client_name, redirect_json, scopes, timestamp)| {
-                    Ok(RegisteredClient {
-                        client_id,
-                        client_name,
-                        redirect_uris: serde_json::from_str(&redirect_json)
-                            .map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?,
-                        scopes: parse_scopes(&scopes)?,
-                        issued_at: from_timestamp(timestamp)?,
-                    })
-                },
-            )
-            .transpose()
+        let client_id = client_id.to_owned();
+        self.call(move |connection| client_connection(connection, &client_id))
     }
 
     fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError> {
-        self.lock()?.execute(
-            "INSERT INTO oauth_authorizations
-             (provider_state_hash, client_id, redirect_uri, client_state, scopes,
-              code_challenge, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                pending.provider_state_hash.as_bytes().as_slice(),
-                pending.client_id,
-                pending.redirect_uri.as_str(),
-                pending.client_state,
-                pending.scopes.to_space_delimited(),
-                pending.code_challenge,
-                pending.expires_at.timestamp(),
-            ],
-        )?;
-        Ok(())
+        let pending = pending.clone();
+        self.call(move |connection| {
+            connection.execute(
+                "INSERT INTO oauth_authorizations (provider_state_hash, client_id, redirect_uri, client_state, scopes, code_challenge, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![pending.provider_state_hash.as_bytes().as_slice(), pending.client_id, pending.redirect_uri.as_str(), pending.client_state, pending.scopes.to_space_delimited(), pending.code_challenge, pending.expires_at.timestamp()],
+            )?;
+            Ok(())
+        })
     }
 
     fn take_authorization(
@@ -406,52 +342,29 @@ impl OAuthStore for SqliteOAuthStore {
         state_hash: &SecretHash,
         now: DateTime<Utc>,
     ) -> Result<PendingAuthorization, StoreError> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "DELETE FROM oauth_authorizations WHERE expires_at <= ?1",
-            [now.timestamp()],
-        )?;
-        let pending = transaction
-            .query_row(
-                "SELECT client_id, redirect_uri, client_state, scopes,
-                        code_challenge, expires_at
-                 FROM oauth_authorizations WHERE provider_state_hash = ?1",
-                [state_hash.as_bytes().as_slice()],
-                map_authorization,
-            )
-            .optional()?
-            .ok_or(StoreError::NotFound)?;
-        transaction.execute(
-            "DELETE FROM oauth_authorizations WHERE provider_state_hash = ?1",
-            [state_hash.as_bytes().as_slice()],
-        )?;
-        transaction.commit()?;
-        Ok(PendingAuthorization {
-            provider_state_hash: *state_hash,
-            ..pending
+        let state_hash = *state_hash;
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute("DELETE FROM oauth_authorizations WHERE expires_at <= ?1", [now.timestamp()])?;
+            let pending = transaction.query_row(
+                "SELECT client_id, redirect_uri, client_state, scopes, code_challenge, expires_at FROM oauth_authorizations WHERE provider_state_hash = ?1",
+                [state_hash.as_bytes().as_slice()], map_authorization,
+            ).optional()?.ok_or(StoreError::NotFound)?;
+            transaction.execute("DELETE FROM oauth_authorizations WHERE provider_state_hash = ?1", [state_hash.as_bytes().as_slice()])?;
+            transaction.commit()?;
+            Ok(PendingAuthorization { provider_state_hash: state_hash, ..pending })
         })
     }
 
     fn put_consent(&self, pending: &PendingConsent) -> Result<(), StoreError> {
-        self.lock()?.execute(
-            "INSERT INTO oauth_consents
-             (id, csrf_hash, client_id, redirect_uri, client_state, scopes,
-              code_challenge, subject, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                pending.id.to_string(),
-                pending.csrf_hash.as_bytes().as_slice(),
-                pending.client_id,
-                pending.redirect_uri.as_str(),
-                pending.client_state,
-                pending.scopes.to_space_delimited(),
-                pending.code_challenge,
-                pending.subject,
-                pending.expires_at.timestamp(),
-            ],
-        )?;
-        Ok(())
+        let pending = pending.clone();
+        self.call(move |connection| {
+            connection.execute(
+                "INSERT INTO oauth_consents (id, csrf_hash, client_id, redirect_uri, client_state, scopes, code_challenge, subject, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![pending.id.to_string(), pending.csrf_hash.as_bytes().as_slice(), pending.client_id, pending.redirect_uri.as_str(), pending.client_state, pending.scopes.to_space_delimited(), pending.code_challenge, pending.subject, pending.expires_at.timestamp()],
+            )?;
+            Ok(())
+        })
     }
 
     fn take_consent(
@@ -460,64 +373,30 @@ impl OAuthStore for SqliteOAuthStore {
         csrf_hash: &SecretHash,
         now: DateTime<Utc>,
     ) -> Result<PendingConsent, StoreError> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "DELETE FROM oauth_consents WHERE expires_at <= ?1",
-            [now.timestamp()],
-        )?;
-        let consent = transaction
-            .query_row(
-                "SELECT client_id, redirect_uri, client_state, scopes,
-                        code_challenge, subject, expires_at
-                 FROM oauth_consents WHERE id = ?1 AND csrf_hash = ?2",
+        let csrf_hash = *csrf_hash;
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute("DELETE FROM oauth_consents WHERE expires_at <= ?1", [now.timestamp()])?;
+            let consent = transaction.query_row(
+                "SELECT client_id, redirect_uri, client_state, scopes, code_challenge, subject, expires_at FROM oauth_consents WHERE id = ?1 AND csrf_hash = ?2",
                 params![id.to_string(), csrf_hash.as_bytes().as_slice()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or(StoreError::NotFound)?;
-        transaction.execute("DELETE FROM oauth_consents WHERE id = ?1", [id.to_string()])?;
-        transaction.commit()?;
-        Ok(PendingConsent {
-            id,
-            csrf_hash: *csrf_hash,
-            client_id: consent.0,
-            redirect_uri: parse_url(&consent.1)?,
-            client_state: consent.2,
-            scopes: parse_scopes(&consent.3)?,
-            code_challenge: consent.4,
-            subject: consent.5,
-            expires_at: from_timestamp(consent.6)?,
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, i64>(6)?)),
+            ).optional()?.ok_or(StoreError::NotFound)?;
+            transaction.execute("DELETE FROM oauth_consents WHERE id = ?1", [id.to_string()])?;
+            transaction.commit()?;
+            Ok(PendingConsent { id, csrf_hash, client_id: consent.0, redirect_uri: parse_url(&consent.1)?, client_state: consent.2, scopes: parse_scopes(&consent.3)?, code_challenge: consent.4, subject: consent.5, expires_at: from_timestamp(consent.6)? })
         })
     }
 
     fn put_authorization_code(&self, code: &AuthorizationCodeGrant) -> Result<(), StoreError> {
-        self.lock()?.execute(
-            "INSERT INTO oauth_codes
-             (code_hash, client_id, redirect_uri, scopes, code_challenge,
-              subject, expires_at, used)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
-            params![
-                code.code_hash.as_bytes().as_slice(),
-                code.client_id,
-                code.redirect_uri.as_str(),
-                code.scopes.to_space_delimited(),
-                code.code_challenge,
-                code.subject,
-                code.expires_at.timestamp(),
-            ],
-        )?;
-        Ok(())
+        let code = code.clone();
+        self.call(move |connection| {
+            connection.execute(
+                "INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, scopes, code_challenge, subject, expires_at, used) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+                params![code.code_hash.as_bytes().as_slice(), code.client_id, code.redirect_uri.as_str(), code.scopes.to_space_delimited(), code.code_challenge, code.subject, code.expires_at.timestamp()],
+            )?;
+            Ok(())
+        })
     }
 
     fn exchange_authorization_code(
@@ -529,55 +408,25 @@ impl OAuthStore for SqliteOAuthStore {
         tokens: &TokenPairDraft,
         now: DateTime<Utc>,
     ) -> Result<TokenGrant, StoreError> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let row = transaction
-            .query_row(
-                "SELECT client_id, redirect_uri, scopes, code_challenge,
-                        subject, expires_at, used
-                 FROM oauth_codes WHERE code_hash = ?1",
+        let code_hash = *code_hash;
+        let client_id = client_id.to_owned();
+        let redirect_uri = redirect_uri.clone();
+        let verifier = verifier.to_owned();
+        let tokens = tokens.clone();
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let row = transaction.query_row(
+                "SELECT client_id, redirect_uri, scopes, code_challenge, subject, expires_at, used FROM oauth_codes WHERE code_hash = ?1",
                 [code_hash.as_bytes().as_slice()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, bool>(6)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or(StoreError::InvalidGrant)?;
-        if row.6
-            || row.5 <= now.timestamp()
-            || row.0 != client_id
-            || row.1 != redirect_uri.as_str()
-            || !verify_pkce(verifier, &row.3)
-        {
-            return Err(StoreError::InvalidGrant);
-        }
-        let changed = transaction.execute(
-            "UPDATE oauth_codes SET used = 1 WHERE code_hash = ?1 AND used = 0",
-            [code_hash.as_bytes().as_slice()],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::InvalidGrant);
-        }
-        let scopes = parse_scopes(&row.2)?;
-        insert_token_pair(
-            &transaction,
-            Uuid::new_v4(),
-            client_id,
-            &row.4,
-            &scopes,
-            tokens,
-            now,
-        )?;
-        transaction.commit()?;
-        Ok(TokenGrant { scopes })
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, i64>(5)?, row.get::<_, bool>(6)?)),
+            ).optional()?.ok_or(StoreError::InvalidGrant)?;
+            if row.6 || row.5 <= now.timestamp() || row.0 != client_id || row.1 != redirect_uri.as_str() || !verify_pkce(&verifier, &row.3) { return Err(StoreError::InvalidGrant); }
+            if transaction.execute("UPDATE oauth_codes SET used = 1 WHERE code_hash = ?1 AND used = 0", [code_hash.as_bytes().as_slice()])? != 1 { return Err(StoreError::InvalidGrant); }
+            let scopes = parse_scopes(&row.2)?;
+            insert_token_pair(&transaction, Uuid::new_v4(), &client_id, &row.4, &scopes, &tokens, now)?;
+            transaction.commit()?;
+            Ok(TokenGrant { scopes })
+        })
     }
 
     fn rotate_refresh_token(
@@ -588,86 +437,61 @@ impl OAuthStore for SqliteOAuthStore {
         tokens: &TokenPairDraft,
         now: DateTime<Utc>,
     ) -> Result<TokenGrant, StoreError> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let row = transaction
-            .query_row(
-                "SELECT token_kind, family_id, client_id, subject, scopes,
-                        expires_at, status
-                 FROM oauth_tokens WHERE token_hash = ?1",
+        let refresh_hash = *refresh_hash;
+        let client_id = client_id.to_owned();
+        let requested_scopes = requested_scopes.cloned();
+        let tokens = tokens.clone();
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let row = transaction.query_row(
+                "SELECT token_kind, family_id, client_id, subject, scopes, expires_at, status FROM oauth_tokens WHERE token_hash = ?1",
                 [refresh_hash.as_bytes().as_slice()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, String>(6)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or(StoreError::InvalidGrant)?;
-        if row.0 != "refresh" || row.2 != client_id || row.5 <= now.timestamp() {
-            return Err(StoreError::InvalidGrant);
-        }
-        if row.6 != "active" {
-            transaction.execute(
-                "UPDATE oauth_tokens SET status = 'revoked' WHERE family_id = ?1",
-                [&row.1],
-            )?;
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?)),
+            ).optional()?.ok_or(StoreError::InvalidGrant)?;
+            if row.0 != "refresh" || row.2 != client_id || row.5 <= now.timestamp() { return Err(StoreError::InvalidGrant); }
+            if row.6 != "active" {
+                transaction.execute("UPDATE oauth_tokens SET status = 'revoked' WHERE family_id = ?1", [&row.1])?;
+                transaction.commit()?;
+                return Err(StoreError::RefreshReuse);
+            }
+            let original_scopes = parse_scopes(&row.4)?;
+            let scopes = requested_scopes.as_ref().unwrap_or(&original_scopes);
+            if !scopes.is_subset(&original_scopes) { return Err(StoreError::InvalidGrant); }
+            if transaction.execute("UPDATE oauth_tokens SET status = 'rotated' WHERE token_hash = ?1 AND status = 'active'", [refresh_hash.as_bytes().as_slice()])? != 1 { return Err(StoreError::RefreshReuse); }
+            let family = Uuid::parse_str(&row.1).map_err(|_| StoreError::Corrupt("invalid refresh token family"))?;
+            insert_token_pair(&transaction, family, &client_id, &row.3, scopes, &tokens, now)?;
             transaction.commit()?;
-            return Err(StoreError::RefreshReuse);
-        }
-        let original_scopes = parse_scopes(&row.4)?;
-        let scopes = requested_scopes.unwrap_or(&original_scopes);
-        if !scopes.is_subset(&original_scopes) {
-            return Err(StoreError::InvalidGrant);
-        }
-        let changed = transaction.execute(
-            "UPDATE oauth_tokens SET status = 'rotated'
-             WHERE token_hash = ?1 AND status = 'active'",
-            [refresh_hash.as_bytes().as_slice()],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::RefreshReuse);
-        }
-        let family = Uuid::parse_str(&row.1)
-            .map_err(|_| StoreError::Corrupt("invalid refresh token family"))?;
-        insert_token_pair(&transaction, family, client_id, &row.3, scopes, tokens, now)?;
-        transaction.commit()?;
-        Ok(TokenGrant {
-            scopes: scopes.clone(),
+            Ok(TokenGrant { scopes: scopes.clone() })
         })
     }
 
     fn revoke_token(&self, token_hash: &SecretHash) -> Result<(), StoreError> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let token = transaction
-            .query_row(
-                "SELECT token_kind, family_id FROM oauth_tokens WHERE token_hash = ?1",
-                [token_hash.as_bytes().as_slice()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        if let Some((kind, family)) = token {
-            if kind == "refresh" {
-                transaction.execute(
-                    "UPDATE oauth_tokens SET status = 'revoked' WHERE family_id = ?1",
-                    [family],
-                )?;
-            } else {
-                transaction.execute(
-                    "UPDATE oauth_tokens SET status = 'revoked' WHERE token_hash = ?1",
+        let token_hash = *token_hash;
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let token = transaction
+                .query_row(
+                    "SELECT token_kind, family_id FROM oauth_tokens WHERE token_hash = ?1",
                     [token_hash.as_bytes().as_slice()],
-                )?;
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((kind, family)) = token {
+                if kind == "refresh" {
+                    transaction.execute(
+                        "UPDATE oauth_tokens SET status = 'revoked' WHERE family_id = ?1",
+                        [family],
+                    )?;
+                } else {
+                    transaction.execute(
+                        "UPDATE oauth_tokens SET status = 'revoked' WHERE token_hash = ?1",
+                        [token_hash.as_bytes().as_slice()],
+                    )?;
+                }
             }
-        }
-        transaction.commit()?;
-        Ok(())
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     fn access_grant(
@@ -675,34 +499,103 @@ impl OAuthStore for SqliteOAuthStore {
         token_hash: &SecretHash,
         now: DateTime<Utc>,
     ) -> Result<Option<AccessGrant>, StoreError> {
-        let row = self
-            .lock()?
-            .query_row(
-                "SELECT client_id, subject, scopes, expires_at
-                 FROM oauth_tokens
-                 WHERE token_hash = ?1 AND token_kind = 'access'
-                   AND status = 'active' AND expires_at > ?2",
+        let token_hash = *token_hash;
+        self.call(move |connection| {
+            let row = connection.query_row(
+                "SELECT client_id, subject, scopes, expires_at FROM oauth_tokens WHERE token_hash = ?1 AND token_kind = 'access' AND status = 'active' AND expires_at > ?2",
                 params![token_hash.as_bytes().as_slice(), now.timestamp()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        row.map(|(client_id, subject, scopes, expires_at)| {
-            Ok(AccessGrant {
-                client_id,
-                subject,
-                scopes: parse_scopes(&scopes)?,
-                expires_at: from_timestamp(expires_at)?,
-            })
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)),
+            ).optional()?;
+            row.map(|(client_id, subject, scopes, expires_at)| Ok(AccessGrant { client_id, subject, scopes: parse_scopes(&scopes)?, expires_at: from_timestamp(expires_at)? })).transpose()
         })
-        .transpose()
     }
+}
+
+fn registered_clients_connection(
+    connection: &mut Connection,
+) -> Result<Vec<RegisteredClient>, StoreError> {
+    let mut statement = connection.prepare("SELECT client_id, client_name, redirect_uris, scopes, issued_at FROM oauth_clients ORDER BY issued_at DESC, client_id ASC")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (client_id, client_name, redirect_json, scopes, issued_at) = row?;
+        Ok(RegisteredClient {
+            client_id,
+            client_name,
+            redirect_uris: serde_json::from_str(&redirect_json)
+                .map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?,
+            scopes: parse_scopes(&scopes)?,
+            issued_at: from_timestamp(issued_at)?,
+        })
+    })
+    .collect()
+}
+
+fn client_connection(
+    connection: &mut Connection,
+    client_id: &str,
+) -> Result<Option<RegisteredClient>, StoreError> {
+    connection.query_row("SELECT client_id, client_name, redirect_uris, scopes, issued_at FROM oauth_clients WHERE client_id = ?1", [client_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?))).optional()?.map(|(client_id, client_name, redirect_json, scopes, timestamp)| Ok(RegisteredClient { client_id, client_name, redirect_uris: serde_json::from_str(&redirect_json).map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?, scopes: parse_scopes(&scopes)?, issued_at: from_timestamp(timestamp)? })).transpose()
+}
+
+fn sessions_connection(
+    connection: &mut Connection,
+    client_id: Option<&str>,
+) -> Result<Vec<OAuthSession>, StoreError> {
+    let mut statement = connection.prepare("SELECT family_id, client_id, subject, scopes, MIN(issued_at), MAX(expires_at), MAX(CASE WHEN status = 'active' AND expires_at > ?1 THEN 1 ELSE 0 END) FROM oauth_tokens WHERE (?2 IS NULL OR client_id = ?2) GROUP BY family_id, client_id, subject, scopes ORDER BY MAX(issued_at) DESC, family_id ASC")?;
+    let rows = statement.query_map(params![Utc::now().timestamp(), client_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, bool>(6)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (family_id, client_id, subject, scopes, issued_at, expires_at, active) = row?;
+        Ok(OAuthSession {
+            family_id: Uuid::parse_str(&family_id)
+                .map_err(|_| StoreError::Corrupt("invalid token family"))?,
+            client_id,
+            subject,
+            scopes: parse_scopes(&scopes)?,
+            issued_at: from_timestamp(issued_at)?,
+            expires_at: from_timestamp(expires_at)?,
+            active,
+        })
+    })
+    .collect()
+}
+
+fn cleanup_expired_connection(
+    connection: &mut Connection,
+    now: DateTime<Utc>,
+) -> Result<usize, StoreError> {
+    let transaction = connection.transaction()?;
+    let mut removed = 0;
+    for table in [
+        "oauth_authorizations",
+        "oauth_consents",
+        "oauth_codes",
+        "oauth_tokens",
+    ] {
+        removed += transaction.execute(
+            &format!("DELETE FROM {table} WHERE expires_at <= ?1"),
+            [now.timestamp()],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(removed)
 }
 
 fn map_authorization(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingAuthorization> {
@@ -793,29 +686,26 @@ mod tests {
     fn emergency_revoke_removes_pending_flows_and_revokes_tokens() -> Result<(), StoreError> {
         let store = SqliteOAuthStore::in_memory()?;
         let now = Utc::now().timestamp();
-        let connection = store.lock()?;
-        connection.execute(
-            "INSERT INTO oauth_clients
-             (client_id, client_name, redirect_uris, scopes, issued_at)
-             VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
-            [now],
-        )?;
-        connection.execute(
-            "INSERT INTO oauth_tokens
-             (token_hash, token_kind, family_id, client_id, subject, scopes,
-              issued_at, expires_at, status)
-             VALUES (?1, 'access', ?2, 'client', 'owner', 'machine:read', ?3, ?4, 'active')",
-            params![vec![7_u8; 32], Uuid::new_v4().to_string(), now, now + 3_600],
-        )?;
-        drop(connection);
+        store.test_call(move |connection| {
+            connection.execute(
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
+                [now],
+            )?;
+            connection.execute(
+                "INSERT INTO oauth_tokens (token_hash, token_kind, family_id, client_id, subject, scopes, issued_at, expires_at, status) VALUES (?1, 'access', ?2, 'client', 'owner', 'machine:read', ?3, ?4, 'active')",
+                params![vec![7_u8; 32], Uuid::new_v4().to_string(), now, now + 3_600],
+            )?;
+            Ok(())
+        })?;
 
         assert_eq!(store.emergency_revoke_all()?, 1);
-        let status: String =
-            store
-                .lock()?
+        let status: String = store.test_call(|connection| {
+            connection
                 .query_row("SELECT status FROM oauth_tokens LIMIT 1", [], |row| {
                     row.get(0)
-                })?;
+                })
+                .map_err(Into::into)
+        })?;
         assert_eq!(status, "revoked");
         Ok(())
     }
@@ -824,67 +714,48 @@ mod tests {
     fn cleanup_removes_only_expired_records() -> Result<(), StoreError> {
         let store = SqliteOAuthStore::in_memory()?;
         let now = Utc::now();
-        let connection = store.lock()?;
-        connection.execute(
-            "INSERT INTO oauth_clients
-             (client_id, client_name, redirect_uris, scopes, issued_at)
-             VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
-            [now.timestamp()],
-        )?;
-        for (hash, expiry) in [(vec![1_u8; 32], -1_i64), (vec![2_u8; 32], 3_600_i64)] {
+        store.test_call(move |connection| {
             connection.execute(
-                "INSERT INTO oauth_tokens
-                 (token_hash, token_kind, family_id, client_id, subject, scopes,
-                  issued_at, expires_at, status)
-                 VALUES (?1, 'access', ?2, 'client', 'owner', 'machine:read', ?3, ?4, 'active')",
-                params![
-                    hash,
-                    Uuid::new_v4().to_string(),
-                    now.timestamp(),
-                    now.timestamp() + expiry
-                ],
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
+                [now.timestamp()],
             )?;
-        }
-        drop(connection);
+            for (hash, expiry) in [(vec![1_u8; 32], -1_i64), (vec![2_u8; 32], 3_600_i64)] {
+                connection.execute(
+                    "INSERT INTO oauth_tokens (token_hash, token_kind, family_id, client_id, subject, scopes, issued_at, expires_at, status) VALUES (?1, 'access', ?2, 'client', 'owner', 'machine:read', ?3, ?4, 'active')",
+                    params![hash, Uuid::new_v4().to_string(), now.timestamp(), now.timestamp() + expiry],
+                )?;
+            }
+            Ok(())
+        })?;
 
         assert_eq!(store.cleanup_expired(now)?, 1);
-        let remaining: i64 =
-            store
-                .lock()?
-                .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |row| row.get(0))?;
+        let remaining: i64 = store.test_call(|connection| {
+            connection
+                .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |row| row.get(0))
+                .map_err(Into::into)
+        })?;
         assert_eq!(remaining, 1);
         Ok(())
     }
+
     #[test]
     fn owner_can_list_revoke_and_delete_clients_and_sessions() -> Result<(), StoreError> {
         let store = SqliteOAuthStore::in_memory()?;
         let now = Utc::now();
         let family = Uuid::new_v4();
-        let connection = store.lock()?;
-        connection.execute(
-            r#"INSERT INTO oauth_clients
-               (client_id, client_name, redirect_uris, scopes, issued_at)
-               VALUES ('client', 'Client', '["https://client.example/callback"]',
-                       'machine:read', ?1)"#,
-            [now.timestamp()],
-        )?;
-        for (index, kind) in ["access", "refresh"].into_iter().enumerate() {
+        store.test_call(move |connection| {
             connection.execute(
-                "INSERT INTO oauth_tokens
-                 (token_hash, token_kind, family_id, client_id, subject, scopes,
-                  issued_at, expires_at, status)
-                 VALUES (?1, ?2, ?3, 'client', 'github:42', 'machine:read',
-                         ?4, ?5, 'active')",
-                params![
-                    vec![u8::try_from(index + 1).unwrap_or(1); 32],
-                    kind,
-                    family.to_string(),
-                    now.timestamp(),
-                    (now + chrono::Duration::hours(1)).timestamp(),
-                ],
+                r#"INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('client', 'Client', '["https://client.example/callback"]', 'machine:read', ?1)"#,
+                [now.timestamp()],
             )?;
-        }
-        drop(connection);
+            for (index, kind) in ["access", "refresh"].into_iter().enumerate() {
+                connection.execute(
+                    "INSERT INTO oauth_tokens (token_hash, token_kind, family_id, client_id, subject, scopes, issued_at, expires_at, status) VALUES (?1, ?2, ?3, 'client', 'github:42', 'machine:read', ?4, ?5, 'active')",
+                    params![vec![u8::try_from(index + 1).unwrap_or(1); 32], kind, family.to_string(), now.timestamp(), (now + chrono::Duration::hours(1)).timestamp()],
+                )?;
+            }
+            Ok(())
+        })?;
 
         let clients = store.registered_clients()?;
         assert_eq!(clients.len(), 1);
@@ -899,23 +770,24 @@ mod tests {
         assert!(store.registered_clients()?.is_empty());
         Ok(())
     }
+
     #[test]
     fn oauth_schema_version_is_recorded_and_future_versions_are_rejected() -> Result<(), StoreError>
     {
         let store = SqliteOAuthStore::in_memory()?;
-        let version: i64 = store.lock()?.query_row(
-            "SELECT version FROM schema_versions WHERE component = 'oauth'",
-            [],
-            |row| row.get(0),
-        )?;
+        let version: i64 = store.test_call(|connection| {
+            connection
+                .query_row(
+                    "SELECT version FROM schema_versions WHERE component = 'oauth'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+        })?;
         assert_eq!(version, OAUTH_SCHEMA_VERSION);
         let connection = Connection::open_in_memory()?;
         connection.execute_batch(
-            "CREATE TABLE schema_versions (
-                component TEXT PRIMARY KEY,
-                version INTEGER NOT NULL
-             );
-             INSERT INTO schema_versions(component, version) VALUES ('oauth', 999);",
+            "CREATE TABLE schema_versions (component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_versions(component, version) VALUES ('oauth', 999);",
         )?;
         assert!(SqliteOAuthStore::from_connection(connection).is_err());
         Ok(())
