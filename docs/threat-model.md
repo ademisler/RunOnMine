@@ -28,14 +28,17 @@ compromised.
 | Threat | Primary controls |
 | --- | --- |
 | An internet user discovers a tunnel endpoint | Quick paths contain 256 random bits; permanent connections use OAuth; invalid paths return 404 |
-| A confused-deputy or prompt-injection request invokes a destructive tool | deny/ask/allow policy, argument-aware local-only approval, exact-hash temporary grants, remote safety ceiling, truthful destructive/open-world annotations |
+| A confused-deputy or prompt-injection request invokes a destructive tool | deny/ask/allow policy, argument-aware local-only approval, exact-hash temporary grants, explicit deny precedence over grants, remote safety ceiling, truthful destructive/open-world annotations |
 | A token asks for more authority than granted locally | OAuth scope is intersected with policy and never expands it |
-| A file path escapes a selected root | canonical root validation, component checks, symlink rejection, bounded operations |
-| Output or errors reveal credentials | generic remote errors, bounded output, approval redaction, cleared shell environment, no raw environment or stdin audit data |
+| A file path escapes a selected root or a move targets a differently restricted path | descriptor-relative root capabilities, component checks, symlink rejection, authorization of both source and destination, bounded operations |
+| Output or errors reveal credentials | generic remote errors, bounded output, desktop child-output redaction, approval redaction, cleared shell environment, no raw environment or stdin audit data |
 | A timed-out command leaves descendants running | Unix process groups and Windows Job Objects terminate the process tree |
+| Concurrent local processes overwrite encrypted fallback secrets | owner-only inter-process file locking around every read-modify-write transaction |
+| OAuth registration floods survive behind a public tunnel | SQLite-backed atomic registration windows, registered-client cap, restart-persistent pruning |
+| SQLite sidecars expose state | private parent directories and owner-only database, WAL, and shared-memory files |
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
-| Browser automation reaches an unrelated daily profile or internal network | isolated profile by default; private-network destinations denied by default; expert attachment requires an explicit loopback CDP URL |
+| Browser automation reaches an unrelated daily profile or internal network | isolated profile by default; private-network destinations denied by default; expert attachment requires a credential-free loopback CDP URL; initial and final navigation destinations plus redirects/subresources are validated |
 | Audit rows are edited or reordered | BLAKE3 hash chain, retained chain anchor, startup and doctor verification |
 | A stale refresh token is replayed | one-time rotation and family-wide revocation on reuse |
 | Session identifiers cross connector boundaries | connector-bound session state, 30-minute idle expiry, request body limit, concurrency and rate limits |
@@ -65,8 +68,6 @@ prevent a fully compromised user account from deleting the database and its
 anchor. A malicious process already running as the same user can also interact
 with user-accessible files and UI outside RunOnMine's control.
 
-Quick Tunnel with no user identity is a temporary development mode, not a
-substitute for OAuth. Its secret path is a bearer credential and is rotated by
-the emergency lock. Browser destination validation occurs before navigation and CDP Fetch interception revalidates redirect and subresource requests. This reduces SSRF exposure but is not a complete network sandbox.
+Quick Tunnel with no user identity is a temporary development mode, not a substitute for OAuth. Its secret path is a bearer credential and is rotated by the emergency lock. Browser destination validation occurs before navigation, after the final navigation result, and during CDP Fetch interception for redirects and subresources. This reduces SSRF exposure but is not a complete network sandbox.
 Unsigned beta packages provide checksums and SBOMs but no publisher identity,
 notarization, or code-signing guarantee.

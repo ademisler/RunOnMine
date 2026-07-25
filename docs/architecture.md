@@ -26,7 +26,8 @@ AI client
   -> HTTPS tunnel or local stdio
   -> connector authentication and token scope
   -> MCP session and rate limits
-  -> local connector policy (deny / ask / allow)
+  -> local connector policy for every relevant resource (deny / ask / allow)
+  -> explicit deny revocation before exact-action grant evaluation
   -> local approval when required
   -> capability implementation
   -> operating-system account boundary
@@ -47,14 +48,9 @@ rejects session reuse through a different connector.
 - platform credential storage contains connector paths and external API credentials.
 - isolated Chromium profiles live below the per-user RunOnMine data directory.
 
-On headless Linux without Secret Service, secrets are stored only when an
-explicit `RUNONMINE_MASTER_KEY` supplies a 32-byte key. The file backend uses
-XChaCha20-Poly1305 with a random nonce and per-entry associated data. Missing or
-invalid key material fails closed.
+On headless Linux without Secret Service, secrets are stored only when an explicit `RUNONMINE_MASTER_KEY` supplies a 32-byte key. The file backend uses XChaCha20-Poly1305 with a random nonce and per-entry associated data. An owner-only file lock serializes updates across CLI, desktop, and agent processes. Missing or invalid key material fails closed.
 
-The audit log is hash-chained. Retention pruning stores a chain anchor, so the
-remaining records continue to verify after the default 30-day/100-MiB retention
-window removes old records.
+The audit log is hash-chained. Retention pruning stores a chain anchor, so the remaining records continue to verify after the default 30-day/100-MiB retention window removes old records. State directories use owner-only permissions; SQLite database, WAL, and shared-memory files are restricted to the owning account. Dedicated database workers and connector supervisor tasks have explicit shutdown and join lifecycles.
 
 ## Network ownership
 

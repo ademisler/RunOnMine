@@ -17,8 +17,7 @@ runonmine service install
 runonmine service status
 ```
 
-The unit is stored below `~/.config/systemd/user` and runs with the current
-account's normal authority.
+The unit is stored below `~/.config/systemd/user` and runs with the current account's normal authority. It uses `ProtectHome=read-only` and opens only RunOnMine's private configuration, state, and local-data directories through explicit `ReadWritePaths` entries.
 
 ## Headless system service
 
@@ -47,10 +46,7 @@ configuration, state, and secrets are preserved.
 ## Secrets
 
 Secret Service is used when a session bus is available. A truly headless
-process must explicitly provide `RUNONMINE_MASTER_KEY`, encoded as base64 or hex
-and decoding to exactly 32 bytes. RunOnMine then uses an XChaCha20-Poly1305 file
-backend. Without Secret Service or a valid master key, secret-dependent
-connectors fail closed.
+process must explicitly provide `RUNONMINE_MASTER_KEY`, encoded as base64 or hex and decoding to exactly 32 bytes. RunOnMine then uses an XChaCha20-Poly1305 file backend with a private cross-process lock. Without Secret Service or a valid master key, secret-dependent connectors fail closed.
 
 Do not put the master key in the repository, unit file, shell history, or
 world-readable environment file. Supply it through the host's secret injection

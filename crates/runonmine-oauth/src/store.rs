@@ -1,9 +1,9 @@
 use std::path::Path;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use url::Url;
 use uuid::Uuid;
 
@@ -14,25 +14,44 @@ use crate::model::{
 };
 use crate::{ScopeSet, SecretHash, StoreError};
 
-const OAUTH_SCHEMA_VERSION: i64 = 1;
+const OAUTH_SCHEMA_VERSION: i64 = 2;
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
-#[derive(Debug)]
+enum DbMessage {
+    Run(DbJob),
+    Shutdown,
+}
+
 struct SqliteWorker {
-    sender: mpsc::Sender<DbJob>,
+    sender: Option<mpsc::Sender<DbMessage>>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for SqliteWorker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteWorker")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SqliteWorker {
     fn start(mut connection: Connection) -> Result<Self, StoreError> {
-        let (sender, receiver) = mpsc::channel::<DbJob>();
-        std::thread::Builder::new()
+        let (sender, receiver) = mpsc::channel::<DbMessage>();
+        let thread = std::thread::Builder::new()
             .name("runonmine-oauth-db".to_owned())
             .spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    job(&mut connection);
+                while let Ok(message) = receiver.recv() {
+                    match message {
+                        DbMessage::Run(job) => job(&mut connection),
+                        DbMessage::Shutdown => break,
+                    }
                 }
             })?;
-        Ok(Self { sender })
+        Ok(Self {
+            sender: Some(sender),
+            thread: Mutex::new(Some(thread)),
+        })
     }
 
     fn call<T, F>(&self, operation: F) -> Result<T, StoreError>
@@ -42,9 +61,15 @@ impl SqliteWorker {
     {
         let (reply, receive) = mpsc::sync_channel(1);
         self.sender
-            .send(Box::new(move |connection| {
+            .as_ref()
+            .ok_or_else(|| {
+                StoreError::Io(std::io::Error::other(
+                    "OAuth database worker is unavailable",
+                ))
+            })?
+            .send(DbMessage::Run(Box::new(move |connection| {
                 let _ignored = reply.send(operation(connection));
-            }))
+            })))
             .map_err(|_| {
                 StoreError::Io(std::io::Error::other(
                     "OAuth database worker is unavailable",
@@ -58,8 +83,27 @@ impl SqliteWorker {
     }
 }
 
+impl Drop for SqliteWorker {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ignored = sender.send(DbMessage::Shutdown);
+        }
+        if let Ok(mut thread) = self.thread.lock()
+            && let Some(thread) = thread.take()
+        {
+            let _ignored = thread.join();
+        }
+    }
+}
+
 pub trait OAuthStore: Send + Sync {
     fn registered_client_count(&self) -> Result<usize, StoreError>;
+    fn consume_registration_slot(
+        &self,
+        now: DateTime<Utc>,
+        window_seconds: i64,
+        limit: usize,
+    ) -> Result<bool, StoreError>;
     fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError>;
     fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError>;
     fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError>;
@@ -126,10 +170,12 @@ impl SqliteOAuthStore {
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            restrict_database_directory(parent)?;
         }
         let connection = Connection::open(path)?;
-        restrict_database_file(path)?;
-        Self::from_connection(connection)
+        let store = Self::from_connection(connection)?;
+        restrict_database_files(path)?;
+        Ok(store)
     }
 
     pub fn in_memory() -> Result<Self, StoreError> {
@@ -159,7 +205,13 @@ impl SqliteOAuthStore {
             ));
         }
         connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS oauth_clients (
+            "CREATE TABLE IF NOT EXISTS oauth_registration_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempted_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS oauth_registration_attempts_time_idx
+                ON oauth_registration_attempts(attempted_at);
+             CREATE TABLE IF NOT EXISTS oauth_clients (
                 client_id TEXT PRIMARY KEY,
                 client_name TEXT NOT NULL,
                 redirect_uris TEXT NOT NULL,
@@ -305,6 +357,45 @@ impl OAuthStore for SqliteOAuthStore {
                 row.get::<_, i64>(0)
             })?;
             usize::try_from(count).map_err(|_| StoreError::Corrupt("invalid OAuth client count"))
+        })
+    }
+
+    fn consume_registration_slot(
+        &self,
+        now: DateTime<Utc>,
+        window_seconds: i64,
+        limit: usize,
+    ) -> Result<bool, StoreError> {
+        if window_seconds <= 0 || limit == 0 {
+            return Err(StoreError::Corrupt(
+                "invalid OAuth registration limiter settings",
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("invalid OAuth registration limit"))?;
+        self.call(move |connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let cutoff = now.timestamp().saturating_sub(window_seconds);
+            transaction.execute(
+                "DELETE FROM oauth_registration_attempts WHERE attempted_at <= ?1",
+                [cutoff],
+            )?;
+            let count = transaction.query_row(
+                "SELECT COUNT(*) FROM oauth_registration_attempts",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if count >= limit {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            transaction.execute(
+                "INSERT INTO oauth_registration_attempts (attempted_at) VALUES (?1)",
+                [now.timestamp()],
+            )?;
+            transaction.commit()?;
+            Ok(true)
         })
     }
 
@@ -669,11 +760,44 @@ fn from_timestamp(value: i64) -> Result<DateTime<Utc>, StoreError> {
     DateTime::from_timestamp(value, 0).ok_or(StoreError::Corrupt("invalid persisted timestamp"))
 }
 
-fn restrict_database_file(path: &Path) -> Result<(), StoreError> {
+fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    std::path::PathBuf::from(value)
+}
+
+fn restrict_database_directory(path: &Path) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn restrict_database_files(path: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for candidate in [
+            path.to_path_buf(),
+            sqlite_sidecar(path, "-wal"),
+            sqlite_sidecar(path, "-shm"),
+        ] {
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err(StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "OAuth SQLite path must be a regular, non-symlink file",
+                    )));
+                }
+                Ok(_) => {
+                    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(StoreError::Io(error)),
+            }
+        }
     }
     Ok(())
 }
@@ -681,6 +805,31 @@ fn restrict_database_file(path: &Path) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_database_directory_and_files_are_private() -> Result<(), StoreError> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir()?;
+        let state_directory = directory.path().join("state");
+        let database = state_directory.join("state.db");
+        let _store = SqliteOAuthStore::open(&database)?;
+        assert_eq!(
+            std::fs::metadata(&state_directory)?.permissions().mode() & 0o777,
+            0o700
+        );
+        for path in [
+            database.clone(),
+            sqlite_sidecar(&database, "-wal"),
+            sqlite_sidecar(&database, "-shm"),
+        ] {
+            if path.exists() {
+                assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn emergency_revoke_removes_pending_flows_and_revokes_tokens() -> Result<(), StoreError> {
@@ -768,6 +917,53 @@ mod tests {
         assert_eq!(store.revoke_client_tokens("client")?, 0);
         assert!(store.delete_client("client")?);
         assert!(store.registered_clients()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_schema_v1_migrates_to_v2_without_losing_clients() -> Result<(), StoreError> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state").join("state.db");
+        {
+            let store = SqliteOAuthStore::open(&database)?;
+            let issued_at = Utc::now().timestamp();
+            store.test_call(move |connection| {
+                connection.execute(
+                    r#"INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('existing-client', 'Existing Client', '["https://client.example/callback"]', 'machine:read', ?1)"#,
+                    [issued_at],
+                )?;
+                Ok(())
+            })?;
+        }
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute(
+                "UPDATE schema_versions SET version = 1 WHERE component = 'oauth'",
+                [],
+            )?;
+            connection.execute("DROP TABLE oauth_registration_attempts", [])?;
+        }
+
+        let migrated = SqliteOAuthStore::open(&database)?;
+        let clients = migrated.registered_clients()?;
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].client_id, "existing-client");
+        let (version, registration_table_count): (i64, i64) =
+            migrated.test_call(|connection| {
+                let version = connection.query_row(
+                    "SELECT version FROM schema_versions WHERE component = 'oauth'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let table_count = connection.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'oauth_registration_attempts'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((version, table_count))
+            })?;
+        assert_eq!(version, OAUTH_SCHEMA_VERSION);
+        assert_eq!(registration_table_count, 1);
         Ok(())
     }
 

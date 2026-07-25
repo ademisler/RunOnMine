@@ -133,14 +133,9 @@ impl ScopedFilesystem {
         }
         let (root, relative) = self.select_root(path)?;
         let directory = open_directory(root, &relative)?;
-        let mut entries = Vec::with_capacity(limit.min(1_024));
-        let mut truncated = false;
-        for entry in directory.read_dir(".")?.skip(offset) {
+        let mut entries = Vec::new();
+        for entry in directory.read_dir(".")? {
             let entry = entry?;
-            if entries.len() >= limit {
-                truncated = true;
-                break;
-            }
             let file_type = entry.file_type()?;
             let metadata = entry.metadata()?;
             let kind = if file_type.is_symlink() {
@@ -161,10 +156,12 @@ impl ScopedFilesystem {
             });
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
+        let total = entries.len();
+        let entries = entries.into_iter().skip(offset).take(limit).collect();
         Ok(DirectoryListing {
             entries,
             offset,
-            truncated,
+            truncated: offset.saturating_add(limit) < total,
         })
     }
 
@@ -316,11 +313,10 @@ impl ScopedFilesystem {
             Err(error) => return Err(error.into()),
         }
         let trash_dir = root.dir.open_dir(trash_name)?;
-        let destination = OsString::from(format!(
-            "{}-{}",
-            uuid::Uuid::new_v4(),
-            name.to_string_lossy()
-        ));
+        // A source name may already occupy the platform's entire filename
+        // component limit. Use a fixed-size opaque destination so moving a
+        // valid file into managed trash cannot fail due to name expansion.
+        let destination = OsString::from(uuid::Uuid::new_v4().to_string());
         parent.rename(&name, &trash_dir, destination)?;
         Ok(())
     }
@@ -616,6 +612,61 @@ mod tests {
         assert_eq!(search.matches.len(), 2);
         assert!(search.truncated);
         assert!(search.visited >= 2);
+        Ok(())
+    }
+
+    #[test]
+    fn directory_pagination_is_stable_after_sorting() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for name in ["zeta", "beta", "delta", "alpha", "gamma"] {
+            std::fs::write(root.path().join(name), name)?;
+        }
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let first = scoped.list_limited(root.path(), 0, 2)?;
+        let second = scoped.list_limited(root.path(), 2, 2)?;
+        let third = scoped.list_limited(root.path(), 4, 2)?;
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(
+            second
+                .entries
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["delta", "gamma"]
+        );
+        assert_eq!(
+            third
+                .entries
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zeta"]
+        );
+        assert!(first.truncated);
+        assert!(second.truncated);
+        assert!(!third.truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn managed_trash_accepts_a_maximum_length_source_name() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("x".repeat(240));
+        std::fs::write(&target, "data")?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        scoped.move_to_trash(&target)?;
+        let moved = std::fs::read_dir(root.path().join(".runonmine-trash"))?
+            .next()
+            .transpose()?
+            .context("trash entry was not created")?;
+        assert!(moved.file_name().len() <= 64);
         Ok(())
     }
 

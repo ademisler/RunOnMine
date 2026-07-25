@@ -69,7 +69,7 @@ Use `runonmine ui` for approvals, or approve locally from another terminal with
 `runonmine approvals list` and `runonmine approvals approve <id> --once`.
 Approvals cannot be granted through MCP. Approval prompts show the concrete
 command, path, URL, selector, or script target after local secret redaction.
-Ten-minute and persistent approvals apply only to the exact connector, tool, and argument hash that was reviewed.
+Ten-minute and persistent approvals apply only to the exact connector, tool, and argument hash that was reviewed. A later explicit `deny` rule always overrides an existing exact-action grant.
 
 Immediately stop the service, reject queued approvals, revoke OAuth sessions,
 and invalidate temporary connector credentials with:
@@ -80,7 +80,7 @@ runonmine lock
 
 ## Security model
 
-- Connector policy first evaluates principal/resource rules, then tool override, capability override, preset, and finally deny.
+- Connector policy first evaluates principal/resource rules, then tool override, capability override, preset, and finally deny. Explicit deny decisions are evaluated before exact-action grants, and multi-path operations such as `fs_move` must authorize every source and destination resource.
 - Internet-facing connectors have a non-bypassable safety ceiling: destructive
   capabilities can require local approval but cannot be configured to auto-run;
   administrator execution remains denied.
@@ -90,9 +90,8 @@ runonmine lock
   browser profile. Redirects and subresources are intercepted; private,
   loopback, link-local, and non-routable targets are denied. Private-network
   access is a local-connector-only opt-in and remains blocked for remote connectors.
-- Secrets use the operating-system credential store, with an explicit encrypted
-  headless Linux fallback.
-- Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. MCP authorization, approval, and audit paths use asynchronous worker replies.
+- Secrets use the operating-system credential store, with an explicit encrypted headless Linux fallback. The encrypted file backend uses an owner-only cross-process lock so CLI, desktop, and agent updates cannot overwrite one another.
+- Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. Database directories are private, database/WAL/shared-memory files are owner-only, and worker threads are joined during shutdown. MCP authorization, approval, and audit paths use asynchronous worker replies.
 - Audit records contain argument summaries and hashes rather than raw command,
   token, cookie, or stdin contents.
 - Audit records form a tamper-evident chain and retain 30 days or 100 MiB by default.
@@ -125,10 +124,7 @@ cargo build --release --no-default-features \
   -p runonmine -p runonmine-agent -p runonmine-helper
 ```
 
-Release candidates are unsigned. The release workflow creates portable
-`cargo-dist` archives, native `cargo-packager` installers, CycloneDX SBOMs, and
-SHA-256 checksum files, then opens a draft GitHub prerelease. It never changes
-repository visibility.
+Release candidates are unsigned. The release workflow creates portable `cargo-dist` archives, native `cargo-packager` installers, CycloneDX SBOMs with dependency edges and Cargo.lock checksums, and SHA-256 artifact checksum files, then opens a draft GitHub prerelease. It never changes repository visibility.
 
 The legacy reference under `Eski örnek` is intentionally ignored and must not
 be committed.

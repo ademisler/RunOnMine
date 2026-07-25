@@ -14,6 +14,8 @@ use std::process::{Command, Output};
 use anyhow::{Context, Result, bail};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use directories::BaseDirs;
+#[cfg(target_os = "linux")]
+use directories::ProjectDirs;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -176,11 +178,14 @@ impl LinuxSystemService {
                 self.agent_executable.display()
             );
         }
-        let uid = account_number("-u", run_as_user)?;
-        if uid == 0 {
+        let account = service_account(run_as_user)?;
+        if account.uid.is_root() {
             bail!("the headless system service must not run as root");
         }
-        let home = account_home(run_as_user)?;
+        let home = account.dir;
+        if !home.is_absolute() {
+            bail!("the service account home directory is invalid");
+        }
         let install_directory = Path::new(LINUX_SYSTEM_BINARY_PATH)
             .parent()
             .context("system agent path has no parent")?;
@@ -249,48 +254,15 @@ fn linux_systemctl(arguments: &[&str], context: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn require_root() -> Result<()> {
-    if account_number("-u", "")? != 0 {
+    if !nix::unistd::geteuid().is_root() {
         bail!("system service installation and removal must be run as root");
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn account_number(flag: &str, user: &str) -> Result<u32> {
-    let mut command = Command::new("id");
-    command.arg(flag);
-    if !user.is_empty() {
-        command.arg(user);
-    }
-    let output = command.output()?;
-    if !output.status.success() {
-        bail!("the requested service account does not exist");
-    }
-    let value = String::from_utf8(output.stdout)?;
-    value
-        .trim()
-        .parse::<u32>()
-        .context("the service account id is invalid")
-}
-
-#[cfg(target_os = "linux")]
-fn account_home(user: &str) -> Result<PathBuf> {
-    let output = Command::new("getent").args(["passwd", user]).output()?;
-    if !output.status.success() {
-        bail!("the requested service account has no passwd entry");
-    }
-    let record = String::from_utf8(output.stdout)?;
-    let home = record
-        .trim_end()
-        .split(':')
-        .nth(5)
-        .filter(|value| !value.is_empty())
-        .context("the service account has no home directory")?;
-    let path = PathBuf::from(home);
-    if !path.is_absolute() || home.contains(['\n', '\r', '\0']) {
-        bail!("the service account home directory is invalid");
-    }
-    Ok(path)
+fn service_account(user: &str) -> Result<nix::unistd::User> {
+    nix::unistd::User::from_name(user)?.context("the requested service account does not exist")
 }
 
 #[cfg(target_os = "linux")]
@@ -417,7 +389,7 @@ impl UserService {
                 Command::new("launchctl").args([
                     "kickstart",
                     "-k",
-                    &format!("{}/dev.runonmine.agent", launch_domain()?),
+                    &format!("{}/dev.runonmine.agent", launch_domain()),
                 ]),
                 "failed to start the LaunchAgent",
             )
@@ -449,7 +421,7 @@ impl UserService {
                 Command::new("launchctl").args([
                     "kill",
                     "SIGTERM",
-                    &format!("{}/dev.runonmine.agent", launch_domain()?),
+                    &format!("{}/dev.runonmine.agent", launch_domain()),
                 ]),
                 "failed to stop the LaunchAgent",
             )
@@ -479,10 +451,7 @@ impl UserService {
         let service_path = service_definition_path()?;
         #[cfg(target_os = "macos")]
         let output = Command::new("launchctl")
-            .args([
-                "print",
-                &format!("{}/dev.runonmine.agent", launch_domain()?),
-            ])
+            .args(["print", &format!("{}/dev.runonmine.agent", launch_domain())])
             .output()?;
         #[cfg(target_os = "linux")]
         let output = Command::new("systemctl")
@@ -526,7 +495,7 @@ impl UserService {
              </dict></plist>\n"
         );
         write_private(&path, plist.as_bytes())?;
-        let domain = launch_domain()?;
+        let domain = launch_domain();
         let _ignored = Command::new("launchctl")
             .args(["bootout", &domain, path.to_string_lossy().as_ref()])
             .output();
@@ -541,7 +510,7 @@ impl UserService {
     fn uninstall_macos(&self) -> Result<()> {
         let path = service_definition_path()?.context("LaunchAgent path is unavailable")?;
         if path.exists() {
-            let domain = launch_domain()?;
+            let domain = launch_domain();
             let _ignored = Command::new("launchctl")
                 .args(["bootout", &domain, path.to_string_lossy().as_ref()])
                 .output();
@@ -554,11 +523,22 @@ impl UserService {
     fn install_linux(&self) -> Result<()> {
         let path = service_definition_path()?.context("systemd user path is unavailable")?;
         ensure_parent(&path)?;
+        let writable_paths = linux_user_writable_paths()?;
+        for writable_path in &writable_paths {
+            ensure_private_directory(writable_path)?;
+        }
         let executable = systemd_escape(&self.agent_executable.to_string_lossy());
+        let mut writable_directives = String::new();
+        for item in &writable_paths {
+            writable_directives.push_str("ReadWritePaths=");
+            writable_directives.push_str(&systemd_escape(&item.to_string_lossy()));
+            writable_directives.push('\n');
+        }
         let unit = format!(
             "[Unit]\nDescription=RunOnMine MCP Agent\nAfter=network-online.target\n\n\
              [Service]\nType=simple\nExecStart={executable} run\nRestart=on-failure\nRestartSec=3\n\
              NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\
+             {writable_directives}\
              [Install]\nWantedBy=default.target\n"
         );
         write_private(&path, unit.as_bytes())?;
@@ -689,16 +669,8 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn launch_domain() -> Result<String> {
-    let output = Command::new("id").arg("-u").output()?;
-    if !output.status.success() {
-        bail!("failed to determine the current user id");
-    }
-    let uid = String::from_utf8(output.stdout)?.trim().to_owned();
-    if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
-        bail!("invalid current user id");
-    }
-    Ok(format!("gui/{uid}"))
+fn launch_domain() -> String {
+    format!("gui/{}", nix::unistd::geteuid().as_raw())
 }
 
 #[cfg(target_os = "macos")]
@@ -707,6 +679,39 @@ fn xml_escape(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_writable_paths() -> Result<Vec<PathBuf>> {
+    let directories = ProjectDirs::from("dev", "RunOnMine", "RunOnMine")
+        .context("the operating system did not provide RunOnMine user directories")?;
+    let state = directories
+        .state_dir()
+        .unwrap_or_else(|| directories.data_local_dir())
+        .to_path_buf();
+    let mut paths = vec![
+        directories.config_dir().to_path_buf(),
+        state,
+        directories.data_local_dir().to_path_buf(),
+    ];
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_private_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!("refusing to use a symlinked RunOnMine service directory");
+    }
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

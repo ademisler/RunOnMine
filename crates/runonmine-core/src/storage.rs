@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -17,23 +17,42 @@ const STATE_SCHEMA_VERSION: i64 = 2;
 
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
-#[derive(Debug)]
+enum DbMessage {
+    Run(DbJob),
+    Shutdown,
+}
+
 struct SqliteWorker {
-    sender: mpsc::Sender<DbJob>,
+    sender: Option<mpsc::Sender<DbMessage>>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for SqliteWorker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteWorker")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SqliteWorker {
     fn start(mut connection: Connection) -> Result<Self> {
-        let (sender, receiver) = mpsc::channel::<DbJob>();
-        std::thread::Builder::new()
+        let (sender, receiver) = mpsc::channel::<DbMessage>();
+        let thread = std::thread::Builder::new()
             .name("runonmine-state-db".to_owned())
             .spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    job(&mut connection);
+                while let Ok(message) = receiver.recv() {
+                    match message {
+                        DbMessage::Run(job) => job(&mut connection),
+                        DbMessage::Shutdown => break,
+                    }
                 }
             })
             .context("failed to start state database worker")?;
-        Ok(Self { sender })
+        Ok(Self {
+            sender: Some(sender),
+            thread: Mutex::new(Some(thread)),
+        })
     }
 
     fn call<T, F>(&self, operation: F) -> Result<T>
@@ -43,9 +62,11 @@ impl SqliteWorker {
     {
         let (reply, receive) = mpsc::sync_channel(1);
         self.sender
-            .send(Box::new(move |connection| {
+            .as_ref()
+            .context("state database worker is unavailable")?
+            .send(DbMessage::Run(Box::new(move |connection| {
                 let _ignored = reply.send(operation(connection));
-            }))
+            })))
             .map_err(|_| anyhow!("state database worker is unavailable"))?;
         receive
             .recv()
@@ -59,13 +80,28 @@ impl SqliteWorker {
     {
         let (reply, receive) = oneshot::channel();
         self.sender
-            .send(Box::new(move |connection| {
+            .as_ref()
+            .context("state database worker is unavailable")?
+            .send(DbMessage::Run(Box::new(move |connection| {
                 let _ignored = reply.send(operation(connection));
-            }))
+            })))
             .map_err(|_| anyhow!("state database worker is unavailable"))?;
         receive
             .await
             .map_err(|_| anyhow!("state database worker stopped unexpectedly"))?
+    }
+}
+
+impl Drop for SqliteWorker {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ignored = sender.send(DbMessage::Shutdown);
+        }
+        if let Ok(mut thread) = self.thread.lock()
+            && let Some(thread) = thread.take()
+        {
+            let _ignored = thread.join();
+        }
     }
 }
 
@@ -95,12 +131,13 @@ impl StateStore {
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            restrict_directory(parent)?;
         }
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open state database at {}", path.display()))?;
         configure_connection(&connection)?;
         migrate(&connection)?;
-        restrict_file(path)?;
+        restrict_sqlite_files(path)?;
         Ok(Self {
             worker: Arc::new(SqliteWorker::start(connection)?),
         })
@@ -714,16 +751,49 @@ fn parse_decision(value: &str) -> Result<ApprovalDecision> {
     }
 }
 
+fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    std::path::PathBuf::from(value)
+}
+
 #[cfg(unix)]
-fn restrict_file(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+fn restrict_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-fn restrict_file(_path: &Path) -> Result<()> {
+fn restrict_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_sqlite_files(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for candidate in [
+        path.to_path_buf(),
+        sqlite_sidecar(path, "-wal"),
+        sqlite_sidecar(path, "-shm"),
+    ] {
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!("SQLite state path must be a regular, non-symlink file")
+            }
+            Ok(_) => std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn restrict_sqlite_files(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -760,6 +830,39 @@ mod tests {
                 )
                 .await?
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_database_and_sidecars_are_private() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir()?;
+        let state_directory = directory.path().join("state");
+        let database = state_directory.join("state.db");
+        let store = StateStore::open(&database)?;
+        store.append_audit(&AuditEvent::new(
+            "test",
+            "system_info",
+            "system_read",
+            AuditOutcome::Allowed,
+            "hash",
+            "permission test",
+        ))?;
+        assert_eq!(
+            std::fs::metadata(&state_directory)?.permissions().mode() & 0o777,
+            0o700
+        );
+        for path in [
+            database.clone(),
+            sqlite_sidecar(&database, "-wal"),
+            sqlite_sidecar(&database, "-shm"),
+        ] {
+            if path.exists() {
+                assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+            }
+        }
         Ok(())
     }
 

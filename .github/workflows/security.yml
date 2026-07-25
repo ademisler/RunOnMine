@@ -29,17 +29,8 @@ jobs:
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-audit,cargo-deny
-      - name: cargo-audit
-        run: |
-          cargo audit --no-yanked \
-            --ignore RUSTSEC-2026-0194 \
-            --ignore RUSTSEC-2026-0195
-      - name: Verify ignored advisories remain build-only dependencies
-        run: |
-          cargo tree --target all -i quick-xml@0.30.0 | tee /tmp/quick-xml-030.txt
-          cargo tree --target all -i quick-xml@0.39.4 | tee /tmp/quick-xml-039.txt
-          grep -F '[build-dependencies]' /tmp/quick-xml-030.txt
-          grep -F 'wayland-scanner' /tmp/quick-xml-039.txt
+      - name: Reject dependency advisories
+        run: cargo audit --deny warnings
       - run: cargo deny check
 
   secret-scan:

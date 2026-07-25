@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use fs2::FileExt as _;
 use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,50 @@ struct EncryptedSecretFile {
     values: BTreeMap<String, EncryptedValue>,
 }
 
+#[derive(Debug)]
+struct ProcessFileLock(File);
+
+impl ProcessFileLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!("refusing to use a symlinked encrypted secret store lock");
+        }
+        let parent = path.parent().context("secret lock path has no parent")?;
+        fs::create_dir_all(parent)?;
+        restrict_secret_directory(parent)?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)?
+        };
+        #[cfg(not(unix))]
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        restrict_secret_file(path)?;
+        file.lock_exclusive()
+            .context("failed to lock encrypted secret store")?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ProcessFileLock {
+    fn drop(&mut self) {
+        let _ignored = self.0.unlock();
+    }
+}
+
 pub struct EncryptedFileSecretStore {
     path: PathBuf,
     service: String,
@@ -107,6 +152,16 @@ impl EncryptedFileSecretStore {
         self.lock
             .lock()
             .map_err(|_| anyhow!("encrypted secret store lock is poisoned"))
+    }
+
+    fn file_lock_path(&self) -> PathBuf {
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        self.path.with_file_name(name)
+    }
+
+    fn process_file_lock(&self) -> Result<ProcessFileLock> {
+        ProcessFileLock::acquire(&self.file_lock_path())
     }
 
     fn load(&self) -> Result<EncryptedSecretFile> {
@@ -160,6 +215,7 @@ impl EncryptedFileSecretStore {
 impl SecretStore for EncryptedFileSecretStore {
     fn get(&self, name: &str) -> Result<Option<SecretString>> {
         let _guard = self.lock()?;
+        let _file_guard = self.process_file_lock()?;
         let file = self.load()?;
         let Some(value) = file.values.get(name) else {
             return Ok(None);
@@ -189,6 +245,7 @@ impl SecretStore for EncryptedFileSecretStore {
 
     fn set(&self, name: &str, value: &SecretString) -> Result<()> {
         let _guard = self.lock()?;
+        let _file_guard = self.process_file_lock()?;
         let mut file = self.load()?;
         let mut nonce = [0_u8; 24];
         rand::rng().fill_bytes(&mut nonce);
@@ -214,6 +271,7 @@ impl SecretStore for EncryptedFileSecretStore {
 
     fn delete(&self, name: &str) -> Result<()> {
         let _guard = self.lock()?;
+        let _file_guard = self.process_file_lock()?;
         let mut file = self.load()?;
         file.values.remove(name);
         self.save(&file)
@@ -248,6 +306,19 @@ fn decode_master_key(value: &str) -> Result<[u8; 32]> {
 }
 
 #[cfg(unix)]
+fn restrict_secret_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn restrict_secret_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn restrict_secret_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
@@ -263,6 +334,51 @@ fn restrict_secret_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_store_serializes_updates_across_instances() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("secrets.enc");
+        let first = std::sync::Arc::new(EncryptedFileSecretStore {
+            path: path.clone(),
+            service: "test".to_owned(),
+            key: Zeroizing::new([9_u8; 32]),
+            lock: Mutex::new(()),
+        });
+        let second = std::sync::Arc::new(EncryptedFileSecretStore {
+            path,
+            service: "test".to_owned(),
+            key: Zeroizing::new([9_u8; 32]),
+            lock: Mutex::new(()),
+        });
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for (prefix, store) in [("first", first.clone()), ("second", second.clone())] {
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || -> Result<()> {
+                barrier.wait();
+                for index in 0..25 {
+                    store.set(
+                        &format!("{prefix}-{index}"),
+                        &SecretString::from(format!("secret-{index}")),
+                    )?;
+                }
+                Ok(())
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread
+                .join()
+                .map_err(|_| anyhow!("secret writer thread panicked"))??;
+        }
+        for prefix in ["first", "second"] {
+            for index in 0..25 {
+                assert!(first.get(&format!("{prefix}-{index}"))?.is_some());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn encrypted_store_round_trip_does_not_write_plaintext() -> Result<()> {

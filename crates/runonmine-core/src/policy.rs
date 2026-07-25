@@ -305,7 +305,7 @@ fn resource_matches(matcher: &ResourceMatcher, resource: &ResourceContext<'_>) -
             path == actual
         }
         (ResourceMatcher::CommandPrefix { prefix }, ResourceContext::Command(actual)) => {
-            actual.starts_with(prefix)
+            command_prefix_matches(prefix, actual)
         }
         _ => false,
     }
@@ -315,6 +315,20 @@ fn same_origin(left: &Url, right: &Url) -> bool {
     left.scheme() == right.scheme()
         && left.host_str() == right.host_str()
         && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn command_prefix_matches(prefix: &str, actual: &str) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    if prefix.chars().last().is_some_and(char::is_whitespace) {
+        return actual.starts_with(prefix);
+    }
+    actual == prefix
+        || actual
+            .strip_prefix(prefix)
+            .and_then(|remainder| remainder.chars().next())
+            .is_some_and(char::is_whitespace)
 }
 
 fn apply_remote_safety_ceiling(
@@ -450,6 +464,18 @@ mod tests {
                 .mode,
             PolicyMode::Deny
         );
+    }
+
+    #[test]
+    fn command_prefix_requires_a_token_boundary() {
+        assert!(command_prefix_matches("cargo test", "cargo test"));
+        assert!(command_prefix_matches(
+            "cargo test",
+            "cargo test --workspace"
+        ));
+        assert!(!command_prefix_matches("cargo test", "cargo testing"));
+        assert!(command_prefix_matches("rm ", "rm -rf tmp"));
+        assert!(!command_prefix_matches("", "anything"));
     }
 
     #[test]

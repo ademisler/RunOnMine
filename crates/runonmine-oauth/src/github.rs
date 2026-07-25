@@ -29,7 +29,7 @@ pub struct GitHubApiOwnerVerifier {
     client_id: String,
     client_secret: SecretString,
     owner_login: String,
-    owner_id: Option<u64>,
+    owner_id: u64,
 }
 
 impl std::fmt::Debug for GitHubApiOwnerVerifier {
@@ -49,13 +49,14 @@ impl GitHubApiOwnerVerifier {
         client_id: String,
         client_secret: SecretString,
         owner_login: &str,
-        owner_id: Option<u64>,
+        owner_id: u64,
     ) -> Result<Self, OAuthError> {
         let owner_login = owner_login.trim().to_owned();
         if client_id.trim().is_empty()
             || client_secret.expose_secret().is_empty()
             || owner_login.is_empty()
             || owner_login.len() > 39
+            || owner_id == 0
         {
             return Err(OAuthError::configuration());
         }
@@ -136,7 +137,7 @@ impl GitHubOwnerVerifier for GitHubApiOwnerVerifier {
         }
         let user: GitHubUserResponse = bounded_json(user_response).await?;
         let login_matches = user.login.eq_ignore_ascii_case(&self.owner_login);
-        let id_matches = self.owner_id.is_none_or(|owner_id| owner_id == user.id);
+        let id_matches = self.owner_id == user.id;
         if !login_matches || !id_matches {
             return Err(OAuthError::access_denied());
         }

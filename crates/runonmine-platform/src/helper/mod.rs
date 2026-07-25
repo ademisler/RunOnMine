@@ -653,11 +653,7 @@ fn validate_privileged_program_ownership(_path: &Path, _metadata: &fs::Metadata)
 fn require_privileged_identity() -> Result<()> {
     #[cfg(unix)]
     {
-        let output = std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .context("failed to determine the effective user id")?;
-        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "0" {
+        if !nix::unistd::geteuid().is_root() {
             bail!("the privileged helper must run as root");
         }
         Ok(())
@@ -689,18 +685,9 @@ fn require_installer_identity() -> Result<()> {
 
 #[cfg(unix)]
 fn current_user_identity() -> Result<OwnerIdentity> {
-    let output = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .context("failed to determine the current user id")?;
-    if !output.status.success() {
-        bail!("failed to determine the current user id");
-    }
-    let uid = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .context("current user id is invalid")?;
-    let owner = OwnerIdentity::UnixUid { uid };
+    let owner = OwnerIdentity::UnixUid {
+        uid: nix::unistd::geteuid().as_raw(),
+    };
     owner.validate()?;
     Ok(owner)
 }

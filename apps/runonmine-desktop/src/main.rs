@@ -1,6 +1,10 @@
 #[cfg(feature = "desktop-ui")]
 mod connector_wizard;
 #[cfg(feature = "desktop-ui")]
+mod credential_update;
+#[cfg(feature = "desktop-ui")]
+mod desktop_process;
+#[cfg(feature = "desktop-ui")]
 mod policy_editor;
 #[cfg(feature = "desktop-ui")]
 mod theme;
@@ -8,10 +12,7 @@ mod theme;
 #[cfg(feature = "desktop-ui")]
 mod desktop {
     use std::collections::HashSet;
-    use std::io::Write as _;
     use std::path::PathBuf;
-    use std::process::Stdio;
-    use std::sync::mpsc::{self, Receiver};
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
@@ -24,6 +25,8 @@ mod desktop {
     use secrecy::SecretString;
 
     use crate::connector_wizard::{ConnectorCommand, ConnectorWizardState, rotation_label};
+    use crate::credential_update::replace_secrets_transactionally;
+    use crate::desktop_process::{BackgroundCliTask, run_cli};
     use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
     use crate::theme::{self, Icon as UiIcon, StatusTone};
     use runonmine_oauth::{OAuthSession, RegisteredClient, SqliteOAuthStore};
@@ -117,7 +120,7 @@ mod desktop {
         selected_tab: Tab,
         root_input: String,
         diagnostics: String,
-        diagnostic_rx: Option<Receiver<std::result::Result<String, String>>>,
+        diagnostic_rx: Option<BackgroundCliTask>,
         pending_client_delete: Option<String>,
         pending_connector_delete: Option<String>,
         pending_credential_update: Option<(String, ConnectorKind)>,
@@ -125,7 +128,7 @@ mod desktop {
         credential_secret: String,
         policy_editor: PolicyEditorState,
         connector_wizard: ConnectorWizardState,
-        connector_rx: Option<Receiver<std::result::Result<String, String>>>,
+        connector_rx: Option<BackgroundCliTask>,
         tray: Option<TrayIcon>,
         open_menu_id: Option<MenuId>,
         lock_menu_id: Option<MenuId>,
@@ -431,14 +434,11 @@ mod desktop {
                 bail!("Another connector operation is already running");
             }
             let cli = sibling_cli()?;
-            let (sender, receiver) = mpsc::channel();
-            std::thread::spawn(move || {
-                let result =
-                    run_cli_with_input(&cli, &command.arguments, command.stdin_secret.as_deref())
-                        .map_err(|error| error.to_string());
-                let _ignored = sender.send(result);
-            });
-            self.connector_rx = Some(receiver);
+            self.connector_rx = Some(BackgroundCliTask::spawn(
+                cli,
+                command.arguments,
+                command.stdin_secret,
+            ));
             "Connector operation is running…".clone_into(&mut self.diagnostics);
             Ok(())
         }
@@ -446,8 +446,8 @@ mod desktop {
         fn poll_connector_command(&mut self) {
             let result = self
                 .connector_rx
-                .as_ref()
-                .and_then(|receiver| receiver.try_recv().ok());
+                .as_mut()
+                .and_then(BackgroundCliTask::try_take);
             if let Some(result) = result {
                 self.connector_rx = None;
                 self.connector_wizard.clear_secrets();
@@ -509,16 +509,20 @@ mod desktop {
                     if client_id.is_empty() || secret.is_empty() {
                         bail!("GitHub client ID and client secret are required");
                     }
-                    secrets.set(
-                        &format!("connector.{connector_id}.github_client_id"),
-                        &SecretString::from(client_id.to_owned()),
+                    let revoked = replace_secrets_transactionally(
+                        secrets.as_ref(),
+                        &[
+                            (
+                                format!("connector.{connector_id}.github_client_id"),
+                                SecretString::from(client_id.to_owned()),
+                            ),
+                            (
+                                format!("connector.{connector_id}.github_client_secret"),
+                                SecretString::from(secret.to_owned()),
+                            ),
+                        ],
+                        || Ok(SqliteOAuthStore::open(&paths.state_db())?.emergency_revoke_all()?),
                     )?;
-                    secrets.set(
-                        &format!("connector.{connector_id}.github_client_secret"),
-                        &SecretString::from(secret.to_owned()),
-                    )?;
-                    let revoked =
-                        SqliteOAuthStore::open(&paths.state_db())?.emergency_revoke_all()?;
                     self.diagnostics = format!(
                         "Updated GitHub credentials and revoked {revoked} OAuth token(s). Restart the agent to apply the new credentials."
                     );
@@ -528,9 +532,13 @@ mod desktop {
                     if secret.is_empty() {
                         bail!("OpenAI runtime API key is required");
                     }
-                    secrets.set(
-                        &format!("connector.{connector_id}.runtime_api_key"),
-                        &SecretString::from(secret.to_owned()),
+                    replace_secrets_transactionally(
+                        secrets.as_ref(),
+                        &[(
+                            format!("connector.{connector_id}.runtime_api_key"),
+                            SecretString::from(secret.to_owned()),
+                        )],
+                        || Ok(()),
                     )?;
                     "Updated the OpenAI runtime API key. Restart the agent to reconnect."
                         .clone_into(&mut self.diagnostics);
@@ -548,26 +556,11 @@ mod desktop {
                 return Ok(());
             }
             let cli = sibling_cli()?;
-            let (sender, receiver) = mpsc::channel();
-            std::thread::spawn(move || {
-                let result = std::process::Command::new(cli)
-                    .arg("doctor")
-                    .output()
-                    .map_err(|error| error.to_string())
-                    .and_then(|output| {
-                        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                        if !output.stderr.is_empty() {
-                            text.push_str(&String::from_utf8_lossy(&output.stderr));
-                        }
-                        if output.status.success() {
-                            Ok(text)
-                        } else {
-                            Err(text)
-                        }
-                    });
-                let _ignored = sender.send(result);
-            });
-            self.diagnostic_rx = Some(receiver);
+            self.diagnostic_rx = Some(BackgroundCliTask::spawn(
+                cli,
+                vec!["doctor".to_owned()],
+                None,
+            ));
             "Doctor is running…".clone_into(&mut self.diagnostics);
             Ok(())
         }
@@ -575,8 +568,8 @@ mod desktop {
         fn poll_doctor(&mut self) {
             let result = self
                 .diagnostic_rx
-                .as_ref()
-                .and_then(|receiver| receiver.try_recv().ok());
+                .as_mut()
+                .and_then(BackgroundCliTask::try_take);
             if let Some(result) = result {
                 self.diagnostics = result.unwrap_or_else(|error| error);
                 self.diagnostic_rx = None;
@@ -1924,7 +1917,10 @@ mod desktop {
             });
             sidebar.add_space(20.0);
 
-            let setup_required = self.config.is_none();
+            let setup_required = self
+                .config
+                .as_ref()
+                .is_none_or(|config| config.allowed_roots.is_empty());
             let setup_response = egui::Frame::new()
                 .fill(theme::SURFACE_ALT)
                 .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -2216,59 +2212,17 @@ mod desktop {
         } else {
             directory.join("runonmine")
         };
-        if !cli.is_file() {
-            bail!("RunOnMine CLI is not installed beside the desktop application");
+        let metadata = cli
+            .symlink_metadata()
+            .context("RunOnMine CLI is not installed beside the desktop application")?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("RunOnMine CLI must be a regular, non-symlink sibling executable");
         }
         Ok(cli)
     }
 
     fn run_cli_capture(arguments: &[String]) -> Result<String> {
-        let output = std::process::Command::new(sibling_cli()?)
-            .args(arguments)
-            .output()?;
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        if !output.stderr.is_empty() {
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-        }
-        if !output.status.success() {
-            bail!("{text}");
-        }
-        Ok(text)
-    }
-
-    fn run_cli_with_input(
-        cli: &PathBuf,
-        arguments: &[String],
-        secret: Option<&str>,
-    ) -> Result<String> {
-        let mut command = std::process::Command::new(cli);
-        command
-            .args(arguments)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if secret.is_some() {
-            command.stdin(Stdio::piped());
-        } else {
-            command.stdin(Stdio::null());
-        }
-        let mut child = command.spawn()?;
-        if let Some(secret) = secret {
-            let mut stdin = child
-                .stdin
-                .take()
-                .context("Failed to open connector command input")?;
-            stdin.write_all(secret.as_bytes())?;
-            stdin.write_all(b"\n")?;
-        }
-        let output = child.wait_with_output()?;
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        if !output.stderr.is_empty() {
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-        }
-        if !output.status.success() {
-            bail!("{text}");
-        }
-        Ok(text)
+        run_cli(&sibling_cli()?, arguments, None)
     }
 
     fn app_icon() -> Result<Icon> {

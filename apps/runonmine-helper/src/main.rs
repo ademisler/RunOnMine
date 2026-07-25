@@ -197,3 +197,56 @@ mod windows_service_host {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::*;
+
+    #[test]
+    fn install_rejects_conflicting_owner_identities() {
+        assert!(
+            Cli::try_parse_from([
+                "runonmine-helper",
+                "install",
+                "--owner-uid",
+                "1000",
+                "--owner-sid",
+                "S-1-5-21-1-2-3-1001",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn install_preserves_absolute_allowlisted_programs() -> Result<()> {
+        let cli = Cli::try_parse_from([
+            "runonmine-helper",
+            "install",
+            "--owner-uid",
+            "1000",
+            "--allow-program",
+            "/usr/bin/example",
+        ])?;
+        let Command::Install {
+            owner_uid,
+            owner_sid,
+            allowed_programs,
+        } = cli.command
+        else {
+            anyhow::bail!("unexpected helper command");
+        };
+        assert_eq!(owner_uid, Some(1000));
+        assert!(owner_sid.is_none());
+        assert_eq!(allowed_programs, vec![PathBuf::from("/usr/bin/example")]);
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_serve_command_remains_parseable_for_service_managers() -> Result<()> {
+        let cli = Cli::try_parse_from(["runonmine-helper", "serve"])?;
+        assert!(matches!(cli.command, Command::Serve));
+        Ok(())
+    }
+}

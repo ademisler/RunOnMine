@@ -81,8 +81,8 @@ impl BinaryDiscovery {
         Ok(None)
     }
 
-    /// Discovers a binary in strict priority order: explicit path, `RunOnMine`'s
-    /// managed directories, then the current process `PATH`.
+    /// Discovers a binary only from an explicit path or `RunOnMine`'s managed
+    /// directories. Ambient `PATH` entries are deliberately outside the trust boundary.
     pub fn discover(
         &self,
         kind: BinaryKind,
@@ -99,15 +99,6 @@ impl BinaryDiscovery {
             }
         }
 
-        let Some(path_value) = std::env::var_os("PATH") else {
-            return Ok(None);
-        };
-        for directory in std::env::split_paths(&path_value) {
-            let candidate = directory.join(kind.executable_name());
-            if candidate.exists() {
-                return InstalledBinary::from_verified_path(kind, &candidate).map(Some);
-            }
-        }
         Ok(None)
     }
 }
@@ -334,6 +325,29 @@ mod tests {
     fn profile_validation_rejects_option_injection() {
         assert!(validate_profile("local-stdio").is_ok());
         assert!(validate_profile("--help value").is_err());
+    }
+
+    #[test]
+    fn discovery_ignores_unmanaged_binaries() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let unmanaged = directory
+            .path()
+            .join(BinaryKind::Cloudflared.executable_name());
+        std::fs::write(&unmanaged, b"unmanaged")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&unmanaged, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let discovery = BinaryDiscovery::new(Vec::new());
+        assert!(discovery.discover(BinaryKind::Cloudflared, None)?.is_none());
+        assert_eq!(
+            discovery
+                .discover(BinaryKind::Cloudflared, Some(&unmanaged))?
+                .map(|binary| binary.path),
+            Some(unmanaged.canonicalize()?)
+        );
+        Ok(())
     }
 
     #[cfg(unix)]

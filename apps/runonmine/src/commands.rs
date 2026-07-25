@@ -664,7 +664,7 @@ pub(super) async fn doctor() -> Result<()> {
                 if connector
                     .oauth_owner
                     .as_ref()
-                    .and_then(|owner| owner.github_id)
+                    .map(|owner| owner.github_id)
                     .is_none_or(|id| id == 0)
                 {
                     println!("{}: immutable GitHub owner ID missing", connector.id);
@@ -836,24 +836,22 @@ pub(super) fn sibling_executable(name: &str) -> Result<PathBuf> {
 pub(super) fn install_admin_helper(helper: &Path, allowed_programs: &[PathBuf]) -> Result<()> {
     use std::ffi::OsString;
 
-    let output = ProcessCommand::new("id")
-        .arg("-u")
-        .output()
-        .context("failed to determine the current user id")?;
-    if !output.status.success() {
-        bail!("failed to determine the current user id");
-    }
-    let effective_uid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let owner_uid = if effective_uid == "0" {
+    let effective_uid = nix::unistd::geteuid().as_raw();
+    let owner_uid = if effective_uid == 0 {
         std::env::var("SUDO_UID")
             .context("install as your normal account or provide a sudo caller identity")?
+            .parse::<u32>()
+            .context("SUDO_UID is invalid")?
     } else {
         effective_uid
     };
+    if owner_uid == 0 {
+        bail!("the privileged helper owner must be a non-root user");
+    }
     let mut arguments = vec![
         OsString::from("install"),
         OsString::from("--owner-uid"),
-        OsString::from(owner_uid),
+        OsString::from(owner_uid.to_string()),
     ];
     for program in allowed_programs {
         arguments.push(OsString::from("--allow-program"));
@@ -884,8 +882,13 @@ pub(super) fn install_admin_helper(helper: &Path, allowed_programs: &[PathBuf]) 
 
 #[cfg(unix)]
 pub(super) fn run_elevated_helper(helper: &Path, arguments: &[std::ffi::OsString]) -> Result<()> {
+    let sudo = ["/usr/bin/sudo", "/bin/sudo"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .context("sudo was not found in a trusted system location")?;
     run_process(
-        ProcessCommand::new("sudo")
+        ProcessCommand::new(sudo)
             .arg("--")
             .arg(helper)
             .args(arguments),

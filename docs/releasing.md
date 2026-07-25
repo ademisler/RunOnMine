@@ -8,7 +8,7 @@ separate owner decision and is never changed by CI.
 Before creating a tag:
 
 1. run formatting, `xtask verify-versions`, Clippy with warnings denied, and the complete test suite;
-2. run `cargo audit`, `cargo deny check`, and a full-history secret scan;
+2. run `cargo audit --deny warnings`, `cargo deny check`, and a full-history secret scan;
 3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, and Windows x86_64 builds;
 4. complete install, restart, connect, tool-call, and uninstall acceptance on a Mac, clean Linux VPS, and Windows VM;
 5. confirm no MacMCP service, file, or port was changed;
@@ -29,13 +29,15 @@ It produces:
 - a universal macOS DMG;
 - Linux x86_64 and aarch64 DEB packages;
 - a Windows x86_64 NSIS installer;
-- combined unsigned portable archives;
-- CycloneDX JSON SBOM and SHA-256 files.
+- combined unsigned portable archives with an exact target-specific binary manifest;
+- CycloneDX JSON SBOMs containing component references, dependency edges, Cargo.lock package checksums where available, and the Cargo.lock integrity hash;
+- SHA-256 files for release artifacts.
 
-The workflow opens a draft prerelease only. Artifacts are deliberately unsigned
-and must not be described as signed, notarized, or trusted by the operating
-system. Publishing the draft and making the repository public both require
-separate owner approval.
+The workflow opens a draft prerelease only. Artifacts are deliberately unsigned and must not be described as signed, notarized, or trusted by the operating system. Signing and notarization require external publisher credentials and a separate owner decision; CI cannot manufacture those credentials. Publishing the draft and making the repository public both require separate owner approval.
+
+## Hosted platform validation
+
+`CI` always runs the supported Linux headless workspace plus the desktop crate's no-UI contract on the hardened self-hosted runner. `Platform CI` also runs the Linux platform contract there. The full desktop-enabled macOS/Windows and ARM headless matrix runs for manual dispatches, or automatically when the repository variable `ENABLE_GITHUB_HOSTED_PLATFORM_CI` is set to `true`. This guard prevents account billing or spending-limit failures from appearing as product failures while keeping the full matrix ready to enable without changing workflow code. Linux desktop UI dependencies are intentionally not part of the product's headless Linux target.
 
 ## Local packaging helpers
 
