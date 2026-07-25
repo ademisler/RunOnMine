@@ -151,3 +151,97 @@ fn field(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
         ui.add(edit);
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloudflare_secret_is_stdin_only() {
+        let wizard = ConnectorWizardState {
+            kind: WizardKind::CloudflareOAuth,
+            hostname: "mcp.example.com".to_owned(),
+            tunnel_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            credentials_file: "/tmp/credentials.json".to_owned(),
+            github_client_id: "client-id".to_owned(),
+            github_client_secret: "super-secret".to_owned(),
+            github_owner: "owner".to_owned(),
+            github_owner_id: "42".to_owned(),
+            ..ConnectorWizardState::default()
+        };
+        let command = wizard.command();
+        assert_eq!(command.stdin_secret.as_deref(), Some("super-secret"));
+        assert!(
+            !command
+                .arguments
+                .iter()
+                .any(|value| value == "super-secret")
+        );
+        assert!(
+            command
+                .arguments
+                .iter()
+                .any(|value| value == "--client-secret-stdin")
+        );
+    }
+
+    #[test]
+    fn openai_secret_is_stdin_only_and_profile_defaults() {
+        let wizard = ConnectorWizardState {
+            kind: WizardKind::OpenAi,
+            tunnel_id: "tunnel".to_owned(),
+            openai_api_key: "runtime-secret".to_owned(),
+            ..ConnectorWizardState::default()
+        };
+        let command = wizard.command();
+        assert_eq!(command.stdin_secret.as_deref(), Some("runtime-secret"));
+        assert!(
+            !command
+                .arguments
+                .iter()
+                .any(|value| value == "runtime-secret")
+        );
+        let profile_index = command
+            .arguments
+            .iter()
+            .position(|value| value == "--profile");
+        assert_eq!(
+            profile_index
+                .and_then(|index| command.arguments.get(index + 1))
+                .map(String::as_str),
+            Some("runonmine")
+        );
+    }
+
+    #[test]
+    fn rotation_actions_match_remote_connector_types() {
+        assert_eq!(
+            rotation_label(ConnectorKind::CloudflareQuick),
+            Some("Rotate secret URL")
+        );
+        assert_eq!(
+            rotation_label(ConnectorKind::CloudflareOauth),
+            Some("Update GitHub credentials")
+        );
+        assert_eq!(
+            rotation_label(ConnectorKind::OpenAiTunnel),
+            Some("Update runtime API key")
+        );
+        assert_eq!(rotation_label(ConnectorKind::LocalStdio), None);
+        assert_eq!(rotation_label(ConnectorKind::LocalHttp), None);
+    }
+
+    #[test]
+    fn clear_secrets_removes_sensitive_fields_only() {
+        let mut wizard = ConnectorWizardState {
+            hostname: "mcp.example.com".to_owned(),
+            github_client_secret: "github-secret".to_owned(),
+            openai_api_key: "openai-secret".to_owned(),
+            ..ConnectorWizardState::default()
+        };
+        wizard.clear_secrets();
+        assert!(wizard.github_client_secret.is_empty());
+        assert!(wizard.openai_api_key.is_empty());
+        assert_eq!(wizard.hostname, "mcp.example.com");
+    }
+}

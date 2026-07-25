@@ -305,3 +305,70 @@ fn describe_rule(rule: &PolicyRule) -> String {
         .map_or_else(|| "any capability".to_owned(), |item| format!("{item:?}"));
     format!("{principal} · {resource} · {tool} · {capability}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_scoped_oauth_filesystem_rule() -> Result<()> {
+        let editor = PolicyEditorState {
+            connector_id: "connector".to_owned(),
+            mode: PolicyMode::Allow,
+            principal_kind: PrincipalKind::OAuthClient,
+            principal_value: "trusted-client".to_owned(),
+            resource_kind: ResourceKind::FilesystemPrefix,
+            resource_value: "/safe/project".to_owned(),
+            tool: "fs_read".to_owned(),
+            capability: Some(Capability::FilesRead),
+        };
+        let rule = editor.build_rule()?;
+        assert_eq!(rule.mode, PolicyMode::Allow);
+        assert_eq!(
+            rule.principal,
+            PrincipalMatcher::OAuthClient {
+                client_id: "trusted-client".to_owned()
+            }
+        );
+        assert_eq!(
+            rule.resource,
+            ResourceMatcher::FilesystemPrefix {
+                path: PathBuf::from("/safe/project")
+            }
+        );
+        assert_eq!(rule.tool.as_deref(), Some("fs_read"));
+        assert_eq!(rule.capability, Some(Capability::FilesRead));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_relative_paths_and_missing_identity_values() {
+        let relative = PolicyEditorState {
+            resource_kind: ResourceKind::FilesystemPrefix,
+            resource_value: "relative/path".to_owned(),
+            ..PolicyEditorState::default()
+        };
+        assert!(relative.build_rule().is_err());
+
+        let missing_client = PolicyEditorState {
+            principal_kind: PrincipalKind::OAuthClient,
+            ..PolicyEditorState::default()
+        };
+        assert!(missing_client.build_rule().is_err());
+    }
+
+    #[test]
+    fn generated_rule_passes_full_config_validation() -> Result<()> {
+        let editor = PolicyEditorState {
+            mode: PolicyMode::Ask,
+            principal_kind: PrincipalKind::Local,
+            resource_kind: ResourceKind::CommandPrefix,
+            resource_value: "cargo test".to_owned(),
+            capability: Some(Capability::ShellExec),
+            ..PolicyEditorState::default()
+        };
+        let mut config = AppConfig::default();
+        config.connectors[0].policy_rules.push(editor.build_rule()?);
+        config.validate()
+    }
+}
