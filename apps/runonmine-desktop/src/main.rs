@@ -2,6 +2,8 @@
 mod connector_wizard;
 #[cfg(feature = "desktop-ui")]
 mod policy_editor;
+#[cfg(feature = "desktop-ui")]
+mod theme;
 
 #[cfg(feature = "desktop-ui")]
 mod desktop {
@@ -23,6 +25,7 @@ mod desktop {
 
     use crate::connector_wizard::{ConnectorCommand, ConnectorWizardState, rotation_label};
     use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
+    use crate::theme::{self, StatusTone};
     use runonmine_oauth::{OAuthSession, RegisteredClient, SqliteOAuthStore};
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -31,14 +34,17 @@ mod desktop {
     pub fn run() -> Result<()> {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([980.0, 700.0])
-                .with_min_inner_size([760.0, 520.0]),
+                .with_inner_size([1180.0, 780.0])
+                .with_min_inner_size([920.0, 620.0]),
             ..Default::default()
         };
         eframe::run_native(
             "RunOnMine",
             options,
-            Box::new(|_context| Ok(Box::new(RunOnMineDesktop::new()))),
+            Box::new(|context| {
+                theme::apply(&context.egui_ctx);
+                Ok(Box::new(RunOnMineDesktop::new()))
+            }),
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
@@ -53,6 +59,44 @@ mod desktop {
         OAuth,
         Audit,
         Diagnostics,
+    }
+
+    impl Tab {
+        const ALL: [(Self, &'static str, &'static str); 7] = [
+            (Self::Overview, "◫", "Overview"),
+            (Self::Approvals, "✓", "Approvals"),
+            (Self::Connections, "⌁", "Connections"),
+            (Self::Permissions, "◈", "Permissions"),
+            (Self::OAuth, "◎", "OAuth"),
+            (Self::Audit, "≡", "Audit log"),
+            (Self::Diagnostics, "◇", "Diagnostics"),
+        ];
+
+        const fn title(self) -> &'static str {
+            match self {
+                Self::Overview => "Overview",
+                Self::Approvals => "Approvals",
+                Self::Connections => "Connections",
+                Self::Permissions => "Permissions",
+                Self::OAuth => "OAuth access",
+                Self::Audit => "Audit log",
+                Self::Diagnostics => "Diagnostics",
+            }
+        }
+
+        const fn subtitle(self) -> &'static str {
+            match self {
+                Self::Overview => "Your machine access posture at a glance.",
+                Self::Approvals => "Review actions that require your local confirmation.",
+                Self::Connections => {
+                    "Manage the secure paths AI clients use to reach this machine."
+                }
+                Self::Permissions => "Control roots, presets, identities, tools, and resources.",
+                Self::OAuth => "Review registered clients and active authorization sessions.",
+                Self::Audit => "Inspect recent tool activity and verify log integrity.",
+                Self::Diagnostics => "Check installation health, services, and connector status.",
+            }
+        }
     }
 
     struct RunOnMineDesktop {
@@ -557,132 +601,274 @@ mod desktop {
             }
         }
 
-        fn show_tabs(&mut self, ui: &mut egui::Ui) {
+        #[allow(clippy::too_many_lines)]
+        fn show_overview(&mut self, ui: &mut egui::Ui) {
+            let Some(config) = &self.config else {
+                theme::empty_state(
+                    ui,
+                    "◇",
+                    "Configuration unavailable",
+                    "Run setup before opening the control center.",
+                );
+                return;
+            };
+
             ui.horizontal_wrapped(|ui| {
-                for (tab, label) in [
-                    (Tab::Overview, "Overview"),
-                    (Tab::Approvals, "Approvals"),
-                    (Tab::Connections, "Connections"),
-                    (Tab::Permissions, "Permissions"),
-                    (Tab::OAuth, "OAuth"),
-                    (Tab::Audit, "Audit"),
-                    (Tab::Diagnostics, "Diagnostics"),
-                ] {
-                    ui.selectable_value(&mut self.selected_tab, tab, label);
+                theme::metric(
+                    ui,
+                    "Enabled connectors",
+                    config.connectors.iter().filter(|item| item.enabled).count(),
+                    StatusTone::Info,
+                );
+                theme::metric(
+                    ui,
+                    "Allowed roots",
+                    config.allowed_roots.len(),
+                    StatusTone::Neutral,
+                );
+                theme::metric(
+                    ui,
+                    "Pending approvals",
+                    self.pending.len(),
+                    if self.pending.is_empty() {
+                        StatusTone::Success
+                    } else {
+                        StatusTone::Warning
+                    },
+                );
+                theme::metric(
+                    ui,
+                    "OAuth clients",
+                    self.oauth_clients.len(),
+                    StatusTone::Neutral,
+                );
+            });
+            ui.add_space(18.0);
+
+            ui.columns(2, |columns| {
+                theme::card(&mut columns[0], |ui| {
+                    theme::section_header(
+                        ui,
+                        "Security posture",
+                        "Live checks for the local agent and audit store.",
+                    );
+                    status_row(
+                        ui,
+                        "Agent service",
+                        if self.agent_reachable {
+                            ("Online", StatusTone::Success)
+                        } else {
+                            ("Stopped", StatusTone::Neutral)
+                        },
+                    );
+                    status_row(
+                        ui,
+                        "Audit chain",
+                        match self.audit_valid {
+                            Some(true) => ("Verified", StatusTone::Success),
+                            Some(false) => ("Failed", StatusTone::Danger),
+                            None => ("Unknown", StatusTone::Warning),
+                        },
+                    );
+                    status_row(
+                        ui,
+                        "Exact-action grants",
+                        if self.persistent_grants.is_empty() {
+                            ("None", StatusTone::Neutral)
+                        } else {
+                            ("Active", StatusTone::Warning)
+                        },
+                    );
+                });
+
+                theme::card(&mut columns[1], |ui| {
+                    theme::section_header(
+                        ui,
+                        "Protection model",
+                        "The boundaries that remain enforced for every connector.",
+                    );
+                    for item in [
+                        "Remote connectors cannot run administrator actions.",
+                        "Destructive remote actions always require local approval.",
+                        "File access stays inside explicitly selected roots.",
+                        "Secrets remain in the operating-system credential store.",
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("✓").color(theme::ACCENT));
+                            ui.label(egui::RichText::new(item).size(13.0).color(theme::TEXT));
+                        });
+                    }
+                });
+            });
+
+            ui.add_space(18.0);
+            theme::card(ui, |ui| {
+                theme::section_header(
+                    ui,
+                    "Recent activity",
+                    "The latest locally recorded tool decisions.",
+                );
+                if self.audit.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No activity has been recorded yet.")
+                            .color(theme::MUTED),
+                    );
+                } else {
+                    for record in self.audit.iter().rev().take(5) {
+                        ui.horizontal(|ui| {
+                            theme::status_badge(
+                                ui,
+                                &format!("{:?}", record.event.outcome),
+                                StatusTone::Neutral,
+                            );
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&record.event.tool_name)
+                                        .strong()
+                                        .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    egui::RichText::new(&record.event.summary)
+                                        .size(12.0)
+                                        .color(theme::MUTED),
+                                );
+                            });
+                        });
+                        ui.add_space(8.0);
+                    }
                 }
             });
         }
 
-        fn show_overview(&mut self, ui: &mut egui::Ui) {
-            let Some(config) = &self.config else {
-                ui.label("Configuration is unavailable.");
-                return;
-            };
-            ui.heading("Security overview");
-            egui::Grid::new("overview-grid")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("Agent");
-                    ui.label(if self.agent_reachable {
-                        "Reachable"
-                    } else {
-                        "Stopped"
-                    });
-                    ui.end_row();
-                    ui.label("Audit chain");
-                    ui.label(match self.audit_valid {
-                        Some(true) => "Valid",
-                        Some(false) => "FAILED",
-                        None => "Unknown",
-                    });
-                    ui.end_row();
-                    ui.label("Enabled connectors");
-                    ui.label(
-                        config
-                            .connectors
-                            .iter()
-                            .filter(|item| item.enabled)
-                            .count()
-                            .to_string(),
-                    );
-                    ui.end_row();
-                    ui.label("Allowed roots");
-                    ui.label(config.allowed_roots.len().to_string());
-                    ui.end_row();
-                    ui.label("Pending approvals");
-                    ui.label(self.pending.len().to_string());
-                    ui.end_row();
-                    ui.label("Persistent exact grants");
-                    ui.label(self.persistent_grants.len().to_string());
-                    ui.end_row();
-                    ui.label("OAuth clients");
-                    ui.label(self.oauth_clients.len().to_string());
-                    ui.end_row();
-                });
-            ui.add_space(16.0);
-            ui.label("RunOnMine only exposes capabilities permitted by local connector policy. Remote connectors cannot use administrator execution, external CDP, or private-network browser access.");
-        }
-
+        #[allow(clippy::too_many_lines)]
         fn show_approvals(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Local approvals");
-            ui.label("Only this application or the local CLI can approve AI tool calls.");
-            ui.add_space(8.0);
-            if self.pending.is_empty() {
-                ui.group(|ui| {
-                    ui.label("No tool calls are waiting for approval.");
-                });
-            }
-            let pending = self.pending.clone();
+            theme::section_header(
+                ui,
+                "Waiting for review",
+                "Approvals can only be resolved from this machine or the local CLI.",
+            );
             let mut action = None;
-            for request in pending {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(&request.tool_name);
-                        ui.label(format!("Connector: {}", request.connector_id));
+            if self.pending.is_empty() {
+                theme::empty_state(
+                    ui,
+                    "✓",
+                    "Nothing needs approval",
+                    "New sensitive actions will appear here with their exact target.",
+                );
+            } else {
+                for request in self.pending.clone() {
+                    theme::card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            theme::status_badge(ui, "Review required", StatusTone::Warning);
+                            ui.label(
+                                egui::RichText::new(&request.tool_name)
+                                    .size(16.0)
+                                    .strong()
+                                    .color(theme::TEXT),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Expires {}",
+                                            request.expires_at.to_rfc3339()
+                                        ))
+                                        .size(11.0)
+                                        .color(theme::MUTED),
+                                    );
+                                },
+                            );
+                        });
+                        ui.add_space(10.0);
+                        theme::subtle_card(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&request.argument_summary)
+                                    .monospace()
+                                    .color(theme::TEXT),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("Connector: {}", request.connector_id))
+                                    .size(11.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                        ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.add(theme::primary_button("Allow once")).clicked() {
+                                action = Some((request.id, ApprovalDecision::Once));
+                            }
+                            if ui.button("Allow for 10 minutes").clicked() {
+                                action = Some((request.id, ApprovalDecision::ForTenMinutes));
+                            }
+                            if ui.button("Always allow exact action").clicked() {
+                                action = Some((request.id, ApprovalDecision::Always));
+                            }
+                            if ui.add(theme::danger_button("Deny")).clicked() {
+                                action = Some((request.id, ApprovalDecision::Deny));
+                            }
+                        });
                     });
-                    ui.label(&request.argument_summary);
-                    ui.small(format!("Expires: {}", request.expires_at.to_rfc3339()));
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Allow once").clicked() {
-                            action = Some((request.id, ApprovalDecision::Once));
-                        }
-                        if ui.button("Allow exact action for 10 minutes").clicked() {
-                            action = Some((request.id, ApprovalDecision::ForTenMinutes));
-                        }
-                        if ui.button("Always allow this exact action").clicked() {
-                            action = Some((request.id, ApprovalDecision::Always));
-                        }
-                        if ui.button("Deny").clicked() {
-                            action = Some((request.id, ApprovalDecision::Deny));
-                        }
-                    });
-                });
-                ui.add_space(8.0);
+                    ui.add_space(10.0);
+                }
             }
             if let Some((id, decision)) = action {
                 let result = self.resolve(id, decision);
                 self.apply_result(result);
             }
 
-            ui.separator();
-            ui.heading("Persistent exact-action grants");
-            let grants = self.persistent_grants.clone();
-            if grants.is_empty() {
-                ui.label("No persistent grants.");
-            }
+            ui.add_space(22.0);
+            theme::section_header(
+                ui,
+                "Persistent exact-action grants",
+                "These grants match one connector, tool, and argument hash only.",
+            );
             let mut revoke = None;
-            for grant in grants {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(format!("{} · {}", grant.connector_id, grant.tool_name));
-                        if ui.button("Revoke").clicked() {
-                            revoke = Some(grant.clone());
-                        }
+            if self.persistent_grants.is_empty() {
+                theme::empty_state(
+                    ui,
+                    "◇",
+                    "No persistent grants",
+                    "Approving an exact action permanently will add it here.",
+                );
+            } else {
+                for grant in self.persistent_grants.clone() {
+                    theme::subtle_card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} · {}",
+                                        grant.connector_id, grant.tool_name
+                                    ))
+                                    .strong()
+                                    .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    egui::RichText::new(&grant.argument_summary)
+                                        .size(12.0)
+                                        .color(theme::MUTED),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("Hash {}", grant.argument_hash))
+                                        .size(10.0)
+                                        .monospace()
+                                        .color(theme::MUTED),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.add(theme::danger_button("Revoke")).clicked() {
+                                        revoke = Some(grant.clone());
+                                    }
+                                },
+                            );
+                        });
                     });
-                    ui.label(grant.argument_summary.clone());
-                    ui.small(format!("Hash: {}", grant.argument_hash));
-                });
+                    ui.add_space(8.0);
+                }
             }
             if let Some(grant) = revoke {
                 let result = self.revoke_grant(&grant);
@@ -692,19 +878,38 @@ mod desktop {
 
         #[allow(clippy::too_many_lines)]
         fn show_connections(&mut self, ui: &mut egui::Ui) {
-            ui.horizontal(|ui| {
-                ui.heading("Connections");
-                if ui
-                    .add_enabled(
-                        self.connector_rx.is_none(),
-                        egui::Button::new("Add connector…"),
-                    )
-                    .clicked()
-                {
-                    self.connector_wizard.open = true;
-                }
+            theme::card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Secure connector endpoints")
+                                .size(17.0)
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Secrets stay masked and are stored in the operating-system credential store.",
+                            )
+                            .size(12.0)
+                            .color(theme::MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(
+                                self.connector_rx.is_none(),
+                                theme::primary_button("Add connector"),
+                            )
+                            .clicked()
+                        {
+                            self.connector_wizard.open = true;
+                        }
+                    });
+                });
             });
-            ui.label("Connector secrets remain masked and are stored in the operating-system credential store.");
+            ui.add_space(16.0);
+
             let connectors = self
                 .config
                 .as_ref()
@@ -714,61 +919,132 @@ mod desktop {
             let mut rotate_quick = None;
             let mut remove = None;
             let mut update_credentials = None;
+
             for connector in connectors {
                 let confirming_delete =
                     self.pending_connector_delete.as_deref() == Some(&connector.id);
-                ui.group(|ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.strong(&connector.name);
-                        ui.label(format!("{:?}", connector.kind));
-                        ui.label(if connector.enabled { "Enabled" } else { "Disabled" });
-                        if ui
-                            .add_enabled(
-                                self.connector_rx.is_none(),
-                                egui::Button::new(if connector.enabled { "Disable" } else { "Enable" }),
-                            )
-                            .clicked()
-                        {
-                            toggle = Some((connector.id.clone(), !connector.enabled));
-                        }
-                        if let Some(label) = rotation_label(connector.kind)
-                            && ui.add_enabled(self.connector_rx.is_none(), egui::Button::new(label)).clicked()
-                        {
-                            match connector.kind {
-                                ConnectorKind::CloudflareQuick => rotate_quick = Some(connector.id.clone()),
-                                ConnectorKind::CloudflareOauth | ConnectorKind::OpenAiTunnel => {
-                                    update_credentials = Some((connector.id.clone(), connector.kind));
+                theme::card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&connector.name)
+                                        .size(17.0)
+                                        .strong()
+                                        .color(theme::TEXT),
+                                );
+                                theme::status_badge(
+                                    ui,
+                                    if connector.enabled {
+                                        "Enabled"
+                                    } else {
+                                        "Disabled"
+                                    },
+                                    if connector.enabled {
+                                        StatusTone::Success
+                                    } else {
+                                        StatusTone::Neutral
+                                    },
+                                );
+                                theme::status_badge(
+                                    ui,
+                                    &format!("{:?}", connector.kind),
+                                    StatusTone::Info,
+                                );
+                                theme::status_badge(
+                                    ui,
+                                    &format!("{:?}", connector.policy_preset),
+                                    StatusTone::Neutral,
+                                );
+                            });
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!("ID  {}", connector.id))
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(theme::MUTED),
+                            );
+                            if let Some(url) = &connector.public_base_url {
+                                ui.label(
+                                    egui::RichText::new(format!("Public endpoint  {url}"))
+                                        .size(12.0)
+                                        .color(theme::INFO),
+                                );
+                            }
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if confirming_delete {
+                                if ui.add(theme::danger_button("Confirm removal")).clicked() {
+                                    remove = Some(connector.id.clone());
                                 }
-                                _ => {}
+                                if ui.button("Cancel").clicked() {
+                                    self.pending_connector_delete = None;
+                                }
+                            } else {
+                                if !matches!(
+                                    connector.kind,
+                                    ConnectorKind::LocalStdio | ConnectorKind::LocalHttp
+                                ) && ui.add(theme::danger_button("Remove…")).clicked()
+                                {
+                                    self.pending_connector_delete = Some(connector.id.clone());
+                                }
+                                if let Some(label) = rotation_label(connector.kind)
+                                    && ui
+                                        .add_enabled(
+                                            self.connector_rx.is_none(),
+                                            egui::Button::new(label),
+                                        )
+                                        .clicked()
+                                {
+                                    match connector.kind {
+                                        ConnectorKind::CloudflareQuick => {
+                                            rotate_quick = Some(connector.id.clone());
+                                        }
+                                        ConnectorKind::CloudflareOauth
+                                        | ConnectorKind::OpenAiTunnel => {
+                                            update_credentials =
+                                                Some((connector.id.clone(), connector.kind));
+                                        }
+                                        ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => {}
+                                    }
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.connector_rx.is_none(),
+                                        egui::Button::new(if connector.enabled {
+                                            "Disable"
+                                        } else {
+                                            "Enable"
+                                        }),
+                                    )
+                                    .clicked()
+                                {
+                                    toggle = Some((connector.id.clone(), !connector.enabled));
+                                }
                             }
-                        }
-                        if confirming_delete {
-                            if ui.button("Confirm permanent removal").clicked() {
-                                remove = Some(connector.id.clone());
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.pending_connector_delete = None;
-                            }
-                        } else if !matches!(connector.kind, ConnectorKind::LocalStdio | ConnectorKind::LocalHttp)
-                            && ui.button("Remove…").clicked()
-                        {
-                            self.pending_connector_delete = Some(connector.id.clone());
-                        }
+                        });
                     });
-                    ui.small(format!("ID: {}", connector.id));
-                    ui.label(format!("Policy: {:?}", connector.policy_preset));
-                    if let Some(url) = connector.public_base_url {
-                        ui.label(format!("Public URL: {url}"));
-                    }
                     if confirming_delete {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(190, 45, 45),
-                            "This removes local credentials, persistent grants, and connector state. Live transports close after agent restart.",
-                        );
+                        ui.add_space(12.0);
+                        egui::Frame::new()
+                            .fill(theme::DANGER_SOFT)
+                            .stroke(egui::Stroke::new(1.0, theme::DANGER))
+                            .corner_radius(egui::CornerRadius::same(9))
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "This removes local credentials, persistent grants, and connector state. Live transports close after the agent restarts.",
+                                    )
+                                    .size(12.0)
+                                    .color(theme::DANGER),
+                                );
+                            });
                     }
                 });
-                ui.add_space(6.0);
+                ui.add_space(10.0);
             }
+
             if let Some((id, enable)) = toggle {
                 let result = self.toggle_connector(&id, enable);
                 self.apply_result(result);
@@ -793,22 +1069,47 @@ mod desktop {
                 egui::Window::new("Update connector credentials")
                     .open(&mut open)
                     .collapsible(false)
+                    .resizable(false)
+                    .default_width(520.0)
                     .show(ui.ctx(), |ui| {
-                        ui.label("The new secret is written directly to the operating-system credential store and is never displayed after saving.");
+                        theme::section_header(
+                            ui,
+                            "Replace stored credentials",
+                            "The new secret is written directly to the credential store and never displayed again.",
+                        );
                         if kind == ConnectorKind::CloudflareOauth {
-                            ui.horizontal(|ui| {
-                                ui.label("GitHub client ID");
-                                ui.text_edit_singleline(&mut self.credential_client_id);
-                            });
+                            ui.label(egui::RichText::new("GitHub client ID").size(12.0).color(theme::MUTED));
+                            ui.add_sized(
+                                [ui.available_width(), 36.0],
+                                egui::TextEdit::singleline(&mut self.credential_client_id),
+                            );
+                            ui.add_space(10.0);
                         }
+                        ui.label(
+                            egui::RichText::new(if kind == ConnectorKind::CloudflareOauth {
+                                "GitHub client secret"
+                            } else {
+                                "Runtime API key"
+                            })
+                            .size(12.0)
+                            .color(theme::MUTED),
+                        );
+                        ui.add_sized(
+                            [ui.available_width(), 36.0],
+                            egui::TextEdit::singleline(&mut self.credential_secret).password(true),
+                        );
+                        ui.add_space(14.0);
                         ui.horizontal(|ui| {
-                            ui.label(if kind == ConnectorKind::CloudflareOauth { "GitHub client secret" } else { "Runtime API key" });
-                            ui.add(egui::TextEdit::singleline(&mut self.credential_secret).password(true));
+                            if ui.add(theme::primary_button("Save and revoke old sessions")).clicked() {
+                                let result = self.update_connector_credentials(&connector_id, kind);
+                                self.apply_result(result);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.pending_credential_update = None;
+                                self.credential_client_id.clear();
+                                self.credential_secret.clear();
+                            }
                         });
-                        if ui.button("Save and revoke old sessions").clicked() {
-                            let result = self.update_connector_credentials(&connector_id, kind);
-                            self.apply_result(result);
-                        }
                     });
                 if !open {
                     self.pending_credential_update = None;
@@ -818,68 +1119,143 @@ mod desktop {
             }
         }
 
+        #[allow(clippy::too_many_lines)]
         fn show_permissions(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Filesystem roots");
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.root_input);
-                if ui.button("Add existing directory").clicked() {
-                    let result = self.add_root();
+            theme::card(ui, |ui| {
+                theme::section_header(
+                    ui,
+                    "Filesystem roots",
+                    "File tools cannot leave these explicitly selected directories.",
+                );
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [ui.available_width() - 170.0, 36.0],
+                        egui::TextEdit::singleline(&mut self.root_input)
+                            .hint_text("/absolute/path/to/project"),
+                    );
+                    if ui.add(theme::primary_button("Add directory")).clicked() {
+                        let result = self.add_root();
+                        self.apply_result(result);
+                    }
+                });
+                ui.add_space(12.0);
+                let roots = self
+                    .config
+                    .as_ref()
+                    .map(|config| config.allowed_roots.clone())
+                    .unwrap_or_default();
+                let mut remove = None;
+                if roots.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No roots selected. File tools remain unavailable.")
+                            .color(theme::MUTED),
+                    );
+                }
+                for root in roots {
+                    theme::subtle_card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(root.display().to_string())
+                                    .monospace()
+                                    .color(theme::TEXT),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.add(theme::danger_button("Remove")).clicked() {
+                                        remove = Some(root.clone());
+                                    }
+                                },
+                            );
+                        });
+                    });
+                    ui.add_space(7.0);
+                }
+                if let Some(root) = remove {
+                    let result = self.remove_root(&root);
                     self.apply_result(result);
                 }
             });
-            let roots = self
-                .config
-                .as_ref()
-                .map(|config| config.allowed_roots.clone())
-                .unwrap_or_default();
-            let mut remove = None;
-            for root in roots {
-                ui.horizontal(|ui| {
-                    ui.monospace(root.display().to_string());
-                    if ui.button("Remove").clicked() {
-                        remove = Some(root.clone());
-                    }
-                });
-            }
-            if let Some(root) = remove {
-                let result = self.remove_root(&root);
-                self.apply_result(result);
-            }
 
-            ui.separator();
-            ui.heading("Connector policy presets");
-            let connectors = self
-                .config
-                .as_ref()
-                .map(|config| config.connectors.clone())
-                .unwrap_or_default();
-            let mut preset_change = None;
-            for connector in connectors {
-                ui.horizontal(|ui| {
-                    ui.label(&connector.name);
-                    let mut selected = connector.policy_preset;
-                    egui::ComboBox::from_id_salt(format!("preset-{}", connector.id))
-                        .selected_text(format!("{selected:?}"))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut selected, PolicyPreset::Safe, "Safe");
-                            ui.selectable_value(
-                                &mut selected,
-                                PolicyPreset::Developer,
-                                "Developer",
+            ui.add_space(18.0);
+            theme::card(ui, |ui| {
+                theme::section_header(
+                    ui,
+                    "Connector policy presets",
+                    "Choose a baseline, then narrow it with advanced rules below.",
+                );
+                let connectors = self
+                    .config
+                    .as_ref()
+                    .map(|config| config.connectors.clone())
+                    .unwrap_or_default();
+                let mut preset_change = None;
+                for connector in connectors {
+                    theme::subtle_card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&connector.name)
+                                        .strong()
+                                        .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{:?}", connector.kind))
+                                        .size(11.0)
+                                        .color(theme::MUTED),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let mut selected = connector.policy_preset;
+                                    egui::ComboBox::from_id_salt(format!(
+                                        "preset-{}",
+                                        connector.id
+                                    ))
+                                    .selected_text(format!("{selected:?}"))
+                                    .width(150.0)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut selected,
+                                            PolicyPreset::Safe,
+                                            "Safe",
+                                        );
+                                        ui.selectable_value(
+                                            &mut selected,
+                                            PolicyPreset::Developer,
+                                            "Developer",
+                                        );
+                                        ui.selectable_value(
+                                            &mut selected,
+                                            PolicyPreset::Full,
+                                            "Full",
+                                        );
+                                    });
+                                    if selected != connector.policy_preset {
+                                        preset_change = Some((connector.id.clone(), selected));
+                                    }
+                                },
                             );
-                            ui.selectable_value(&mut selected, PolicyPreset::Full, "Full");
                         });
-                    if selected != connector.policy_preset {
-                        preset_change = Some((connector.id.clone(), selected));
-                    }
-                });
-            }
-            if let Some((id, preset)) = preset_change {
-                let result = self.set_preset(&id, preset);
-                self.apply_result(result);
-            }
-            ui.label("Changing a preset clears connector-specific overrides. Remote safety ceilings still apply.");
-            ui.separator();
+                    });
+                    ui.add_space(7.0);
+                }
+                if let Some((id, preset)) = preset_change {
+                    let result = self.set_preset(&id, preset);
+                    self.apply_result(result);
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Changing a preset clears connector-specific overrides. Remote safety ceilings still apply.",
+                    )
+                    .size(11.0)
+                    .color(theme::MUTED),
+                );
+            });
+
+            ui.add_space(18.0);
             if let Some(config) = self.config.clone() {
                 match self.policy_editor.show(ui, &config) {
                     Ok(Some(action)) => {
@@ -892,41 +1268,83 @@ mod desktop {
             }
         }
 
+        #[allow(clippy::too_many_lines)]
         fn show_oauth(&mut self, ui: &mut egui::Ui) {
-            ui.heading("OAuth clients");
+            theme::section_header(
+                ui,
+                "Registered clients",
+                "Clients can be revoked without deleting their registration.",
+            );
             let clients = self.oauth_clients.clone();
             let mut client_action = None;
             let mut request_delete = None;
             let mut cancel_delete = false;
+            if clients.is_empty() {
+                theme::empty_state(
+                    ui,
+                    "◎",
+                    "No OAuth clients",
+                    "A client will appear after completing dynamic registration.",
+                );
+            }
             for client in clients {
                 let confirming = self.pending_client_delete.as_deref() == Some(&client.client_id);
-                ui.group(|ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.strong(&client.client_name);
-                        if ui.button("Revoke tokens").clicked() {
-                            client_action = Some((client.client_id.clone(), false));
-                        }
-                        if confirming {
-                            if ui.button("Confirm permanent delete").clicked() {
-                                client_action = Some((client.client_id.clone(), true));
+                theme::card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(&client.client_name)
+                                    .size(16.0)
+                                    .strong()
+                                    .color(theme::TEXT),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("ID {}", client.client_id))
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(theme::MUTED),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if confirming {
+                                if ui.add(theme::danger_button("Confirm delete")).clicked() {
+                                    client_action = Some((client.client_id.clone(), true));
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    cancel_delete = true;
+                                }
+                            } else {
+                                if ui.add(theme::danger_button("Delete…")).clicked() {
+                                    request_delete = Some(client.client_id.clone());
+                                }
+                                if ui.button("Revoke tokens").clicked() {
+                                    client_action = Some((client.client_id.clone(), false));
+                                }
                             }
-                            if ui.button("Cancel").clicked() {
-                                cancel_delete = true;
-                            }
-                        } else if ui.button("Delete client…").clicked() {
-                            request_delete = Some(client.client_id.clone());
-                        }
+                        });
                     });
-                    ui.small(format!("ID: {}", client.client_id));
-                    ui.label(format!("Scopes: {}", client.scopes.to_space_delimited()));
-                    ui.label(format!("Issued: {}", client.issued_at.to_rfc3339()));
-                    if confirming {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(190, 45, 45),
-                            "Deleting this client also removes its tokens and pending authorization state.",
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        theme::status_badge(
+                            ui,
+                            &client.scopes.to_space_delimited(),
+                            StatusTone::Info,
                         );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Issued {}",
+                                client.issued_at.to_rfc3339()
+                            ))
+                            .size(11.0)
+                            .color(theme::MUTED),
+                        );
+                    });
+                    if confirming {
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Deleting this client also removes tokens and pending authorization state.").color(theme::DANGER));
                     }
                 });
+                ui.add_space(10.0);
             }
             if cancel_delete {
                 self.pending_client_delete = None;
@@ -944,23 +1362,60 @@ mod desktop {
                 self.apply_result(result);
             }
 
-            ui.separator();
-            ui.heading("OAuth sessions");
+            ui.add_space(22.0);
+            theme::section_header(
+                ui,
+                "Authorization sessions",
+                "Refresh-token families can be revoked independently.",
+            );
             let sessions = self.oauth_sessions.clone();
             let mut revoke = None;
+            if sessions.is_empty() {
+                theme::empty_state(
+                    ui,
+                    "◇",
+                    "No sessions",
+                    "Active authorization sessions will appear here.",
+                );
+            }
             for session in sessions {
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{} · {} · active={} · expires {}",
-                        session.client_id,
-                        session.family_id,
-                        session.active,
-                        session.expires_at.to_rfc3339()
-                    ));
-                    if session.active && ui.button("Revoke").clicked() {
-                        revoke = Some(session.family_id);
-                    }
+                theme::subtle_card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(&session.client_id)
+                                    .strong()
+                                    .color(theme::TEXT),
+                            );
+                            ui.label(
+                                egui::RichText::new(session.family_id.to_string())
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(theme::MUTED),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if session.active && ui.add(theme::danger_button("Revoke")).clicked() {
+                                revoke = Some(session.family_id);
+                            }
+                            theme::status_badge(
+                                ui,
+                                if session.active { "Active" } else { "Revoked" },
+                                if session.active {
+                                    StatusTone::Success
+                                } else {
+                                    StatusTone::Neutral
+                                },
+                            );
+                        });
+                    });
+                    ui.label(
+                        egui::RichText::new(format!("Expires {}", session.expires_at.to_rfc3339()))
+                            .size(11.0)
+                            .color(theme::MUTED),
+                    );
                 });
+                ui.add_space(8.0);
             }
             if let Some(family) = revoke {
                 let result = self.revoke_oauth_session(family);
@@ -969,42 +1424,157 @@ mod desktop {
         }
 
         fn show_audit(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Recent audit events");
-            ui.label(match self.audit_valid {
-                Some(true) => "Hash chain: valid",
-                Some(false) => "Hash chain: FAILED — dangerous actions should be blocked",
-                None => "Hash chain: unknown",
-            });
-            for record in self.audit.iter().rev() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(format!("#{} {}", record.sequence, record.event.tool_name));
-                        ui.label(format!("{:?}", record.event.outcome));
-                        ui.label(record.event.timestamp.to_rfc3339());
+            theme::card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Audit integrity")
+                                .size(17.0)
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Records are linked through a tamper-evident hash chain.",
+                            )
+                            .size(12.0)
+                            .color(theme::MUTED),
+                        );
                     });
-                    ui.label(&record.event.summary);
-                    ui.small(format!("Connector: {}", record.event.connector_id));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        theme::status_badge(
+                            ui,
+                            match self.audit_valid {
+                                Some(true) => "Verified",
+                                Some(false) => "Failed",
+                                None => "Unknown",
+                            },
+                            match self.audit_valid {
+                                Some(true) => StatusTone::Success,
+                                Some(false) => StatusTone::Danger,
+                                None => StatusTone::Warning,
+                            },
+                        );
+                    });
                 });
+            });
+            ui.add_space(18.0);
+
+            if self.audit.is_empty() {
+                theme::empty_state(
+                    ui,
+                    "≡",
+                    "No audit events",
+                    "Tool decisions will be recorded here.",
+                );
+                return;
+            }
+            for record in self.audit.iter().rev() {
+                theme::subtle_card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        theme::status_badge(
+                            ui,
+                            &format!("{:?}", record.event.outcome),
+                            StatusTone::Neutral,
+                        );
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "#{}  {}",
+                                    record.sequence, record.event.tool_name
+                                ))
+                                .strong()
+                                .color(theme::TEXT),
+                            );
+                            ui.label(
+                                egui::RichText::new(&record.event.summary)
+                                    .size(12.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(record.event.timestamp.to_rfc3339())
+                                    .size(10.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                    });
+                    ui.label(
+                        egui::RichText::new(format!("Connector {}", record.event.connector_id))
+                            .size(10.0)
+                            .monospace()
+                            .color(theme::MUTED),
+                    );
+                });
+                ui.add_space(7.0);
             }
         }
 
         fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Diagnostics");
             let running = self.diagnostic_rx.is_some();
-            if ui
-                .add_enabled(!running, egui::Button::new("Run full doctor"))
-                .clicked()
-            {
-                let result = self.start_doctor();
-                self.apply_result(result);
-            }
-            if ui.button("Refresh state").clicked() {
-                let result = self.refresh();
-                self.apply_result(result);
-            }
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.monospace(&self.diagnostics);
+            theme::card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("System health check")
+                                .size(17.0)
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Validate services, binaries, credentials, and audit integrity.",
+                            )
+                            .size(12.0)
+                            .color(theme::MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Refresh state").clicked() {
+                            let result = self.refresh();
+                            self.apply_result(result);
+                        }
+                        if ui
+                            .add_enabled(
+                                !running,
+                                theme::primary_button(if running {
+                                    "Checking…"
+                                } else {
+                                    "Run full doctor"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            let result = self.start_doctor();
+                            self.apply_result(result);
+                        }
+                    });
+                });
+            });
+            ui.add_space(16.0);
+            theme::card(ui, |ui| {
+                theme::section_header(
+                    ui,
+                    "Diagnostic output",
+                    "Sensitive credentials are never printed here.",
+                );
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(9, 12, 15))
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(egui::CornerRadius::same(9))
+                    .inner_margin(egui::Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_min_height(260.0);
+                        if self.diagnostics.trim().is_empty() {
+                            ui.label(
+                                egui::RichText::new("Run the doctor to inspect this installation.")
+                                    .color(theme::MUTED),
+                            );
+                        } else {
+                            ui.monospace(&self.diagnostics);
+                        }
+                    });
             });
         }
 
@@ -1028,6 +1598,7 @@ mod desktop {
             context.request_repaint_after(Duration::from_millis(500));
         }
 
+        #[allow(clippy::too_many_lines)]
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             if let Some(command) = self
                 .connector_wizard
@@ -1036,39 +1607,180 @@ mod desktop {
                 let result = self.start_connector_command(command);
                 self.apply_result(result);
             }
-            egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-                let mut lock_requested = false;
-                ui.horizontal(|ui| {
-                    ui.heading("RunOnMine");
-                    ui.separator();
-                    ui.label(&self.status);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Lock all access").clicked() {
-                            lock_requested = true;
+
+            let mut lock_requested = false;
+            ui.horizontal(|ui| {
+                ui.set_height(ui.available_height());
+
+                let sidebar_width = 236.0;
+                let sidebar_rect = ui
+                    .allocate_space(egui::vec2(sidebar_width, ui.available_height()))
+                    .1;
+                let mut sidebar = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(sidebar_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                egui::Frame::new()
+                    .fill(theme::SIDEBAR)
+                    .inner_margin(egui::Margin::same(18))
+                    .show(&mut sidebar, |ui| {
+                        ui.set_width(sidebar_width - 36.0);
+                        ui.horizontal(|ui| {
+                            egui::Frame::new()
+                                .fill(theme::ACCENT)
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::symmetric(9, 7))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("R")
+                                            .size(18.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(8, 20, 14)),
+                                    );
+                                });
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("RunOnMine")
+                                        .size(18.0)
+                                        .strong()
+                                        .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    egui::RichText::new("Security control center")
+                                        .size(11.0)
+                                        .color(theme::MUTED),
+                                );
+                            });
+                        });
+                        ui.add_space(20.0);
+
+                        theme::subtle_card(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let tone = if self.agent_reachable {
+                                    StatusTone::Success
+                                } else if self.pending.is_empty() {
+                                    StatusTone::Neutral
+                                } else {
+                                    StatusTone::Warning
+                                };
+                                theme::status_badge(ui, &self.status, tone);
+                            });
+                        });
+                        ui.add_space(18.0);
+
+                        for (tab, icon, label) in Tab::ALL {
+                            let selected = self.selected_tab == tab;
+                            let text = egui::RichText::new(format!("{icon}   {label}"))
+                                .size(14.0)
+                                .strong()
+                                .color(if selected { theme::TEXT } else { theme::MUTED });
+                            let response = ui.add_sized(
+                                [ui.available_width(), 40.0],
+                                egui::Button::new(text)
+                                    .fill(if selected {
+                                        theme::ACCENT_SOFT
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .stroke(if selected {
+                                        egui::Stroke::new(1.0, theme::ACCENT)
+                                    } else {
+                                        egui::Stroke::NONE
+                                    })
+                                    .corner_radius(egui::CornerRadius::same(9)),
+                            );
+                            if response.clicked() {
+                                self.selected_tab = tab;
+                            }
+                            ui.add_space(3.0);
                         }
+
+                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 40.0],
+                                    theme::danger_button("Lock all access"),
+                                )
+                                .clicked()
+                            {
+                                lock_requested = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                    .size(11.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
                     });
-                });
-                if lock_requested {
-                    let result = self.emergency_lock();
-                    self.apply_result(result);
-                }
-                self.show_tabs(ui);
-                ui.separator();
-                if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::from_rgb(190, 45, 45), error);
-                    ui.separator();
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| match self.selected_tab {
-                    Tab::Overview => self.show_overview(ui),
-                    Tab::Approvals => self.show_approvals(ui),
-                    Tab::Connections => self.show_connections(ui),
-                    Tab::Permissions => self.show_permissions(ui),
-                    Tab::OAuth => self.show_oauth(ui),
-                    Tab::Audit => self.show_audit(ui),
-                    Tab::Diagnostics => self.show_diagnostics(ui),
-                });
+
+                ui.add_space(1.0);
+                let content_rect = ui.available_rect_before_wrap();
+                let mut content = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(content_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::same(24))
+                    .show(&mut content, |ui| {
+                        ui.set_width(ui.available_width());
+                        if let Some(error) = &self.error {
+                            egui::Frame::new()
+                                .fill(theme::DANGER_SOFT)
+                                .stroke(egui::Stroke::new(1.0, theme::DANGER))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::same(12))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("!").strong().color(theme::DANGER),
+                                        );
+                                        ui.label(egui::RichText::new(error).color(theme::TEXT));
+                                    });
+                                });
+                            ui.add_space(14.0);
+                        }
+
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                theme::page_header(
+                                    ui,
+                                    self.selected_tab.title(),
+                                    self.selected_tab.subtitle(),
+                                );
+                                match self.selected_tab {
+                                    Tab::Overview => self.show_overview(ui),
+                                    Tab::Approvals => self.show_approvals(ui),
+                                    Tab::Connections => self.show_connections(ui),
+                                    Tab::Permissions => self.show_permissions(ui),
+                                    Tab::OAuth => self.show_oauth(ui),
+                                    Tab::Audit => self.show_audit(ui),
+                                    Tab::Diagnostics => self.show_diagnostics(ui),
+                                }
+                            });
+                    });
             });
+
+            if lock_requested {
+                let result = self.emergency_lock();
+                self.apply_result(result);
+            }
         }
+    }
+
+    fn status_row(ui: &mut egui::Ui, label: &str, status: (&str, StatusTone)) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(label).size(13.0).color(theme::MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::status_badge(ui, status.0, status.1);
+            });
+        });
+        ui.add_space(6.0);
     }
 
     fn sibling_cli() -> Result<PathBuf> {

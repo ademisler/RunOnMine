@@ -7,6 +7,9 @@ use runonmine_core::{
 };
 use url::Url;
 
+use crate::theme;
+use crate::theme::StatusTone;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum PrincipalKind {
     #[default]
@@ -57,8 +60,6 @@ impl PolicyEditorState {
         ui: &mut egui::Ui,
         config: &AppConfig,
     ) -> Result<Option<PolicyEditorAction>> {
-        ui.heading("Advanced policy rules");
-        ui.label("Restrict a connector by identity, exact tool or capability, and a concrete resource. More specific rules win; deny wins ties.");
         if self.connector_id.is_empty() {
             self.connector_id = config
                 .connectors
@@ -67,166 +68,233 @@ impl PolicyEditorState {
                 .unwrap_or_default();
         }
         if config.connectors.is_empty() {
-            ui.label("Create a connector before adding policy rules.");
+            theme::empty_state(
+                ui,
+                "◈",
+                "No connector available",
+                "Create a connector before adding advanced policy rules.",
+            );
             return Ok(None);
         }
 
-        let selected_name = config
-            .connector(&self.connector_id)
-            .map_or("Select connector", |connector| connector.name.as_str());
-        egui::ComboBox::from_id_salt("policy-rule-connector")
-            .selected_text(selected_name)
-            .show_ui(ui, |ui| {
-                for connector in &config.connectors {
-                    ui.selectable_value(
-                        &mut self.connector_id,
-                        connector.id.clone(),
-                        &connector.name,
-                    );
-                }
-            });
-
-        ui.separator();
-        egui::Grid::new("policy-rule-builder")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("Decision");
-                egui::ComboBox::from_id_salt("policy-rule-mode")
-                    .selected_text(format!("{:?}", self.mode))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.mode, PolicyMode::Deny, "Deny");
-                        ui.selectable_value(&mut self.mode, PolicyMode::Ask, "Ask locally");
-                        ui.selectable_value(&mut self.mode, PolicyMode::Allow, "Allow");
-                    });
-                ui.end_row();
-
-                ui.label("Identity");
-                egui::ComboBox::from_id_salt("policy-rule-principal")
-                    .selected_text(format!("{:?}", self.principal_kind))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.principal_kind,
-                            PrincipalKind::Any,
-                            "Any identity",
-                        );
-                        ui.selectable_value(
-                            &mut self.principal_kind,
-                            PrincipalKind::Local,
-                            "Local only",
-                        );
-                        ui.selectable_value(
-                            &mut self.principal_kind,
-                            PrincipalKind::OAuthClient,
-                            "OAuth client ID",
-                        );
-                        ui.selectable_value(
-                            &mut self.principal_kind,
-                            PrincipalKind::OAuthSubject,
-                            "OAuth subject",
-                        );
-                    });
-                ui.end_row();
-
-                if matches!(
-                    self.principal_kind,
-                    PrincipalKind::OAuthClient | PrincipalKind::OAuthSubject
-                ) {
-                    ui.label("Identity value");
-                    ui.text_edit_singleline(&mut self.principal_value);
-                    ui.end_row();
-                }
-
-                ui.label("Resource");
-                egui::ComboBox::from_id_salt("policy-rule-resource")
-                    .selected_text(format!("{:?}", self.resource_kind))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.resource_kind,
-                            ResourceKind::Any,
-                            "Any resource",
-                        );
-                        ui.selectable_value(
-                            &mut self.resource_kind,
-                            ResourceKind::FilesystemPrefix,
-                            "Filesystem prefix",
-                        );
-                        ui.selectable_value(
-                            &mut self.resource_kind,
-                            ResourceKind::BrowserOrigin,
-                            "Browser origin",
-                        );
-                        ui.selectable_value(
-                            &mut self.resource_kind,
-                            ResourceKind::Executable,
-                            "Executable path",
-                        );
-                        ui.selectable_value(
-                            &mut self.resource_kind,
-                            ResourceKind::CommandPrefix,
-                            "Command prefix",
-                        );
-                    });
-                ui.end_row();
-
-                if self.resource_kind != ResourceKind::Any {
-                    ui.label("Resource value");
-                    ui.text_edit_singleline(&mut self.resource_value);
-                    ui.end_row();
-                }
-
-                ui.label("Tool (optional)");
-                ui.text_edit_singleline(&mut self.tool);
-                ui.end_row();
-
-                ui.label("Capability (optional)");
-                egui::ComboBox::from_id_salt("policy-rule-capability")
-                    .selected_text(
-                        self.capability
-                            .map_or_else(|| "Any".to_owned(), |item| format!("{item:?}")),
-                    )
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.capability, None, "Any capability");
-                        for capability in Capability::ALL {
-                            ui.selectable_value(
-                                &mut self.capability,
-                                Some(capability),
-                                format!("{capability:?}"),
-                            );
-                        }
-                    });
-                ui.end_row();
-            });
-
         let mut action = None;
-        if ui.button("Add validated rule").clicked() {
+        let mut add_rule = false;
+        theme::card(ui, |ui| {
+            theme::section_header(
+                ui,
+                "Advanced policy rules",
+                "Target a specific identity, tool, capability, or resource. More specific rules win; deny wins ties.",
+            );
+
+            ui.label(
+                egui::RichText::new("Connector")
+                    .size(12.0)
+                    .color(theme::MUTED),
+            );
+            let selected_name = config
+                .connector(&self.connector_id)
+                .map_or("Select connector", |connector| connector.name.as_str());
+            egui::ComboBox::from_id_salt("policy-rule-connector")
+                .selected_text(selected_name)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for connector in &config.connectors {
+                        ui.selectable_value(
+                            &mut self.connector_id,
+                            connector.id.clone(),
+                            &connector.name,
+                        );
+                    }
+                });
+            ui.add_space(14.0);
+
+            egui::Grid::new("policy-rule-builder")
+                .num_columns(2)
+                .spacing([18.0, 12.0])
+                .min_col_width(180.0)
+                .show(ui, |ui| {
+                    field_label(ui, "Decision");
+                    egui::ComboBox::from_id_salt("policy-rule-mode")
+                        .selected_text(format!("{:?}", self.mode))
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.mode, PolicyMode::Deny, "Deny");
+                            ui.selectable_value(&mut self.mode, PolicyMode::Ask, "Ask locally");
+                            ui.selectable_value(&mut self.mode, PolicyMode::Allow, "Allow");
+                        });
+                    ui.end_row();
+
+                    field_label(ui, "Identity");
+                    egui::ComboBox::from_id_salt("policy-rule-principal")
+                        .selected_text(format!("{:?}", self.principal_kind))
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.principal_kind,
+                                PrincipalKind::Any,
+                                "Any identity",
+                            );
+                            ui.selectable_value(
+                                &mut self.principal_kind,
+                                PrincipalKind::Local,
+                                "Local only",
+                            );
+                            ui.selectable_value(
+                                &mut self.principal_kind,
+                                PrincipalKind::OAuthClient,
+                                "OAuth client ID",
+                            );
+                            ui.selectable_value(
+                                &mut self.principal_kind,
+                                PrincipalKind::OAuthSubject,
+                                "OAuth subject",
+                            );
+                        });
+                    ui.end_row();
+
+                    if matches!(
+                        self.principal_kind,
+                        PrincipalKind::OAuthClient | PrincipalKind::OAuthSubject
+                    ) {
+                        field_label(ui, "Identity value");
+                        ui.add_sized(
+                            [360.0, 34.0],
+                            egui::TextEdit::singleline(&mut self.principal_value)
+                                .hint_text("Exact client ID or subject"),
+                        );
+                        ui.end_row();
+                    }
+
+                    field_label(ui, "Resource");
+                    egui::ComboBox::from_id_salt("policy-rule-resource")
+                        .selected_text(format!("{:?}", self.resource_kind))
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.resource_kind,
+                                ResourceKind::Any,
+                                "Any resource",
+                            );
+                            ui.selectable_value(
+                                &mut self.resource_kind,
+                                ResourceKind::FilesystemPrefix,
+                                "Filesystem prefix",
+                            );
+                            ui.selectable_value(
+                                &mut self.resource_kind,
+                                ResourceKind::BrowserOrigin,
+                                "Browser origin",
+                            );
+                            ui.selectable_value(
+                                &mut self.resource_kind,
+                                ResourceKind::Executable,
+                                "Executable path",
+                            );
+                            ui.selectable_value(
+                                &mut self.resource_kind,
+                                ResourceKind::CommandPrefix,
+                                "Command prefix",
+                            );
+                        });
+                    ui.end_row();
+
+                    if self.resource_kind != ResourceKind::Any {
+                        field_label(ui, "Resource value");
+                        ui.add_sized(
+                            [360.0, 34.0],
+                            egui::TextEdit::singleline(&mut self.resource_value)
+                                .hint_text(resource_hint(self.resource_kind)),
+                        );
+                        ui.end_row();
+                    }
+
+                    field_label(ui, "Tool (optional)");
+                    ui.add_sized(
+                        [360.0, 34.0],
+                        egui::TextEdit::singleline(&mut self.tool).hint_text("e.g. fs_read"),
+                    );
+                    ui.end_row();
+
+                    field_label(ui, "Capability (optional)");
+                    egui::ComboBox::from_id_salt("policy-rule-capability")
+                        .selected_text(self.capability.map_or_else(
+                            || "Any capability".to_owned(),
+                            |item| format!("{item:?}"),
+                        ))
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.capability, None, "Any capability");
+                            for capability in Capability::ALL {
+                                ui.selectable_value(
+                                    &mut self.capability,
+                                    Some(capability),
+                                    format!("{capability:?}"),
+                                );
+                            }
+                        });
+                    ui.end_row();
+                });
+
+            ui.add_space(14.0);
+            if ui
+                .add(theme::primary_button("Add validated rule"))
+                .clicked()
+            {
+                add_rule = true;
+            }
+        });
+        if add_rule {
             action = Some(PolicyEditorAction::Add {
                 connector_id: self.connector_id.clone(),
                 rule: self.build_rule()?,
             });
         }
 
-        ui.separator();
-        ui.heading("Configured rules");
+        ui.add_space(16.0);
+        theme::section_header(
+            ui,
+            "Configured rules",
+            "Rules are evaluated before connector overrides and presets.",
+        );
         let Some(connector) = config.connector(&self.connector_id) else {
             return Ok(action);
         };
         if connector.policy_rules.is_empty() {
-            ui.label("No advanced rules for this connector.");
+            theme::empty_state(
+                ui,
+                "◇",
+                "No advanced rules",
+                "This connector currently relies on its preset and overrides.",
+            );
         }
         for (index, rule) in connector.policy_rules.iter().enumerate() {
-            ui.group(|ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.strong(format!("{:?}", rule.mode));
-                    ui.label(describe_rule(rule));
-                    if ui.button("Remove").clicked() {
-                        action = Some(PolicyEditorAction::Remove {
-                            connector_id: connector.id.clone(),
-                            index,
-                        });
-                    }
+            theme::subtle_card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    theme::status_badge(
+                        ui,
+                        &format!("{:?}", rule.mode),
+                        match rule.mode {
+                            PolicyMode::Allow => StatusTone::Success,
+                            PolicyMode::Ask => StatusTone::Warning,
+                            PolicyMode::Deny => StatusTone::Danger,
+                        },
+                    );
+                    ui.label(
+                        egui::RichText::new(describe_rule(rule))
+                            .size(12.0)
+                            .color(theme::TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(theme::danger_button("Remove")).clicked() {
+                            action = Some(PolicyEditorAction::Remove {
+                                connector_id: connector.id.clone(),
+                                index,
+                            });
+                        }
+                    });
                 });
             });
+            ui.add_space(7.0);
         }
         Ok(action)
     }
@@ -266,6 +334,20 @@ impl PolicyEditorState {
             tool: (!self.tool.trim().is_empty()).then(|| self.tool.trim().to_owned()),
             capability: self.capability,
         })
+    }
+}
+
+fn field_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(egui::RichText::new(label).size(12.0).color(theme::MUTED));
+}
+
+const fn resource_hint(kind: ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Any => "",
+        ResourceKind::FilesystemPrefix => "/absolute/path",
+        ResourceKind::BrowserOrigin => "https://example.com/",
+        ResourceKind::Executable => "/absolute/path/to/executable",
+        ResourceKind::CommandPrefix => "cargo test",
     }
 }
 
