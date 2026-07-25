@@ -246,10 +246,10 @@ fn universal_macos() -> Result<()> {
         )?;
         command_success(
             Command::new("/usr/bin/lipo").args([
+                universal_binary.to_string_lossy().as_ref(),
                 "-verify_arch",
                 "arm64",
                 "x86_64",
-                universal_binary.to_string_lossy().as_ref(),
             ]),
             "lipo architecture verification failed",
         )?;

@@ -53,8 +53,8 @@ use runonmine_core::process::{ProcessRequest, execute_shell};
 use runonmine_core::secrets::{SecretStore, default_secret_store};
 use runonmine_core::{
     AppConfig, AppPaths, ApprovalRequest, ApprovalStatus, AuditEvent, AuditOutcome,
-    BrowserProfileMode, Capability, ConnectorConfig, ConnectorKind, PolicyEngine, PolicyMode,
-    StateStore,
+    BrowserProfileMode, Capability, ConnectorConfig, ConnectorKind, PolicyContext, PolicyEngine,
+    PolicyMode, PrincipalContext, StateStore,
 };
 use runonmine_oauth::{
     GitHubApiOwnerVerifier, OAuthService, OAuthServiceConfig, Scope, ScopeSet, SqliteOAuthStore,
@@ -65,9 +65,8 @@ use runonmine_platform::helper::{
     HelperClient, HelperRequest, HelperResult, MAX_TIMEOUT as MAX_ADMIN_TIMEOUT,
 };
 use runonmine_platform::native::{self, DbusCall};
-use schemars::JsonSchema;
 use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex as AsyncMutex;
@@ -573,34 +572,55 @@ impl RunOnMineServer {
             tracing::error!(%error, "failed to serialize tool arguments for authorization");
             McpError::internal_error("Tool arguments could not be safely authorized", None)
         })?;
+        let access = REQUEST_ACCESS.try_with(Clone::clone).ok();
+        let principal = match access.as_ref().map(|item| &item.principal) {
+            Some(RequestPrincipal::OAuth {
+                client_id, subject, ..
+            }) => PrincipalContext::OAuth { client_id, subject },
+            _ => PrincipalContext::Local,
+        };
+        let resource = policy_resource(tool_name, arguments).map_err(|error| {
+            tracing::error!(%error, "failed to derive policy resource");
+            McpError::internal_error("Tool resource could not be safely authorized", None)
+        })?;
+        let policy_context = PolicyContext {
+            principal,
+            resource: resource.as_context(),
+        };
         let mode = PolicyEngine
-            .evaluate(&connector, tool_name, capability)
+            .evaluate_context(&connector, tool_name, capability, &policy_context)
             .mode;
-        if mode == PolicyMode::Allow
-            || self
-                .runtime
-                .0
-                .store
-                .grant_allows(&connector.id, tool_name, &argument_hash)
-                .unwrap_or(false)
-        {
+        let grant_allows = self
+            .runtime
+            .0
+            .store
+            .grant_allows_async(
+                connector.id.clone(),
+                tool_name.to_owned(),
+                argument_hash.clone(),
+            )
+            .await
+            .unwrap_or(false);
+        if mode == PolicyMode::Allow || grant_allows {
             self.audit_authorization_required(
                 tool_name,
                 capability,
                 AuditOutcome::Allowed,
                 &argument_hash,
                 summary,
-            )?;
+            )
+            .await?;
             return Ok(());
         }
         if mode == PolicyMode::Deny {
-            self.audit_with_hash(
+            self.audit_authorization_required(
                 tool_name,
                 capability,
                 AuditOutcome::Denied,
                 &argument_hash,
                 summary,
-            );
+            )
+            .await?;
             return Err(McpError::invalid_request(
                 "Tool is denied by local policy",
                 None,
@@ -619,22 +639,27 @@ impl RunOnMineServer {
         self.runtime
             .0
             .store
-            .insert_approval(&approval)
+            .insert_approval_async(approval.clone())
+            .await
             .map_err(|_| {
                 McpError::internal_error("Could not create a local approval request", None)
             })?;
-        if let Err(error) = self.audit_authorization_required(
-            tool_name,
-            capability,
-            AuditOutcome::PendingApproval,
-            &argument_hash,
-            summary,
-        ) {
+        if let Err(error) = self
+            .audit_authorization_required(
+                tool_name,
+                capability,
+                AuditOutcome::PendingApproval,
+                &argument_hash,
+                summary,
+            )
+            .await
+        {
             let _ignored = self
                 .runtime
                 .0
                 .store
-                .resolve_approval(approval.id, runonmine_core::ApprovalDecision::Deny);
+                .resolve_approval_async(approval.id, runonmine_core::ApprovalDecision::Deny)
+                .await;
             return Err(error);
         }
         let deadline = Instant::now() + self.runtime.0.approval_timeout;
@@ -646,7 +671,8 @@ impl RunOnMineServer {
                     AuditOutcome::Denied,
                     &argument_hash,
                     "local approval timed out",
-                )?;
+                )
+                .await?;
                 return Err(McpError::invalid_request("Local approval timed out", None));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -654,7 +680,8 @@ impl RunOnMineServer {
                 .runtime
                 .0
                 .store
-                .approval_status(approval.id)
+                .approval_status_async(approval.id)
+                .await
                 .map_err(|_| McpError::internal_error("Could not read local approval", None))?
                 .map_or(ApprovalStatus::Expired, |request| request.status);
             match status {
@@ -665,7 +692,8 @@ impl RunOnMineServer {
                         AuditOutcome::Allowed,
                         &argument_hash,
                         summary,
-                    )?;
+                    )
+                    .await?;
                     return Ok(());
                 }
                 ApprovalStatus::Denied => {
@@ -675,7 +703,8 @@ impl RunOnMineServer {
                         AuditOutcome::Denied,
                         &argument_hash,
                         "denied by the machine owner",
-                    )?;
+                    )
+                    .await?;
                     return Err(McpError::invalid_request(
                         "Denied by the machine owner",
                         None,
@@ -688,7 +717,8 @@ impl RunOnMineServer {
                         AuditOutcome::Denied,
                         &argument_hash,
                         "local approval expired",
-                    )?;
+                    )
+                    .await?;
                     return Err(McpError::invalid_request("Local approval timed out", None));
                 }
                 ApprovalStatus::Pending => {}
@@ -696,7 +726,7 @@ impl RunOnMineServer {
         }
     }
 
-    fn audit_authorization_required(
+    async fn audit_authorization_required(
         &self,
         tool_name: &str,
         capability: Capability,
@@ -712,7 +742,7 @@ impl RunOnMineServer {
             argument_hash,
             summary,
         );
-        match self.runtime.0.store.append_audit(&event) {
+        match self.runtime.0.store.append_audit_async(event).await {
             Ok(_) => Ok(()),
             Err(error) if capability_requires_reliable_audit(capability) => {
                 tracing::error!(%error, "refusing dangerous tool call because audit is unavailable");
@@ -762,9 +792,12 @@ impl RunOnMineServer {
             argument_hash,
             summary,
         );
-        if let Err(error) = self.runtime.0.store.append_audit(&event) {
-            tracing::error!(%error, "failed to append audit event");
-        }
+        let store = self.runtime.0.store.clone();
+        tokio::spawn(async move {
+            if let Err(error) = store.append_audit_async(event).await {
+                tracing::error!(%error, "failed to append audit event");
+            }
+        });
     }
 
     fn success<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
@@ -849,215 +882,16 @@ impl RunOnMineServer {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
-struct EmptyArgs {}
+mod authorization;
+use authorization::policy_resource;
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct PathArgs {
-    path: PathBuf,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct ListArgs {
-    path: PathBuf,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default = "default_list_limit")]
-    limit: usize,
-}
-
-const fn default_list_limit() -> usize {
-    250
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct ReadArgs {
-    path: PathBuf,
-    #[serde(default = "default_read_limit")]
-    max_bytes: usize,
-}
-
-fn default_read_limit() -> usize {
-    256 * 1_024
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct SearchArgs {
-    root: PathBuf,
-    query: String,
-    #[serde(default = "default_search_limit")]
-    limit: usize,
-    #[serde(default = "default_search_depth")]
-    max_depth: usize,
-    #[serde(default = "default_search_nodes")]
-    max_nodes: usize,
-}
-
-const fn default_search_limit() -> usize {
-    100
-}
-
-const fn default_search_depth() -> usize {
-    16
-}
-
-const fn default_search_nodes() -> usize {
-    50_000
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct WriteArgs {
-    path: PathBuf,
-    content: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct PatchArgs {
-    path: PathBuf,
-    old_text: String,
-    new_text: String,
-    #[serde(default = "one")]
-    expected_replacements: usize,
-}
-
-const fn one() -> usize {
-    1
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct MoveArgs {
-    from: PathBuf,
-    to: PathBuf,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct ShellArgs {
-    command: String,
-    cwd: Option<PathBuf>,
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct AdminExecArgs {
-    program: PathBuf,
-    #[serde(default)]
-    args: Vec<String>,
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct DesktopListArgs {
-    #[serde(default = "default_window_limit")]
-    limit: usize,
-}
-
-const fn default_window_limit() -> usize {
-    100
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct DesktopWindowArgs {
-    window_id: u32,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct DesktopScreenshotArgs {
-    monitor_id: Option<u32>,
-    window_id: Option<u32>,
-    #[serde(default = "default_image_quality")]
-    quality: u8,
-    #[serde(default = "default_desktop_image_dimension")]
-    max_dimension: u32,
-}
-
-const fn default_desktop_image_dimension() -> u32 {
-    2_048
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct DesktopClickArgs {
-    x: i32,
-    y: i32,
-    #[serde(default = "default_mouse_button")]
-    button: String,
-}
-
-fn default_mouse_button() -> String {
-    "left".to_owned()
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct DesktopTypeArgs {
-    text: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct DesktopKeyArgs {
-    key: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct PlatformScriptArgs {
-    script: String,
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct DbusCallArgs {
-    destination: String,
-    object_path: String,
-    interface: String,
-    method: String,
-    #[serde(default)]
-    signature: String,
-    #[serde(default)]
-    arguments: Vec<String>,
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct UrlArgs {
-    url: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct SelectorArgs {
-    selector: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct TypeArgs {
-    selector: String,
-    text: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct KeyArgs {
-    key: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct ScreenshotArgs {
-    #[serde(default = "default_image_quality")]
-    quality: u8,
-    #[serde(default)]
-    full_page: bool,
-}
-
-const fn default_image_quality() -> u8 {
-    70
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct EvaluateArgs {
-    expression: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ReadOutput {
-    content: String,
-    truncated: bool,
-}
+mod arguments;
+use arguments::{
+    AdminExecArgs, DbusCallArgs, DesktopClickArgs, DesktopKeyArgs, DesktopListArgs,
+    DesktopScreenshotArgs, DesktopTypeArgs, DesktopWindowArgs, EmptyArgs, EvaluateArgs, KeyArgs,
+    ListArgs, MoveArgs, PatchArgs, PathArgs, PlatformScriptArgs, ReadArgs, ReadOutput,
+    ScreenshotArgs, SearchArgs, SelectorArgs, ShellArgs, TypeArgs, UrlArgs, WriteArgs,
+};
 
 #[tool_router]
 impl RunOnMineServer {
@@ -3060,269 +2894,12 @@ async fn shutdown_signal() {
 }
 
 #[allow(clippy::too_many_lines)]
-fn approval_preview(tool_name: &str, arguments: &impl Serialize) -> String {
-    let value = serde_json::to_value(arguments).unwrap_or(serde_json::Value::Null);
-    let string = |name: &str| {
-        value
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-    };
-    let path = |name: &str| string(name);
-    let preview = match tool_name {
-        "fs_list" | "fs_read" | "fs_delete" => format!("Path: {}", path("path")),
-        "fs_search" => format!(
-            "Root: {}\nQuery: {}",
-            path("root"),
-            redact_preview_text(string("query"))
-        ),
-        "fs_write" => format!(
-            "Path: {}\nNew content: {} bytes\nPreview: {}",
-            path("path"),
-            string("content").len(),
-            redact_preview_text(string("content"))
-        ),
-        "fs_patch" => format!(
-            "Path: {}\nExpected replacements: {}\nReplace: {}\nWith: {}",
-            path("path"),
-            value
-                .get("expected_replacements")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(1),
-            redact_preview_text(string("old_text")),
-            redact_preview_text(string("new_text"))
-        ),
-        "fs_move" => format!("From: {}\nTo: {}", path("from"), path("to")),
-        "shell_exec" => format!(
-            "Command: {}\nWorking directory: {}",
-            redact_preview_text(string("command")),
-            value
-                .get("cwd")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("current directory")
-        ),
-        "admin_exec" => format!(
-            "Privileged program: {}\nArguments: {}",
-            path("program"),
-            redact_preview_text(
-                &value
-                    .get("args")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .unwrap_or_default()
-            )
-        ),
-        "desktop_focus_window" => format!("Window ID: {}", value["window_id"]),
-        "desktop_screenshot" => format!(
-            "Capture screenshot\nMonitor: {}\nWindow: {}",
-            value.get("monitor_id").unwrap_or(&serde_json::Value::Null),
-            value.get("window_id").unwrap_or(&serde_json::Value::Null)
-        ),
-        "desktop_click" => format!(
-            "Click at ({}, {}) with {} button",
-            value["x"],
-            value["y"],
-            string("button")
-        ),
-        "desktop_type" => format!(
-            "Type {} characters\nText: {}",
-            string("text").chars().count(),
-            redact_preview_text(string("text"))
-        ),
-        "desktop_key" | "browser_press" => format!("Key: {}", string("key")),
-        "macos_applescript" | "windows_powershell" => format!(
-            "Script ({} characters):\n{}",
-            string("script").chars().count(),
-            redact_preview_text(string("script"))
-        ),
-        "linux_dbus_call" => format!(
-            "D-Bus: {} {}.{} on {}",
-            string("destination"),
-            string("interface"),
-            string("method"),
-            string("object_path")
-        ),
-        "browser_open" | "browser_navigate" => format!("URL: {}", string("url")),
-        "browser_click" => format!("Selector: {}", string("selector")),
-        "browser_type" => format!(
-            "Selector: {}\nType {} characters\nText: {}",
-            string("selector"),
-            string("text").chars().count(),
-            redact_preview_text(string("text"))
-        ),
-        "browser_evaluate" => format!(
-            "JavaScript ({} characters):\n{}",
-            string("expression").chars().count(),
-            redact_preview_text(string("expression"))
-        ),
-        _ => tool_name.replace('_', " "),
-    };
-    truncate_preview(&preview, 1_500)
-}
-
-fn redact_preview_text(input: &str) -> String {
-    let mut output = truncate_preview(input, 1_024);
-    for marker in [
-        "authorization:",
-        "bearer ",
-        "token=",
-        "access_token=",
-        "refresh_token=",
-        "password=",
-        "passwd=",
-        "secret=",
-        "client_secret=",
-        "api_key=",
-        "apikey=",
-    ] {
-        let mut search_from = 0;
-        loop {
-            let lower = output.to_ascii_lowercase();
-            let Some(relative_start) = lower[search_from..].find(marker) else {
-                break;
-            };
-            let start = search_from + relative_start;
-            let value_start = start + marker.len();
-            let value_end = output[value_start..]
-                .find(|character: char| character.is_whitespace() || matches!(character, '&' | ';'))
-                .map_or(output.len(), |offset| value_start + offset);
-            if value_start >= value_end {
-                search_from = value_start;
-                continue;
-            }
-            if &output[value_start..value_end] != "[REDACTED]" {
-                output.replace_range(value_start..value_end, "[REDACTED]");
-            }
-            search_from = value_start + "[REDACTED]".len();
-        }
-    }
-    output
-}
-
-fn truncate_preview(value: &str, maximum_chars: usize) -> String {
-    let mut output = value.chars().take(maximum_chars).collect::<String>();
-    if value.chars().count() > maximum_chars {
-        output.push('…');
-    }
-    output
-}
-
-const fn capability_requires_reliable_audit(capability: Capability) -> bool {
-    matches!(
-        capability,
-        Capability::FilesWrite
-            | Capability::ShellExec
-            | Capability::BrowserAct
-            | Capability::DesktopControl
-            | Capability::PlatformNative
-            | Capability::AdminExec
-    )
-}
-
-fn argument_hash(value: &impl Serialize) -> Result<String> {
-    let bytes = serde_json::to_vec(value).context("tool argument serialization failed")?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
-}
-
-fn validate_text(value: &str, label: &str, maximum: usize) -> Result<(), McpError> {
-    if value.len() > maximum {
-        return Err(McpError::invalid_params(
-            format!("{label} exceeds the configured size limit"),
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn validate_nonempty_text(value: &str, label: &str, maximum: usize) -> Result<(), McpError> {
-    if value.trim().is_empty() {
-        return Err(McpError::invalid_params(
-            format!("{label} must not be empty"),
-            None,
-        ));
-    }
-    validate_text(value, label, maximum)
-}
-
-fn validate_path(path: &std::path::Path, label: &str) -> Result<(), McpError> {
-    if path.as_os_str().is_empty() || path.as_os_str().len() > 32 * 1_024 {
-        return Err(McpError::invalid_params(
-            format!("{label} is empty or exceeds the size limit"),
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn validate_optional_path(path: Option<&std::path::Path>, label: &str) -> Result<(), McpError> {
-    if let Some(path) = path {
-        validate_path(path, label)?;
-    }
-    Ok(())
-}
-
-fn validate_string_arguments(values: &[String], label: &str) -> Result<(), McpError> {
-    if values.len() > MAX_ARGUMENT_ITEMS
-        || values
-            .iter()
-            .try_fold(0_usize, |total, value| total.checked_add(value.len()))
-            .is_none_or(|total| total > MAX_ARGUMENT_BYTES)
-    {
-        return Err(McpError::invalid_params(
-            format!("{label} exceed the configured limits"),
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn validate_dbus_arguments(arguments: &DbusCallArgs) -> Result<(), McpError> {
-    for (label, value, maximum) in [
-        (
-            "D-Bus destination",
-            arguments.destination.as_str(),
-            512_usize,
-        ),
-        ("D-Bus object path", arguments.object_path.as_str(), 4_096),
-        ("D-Bus interface", arguments.interface.as_str(), 512),
-        ("D-Bus method", arguments.method.as_str(), 512),
-    ] {
-        validate_nonempty_text(value, label, maximum)?;
-    }
-    validate_text(&arguments.signature, "D-Bus signature", 1_024)?;
-    validate_string_arguments(&arguments.arguments, "D-Bus arguments")
-}
-
-const fn capability_name(capability: Capability) -> &'static str {
-    match capability {
-        Capability::SystemRead => "system_read",
-        Capability::FilesRead => "files_read",
-        Capability::FilesWrite => "files_write",
-        Capability::ShellExec => "shell_exec",
-        Capability::BrowserRead => "browser_read",
-        Capability::BrowserAct => "browser_act",
-        Capability::DesktopControl => "desktop_control",
-        Capability::PlatformNative => "platform_native",
-        Capability::AdminExec => "admin_exec",
-    }
-}
-
-fn browser_should_be_headless() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
+mod validation;
+use validation::{
+    approval_preview, argument_hash, browser_should_be_headless, capability_name,
+    capability_requires_reliable_audit, validate_dbus_arguments, validate_nonempty_text,
+    validate_optional_path, validate_path, validate_string_arguments, validate_text,
+};
 
 #[cfg(test)]
 mod tests {

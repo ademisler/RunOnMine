@@ -8,7 +8,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::atomic;
-use crate::policy::{Capability, PolicyMode, PolicyPreset};
+use crate::policy::{
+    Capability, PolicyMode, PolicyPreset, PolicyRule, PrincipalMatcher, ResourceMatcher,
+};
 use crate::{CONFIG_VERSION, DEFAULT_PORT};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -100,6 +102,8 @@ pub struct ConnectorConfig {
     #[serde(default)]
     pub tool_overrides: BTreeMap<String, PolicyMode>,
     #[serde(default)]
+    pub policy_rules: Vec<PolicyRule>,
+    #[serde(default)]
     pub public_base_url: Option<Url>,
     #[serde(default)]
     pub cloudflare_quick: Option<CloudflareQuickSettings>,
@@ -121,6 +125,7 @@ impl ConnectorConfig {
             policy_preset: PolicyPreset::Safe,
             pack_overrides: BTreeMap::new(),
             tool_overrides: BTreeMap::new(),
+            policy_rules: Vec::new(),
             public_base_url: None,
             cloudflare_quick: None,
             cloudflare_named: None,
@@ -138,6 +143,7 @@ impl ConnectorConfig {
             policy_preset: PolicyPreset::Safe,
             pack_overrides: BTreeMap::new(),
             tool_overrides: BTreeMap::new(),
+            policy_rules: Vec::new(),
             public_base_url: None,
             cloudflare_quick: None,
             cloudflare_named: None,
@@ -368,6 +374,7 @@ fn validate_connectors(connectors: &[ConnectorConfig], agent_port: u16) -> Resul
     let mut connector_ids = BTreeSet::new();
     for connector in connectors {
         validate_connector_identity(connector)?;
+        validate_policy_rules(&connector.policy_rules)?;
         if !connector_ids.insert(connector.id.as_str()) {
             bail!("connector ids must be unique");
         }
@@ -375,6 +382,61 @@ fn validate_connectors(connectors: &[ConnectorConfig], agent_port: u16) -> Resul
     }
     validate_connector_ports(connectors)?;
     validate_singleton_connectors(connectors)
+}
+
+fn validate_policy_rules(rules: &[PolicyRule]) -> Result<()> {
+    if rules.len() > 256 {
+        bail!("too many connector policy rules");
+    }
+    for rule in rules {
+        if rule.tool.as_ref().is_some_and(|tool| {
+            tool.is_empty()
+                || tool.len() > 128
+                || !tool
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }) {
+            bail!("policy rule tool name is invalid");
+        }
+        match &rule.principal {
+            PrincipalMatcher::OAuthClient { client_id }
+                if client_id.is_empty() || client_id.len() > 256 =>
+            {
+                bail!("policy rule OAuth client is invalid")
+            }
+            PrincipalMatcher::OAuthSubject { subject }
+                if subject.is_empty() || subject.len() > 256 =>
+            {
+                bail!("policy rule OAuth subject is invalid")
+            }
+            _ => {}
+        }
+        match &rule.resource {
+            ResourceMatcher::FilesystemPrefix { path } | ResourceMatcher::Executable { path }
+                if !path.is_absolute() =>
+            {
+                bail!("policy filesystem and executable resources must be absolute")
+            }
+            ResourceMatcher::BrowserOrigin { origin }
+                if !matches!(origin.scheme(), "http" | "https")
+                    || origin.host_str().is_none()
+                    || origin.path() != "/"
+                    || origin.query().is_some()
+                    || origin.fragment().is_some() =>
+            {
+                bail!("policy browser resource must be an HTTP(S) origin")
+            }
+            ResourceMatcher::CommandPrefix { prefix }
+                if prefix.is_empty()
+                    || prefix.len() > 4096
+                    || prefix.chars().any(char::is_control) =>
+            {
+                bail!("policy command prefix is invalid")
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_connector_identity(connector: &ConnectorConfig) -> Result<()> {

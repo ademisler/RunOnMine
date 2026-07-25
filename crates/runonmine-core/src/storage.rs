@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalStatus, PersistentGrant};
@@ -13,6 +14,60 @@ use crate::audit::AuditEvent;
 pub const AUDIT_RETENTION_DAYS: i64 = 30;
 pub const AUDIT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const STATE_SCHEMA_VERSION: i64 = 2;
+
+type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
+
+#[derive(Debug)]
+struct SqliteWorker {
+    sender: mpsc::Sender<DbJob>,
+}
+
+impl SqliteWorker {
+    fn start(mut connection: Connection) -> Result<Self> {
+        let (sender, receiver) = mpsc::channel::<DbJob>();
+        std::thread::Builder::new()
+            .name("runonmine-state-db".to_owned())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    job(&mut connection);
+                }
+            })
+            .context("failed to start state database worker")?;
+        Ok(Self { sender })
+    }
+
+    fn call<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let (reply, receive) = mpsc::sync_channel(1);
+        self.sender
+            .send(Box::new(move |connection| {
+                let _ignored = reply.send(operation(connection));
+            }))
+            .map_err(|_| anyhow!("state database worker is unavailable"))?;
+        receive
+            .recv()
+            .map_err(|_| anyhow!("state database worker stopped unexpectedly"))?
+    }
+
+    async fn call_async<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let (reply, receive) = oneshot::channel();
+        self.sender
+            .send(Box::new(move |connection| {
+                let _ignored = reply.send(operation(connection));
+            }))
+            .map_err(|_| anyhow!("state database worker is unavailable"))?;
+        receive
+            .await
+            .map_err(|_| anyhow!("state database worker stopped unexpectedly"))?
+    }
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct AuditRecord {
@@ -24,7 +79,7 @@ pub struct AuditRecord {
 
 #[derive(Clone, Debug)]
 pub struct StateStore {
-    connection: Arc<Mutex<Connection>>,
+    worker: Arc<SqliteWorker>,
 }
 
 impl StateStore {
@@ -47,7 +102,7 @@ impl StateStore {
         migrate(&connection)?;
         restrict_file(path)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            worker: Arc::new(SqliteWorker::start(connection)?),
         })
     }
 
@@ -56,77 +111,47 @@ impl StateStore {
         configure_connection(&connection)?;
         migrate(&connection)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            worker: Arc::new(SqliteWorker::start(connection)?),
         })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.connection
-            .lock()
-            .map_err(|_| anyhow!("state database lock is poisoned"))
+    fn call<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        self.worker.call(operation)
+    }
+
+    async fn call_async<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        self.worker.call_async(operation).await
     }
 
     pub fn insert_approval(&self, request: &ApprovalRequest) -> Result<()> {
-        self.lock()?.execute(
-            "INSERT INTO approvals (
-                id, connector_id, tool_name, argument_summary, argument_hash,
-                status, created_at, expires_at, resolved_at, decision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)",
-            params![
-                request.id.to_string(),
-                request.connector_id,
-                request.tool_name,
-                request.argument_summary,
-                request.argument_hash,
-                status_name(request.status),
-                request.created_at.to_rfc3339(),
-                request.expires_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
+        let request = request.clone();
+        self.call(move |connection| insert_approval_connection(connection, &request))
+    }
+
+    pub async fn insert_approval_async(&self, request: ApprovalRequest) -> Result<()> {
+        self.call_async(move |connection| insert_approval_connection(connection, &request))
+            .await
     }
 
     pub fn resolve_approval(&self, id: Uuid, decision: ApprovalDecision) -> Result<bool> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let now = Utc::now().to_rfc3339();
-        let status = if decision == ApprovalDecision::Deny {
-            "denied"
-        } else {
-            "approved"
-        };
-        let changed = transaction.execute(
-            "UPDATE approvals SET status = ?1, resolved_at = ?2, decision = ?3
-             WHERE id = ?4 AND status = 'pending' AND expires_at > ?2",
-            params![status, now, decision_name(decision), id.to_string()],
-        )?;
-        if changed == 1 && decision == ApprovalDecision::ForTenMinutes {
-            transaction.execute(
-                "INSERT INTO temporary_grants
-                    (connector_id, tool_name, argument_hash, expires_at)
-                 SELECT connector_id, tool_name, argument_hash, ?1
-                 FROM approvals WHERE id = ?2
-                 ON CONFLICT(connector_id, tool_name, argument_hash)
-                 DO UPDATE SET expires_at = excluded.expires_at",
-                params![
-                    (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
-                    id.to_string()
-                ],
-            )?;
-        } else if changed == 1 && decision == ApprovalDecision::Always {
-            transaction.execute(
-                "INSERT INTO persistent_grants
-                    (connector_id, tool_name, argument_hash, argument_summary, created_at)
-                 SELECT connector_id, tool_name, argument_hash, argument_summary, ?1
-                 FROM approvals WHERE id = ?2
-                 ON CONFLICT(connector_id, tool_name, argument_hash)
-                 DO UPDATE SET argument_summary = excluded.argument_summary,
-                               created_at = excluded.created_at",
-                params![Utc::now().to_rfc3339(), id.to_string()],
-            )?;
-        }
-        transaction.commit()?;
-        Ok(changed == 1)
+        self.call(move |connection| resolve_approval_connection(connection, id, decision))
+    }
+
+    pub async fn resolve_approval_async(
+        &self,
+        id: Uuid,
+        decision: ApprovalDecision,
+    ) -> Result<bool> {
+        self.call_async(move |connection| resolve_approval_connection(connection, id, decision))
+            .await
     }
 
     pub fn grant_allows(
@@ -135,27 +160,24 @@ impl StateStore {
         tool_name: &str,
         argument_hash: &str,
     ) -> Result<bool> {
-        let connection = self.lock()?;
-        let now = Utc::now().to_rfc3339();
-        connection.execute(
-            "DELETE FROM temporary_grants WHERE expires_at <= ?1",
-            [&now],
-        )?;
-        let exists = connection
-            .query_row(
-                "SELECT 1 FROM temporary_grants
-                 WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3
-                   AND expires_at > ?4
-                 UNION ALL
-                 SELECT 1 FROM persistent_grants
-                 WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3
-                 LIMIT 1",
-                params![connector_id, tool_name, argument_hash, now],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        Ok(exists)
+        let connector_id = connector_id.to_owned();
+        let tool_name = tool_name.to_owned();
+        let argument_hash = argument_hash.to_owned();
+        self.call(move |connection| {
+            grant_allows_connection(connection, &connector_id, &tool_name, &argument_hash)
+        })
+    }
+
+    pub async fn grant_allows_async(
+        &self,
+        connector_id: String,
+        tool_name: String,
+        argument_hash: String,
+    ) -> Result<bool> {
+        self.call_async(move |connection| {
+            grant_allows_connection(connection, &connector_id, &tool_name, &argument_hash)
+        })
+        .await
     }
 
     pub fn temporary_grant_allows(
@@ -168,36 +190,10 @@ impl StateStore {
     }
 
     pub fn persistent_grants(&self, connector_id: Option<&str>) -> Result<Vec<PersistentGrant>> {
-        let connection = self.lock()?;
         let connector_filter = connector_id.map(str::to_owned);
-        let mut statement = connection.prepare(
-            "SELECT connector_id, tool_name, argument_summary, argument_hash, created_at
-             FROM persistent_grants
-             WHERE (?1 IS NULL OR connector_id = ?1)
-             ORDER BY created_at DESC, connector_id, tool_name",
-        )?;
-        let rows = statement.query_map([connector_filter], |row| {
-            let created_at: String = row.get(4)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                created_at,
-            ))
-        })?;
-        rows.map(|row| {
-            let (connector_id, tool_name, argument_summary, argument_hash, created_at) = row?;
-            Ok(PersistentGrant {
-                connector_id,
-                tool_name,
-                argument_summary,
-                argument_hash,
-                created_at: DateTime::<Utc>::from_str(&created_at)
-                    .context("persistent grant has an invalid timestamp")?,
-            })
+        self.call(move |connection| {
+            persistent_grants_connection(connection, connector_filter.as_deref())
         })
-        .collect()
     }
 
     pub fn delete_persistent_grant(
@@ -206,200 +202,257 @@ impl StateStore {
         tool_name: &str,
         argument_hash: &str,
     ) -> Result<bool> {
-        let changed = self.lock()?.execute(
-            "DELETE FROM persistent_grants
-             WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3",
-            params![connector_id, tool_name, argument_hash],
-        )?;
-        Ok(changed == 1)
+        let connector_id = connector_id.to_owned();
+        let tool_name = tool_name.to_owned();
+        let argument_hash = argument_hash.to_owned();
+        self.call(move |connection| Ok(connection.execute("DELETE FROM persistent_grants WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3", params![connector_id, tool_name, argument_hash])? == 1))
     }
 
     pub fn clear_persistent_grants(&self, connector_id: Option<&str>) -> Result<usize> {
-        let connection = self.lock()?;
-        connector_id.map_or_else(
-            || {
-                connection
-                    .execute("DELETE FROM persistent_grants", [])
-                    .map_err(Into::into)
-            },
-            |connector_id| {
-                connection
-                    .execute(
-                        "DELETE FROM persistent_grants WHERE connector_id = ?1",
-                        [connector_id],
-                    )
-                    .map_err(Into::into)
-            },
-        )
+        let connector_id = connector_id.map(str::to_owned);
+        self.call(move |connection| {
+            connector_id.as_deref().map_or_else(
+                || {
+                    connection
+                        .execute("DELETE FROM persistent_grants", [])
+                        .map_err(Into::into)
+                },
+                |id| {
+                    connection
+                        .execute(
+                            "DELETE FROM persistent_grants WHERE connector_id = ?1",
+                            [id],
+                        )
+                        .map_err(Into::into)
+                },
+            )
+        })
     }
 
     pub fn approval_status(&self, id: Uuid) -> Result<Option<ApprovalRequest>> {
-        let connection = self.lock()?;
-        expire_approvals(&connection)?;
-        connection
-            .query_row(
-                "SELECT id, connector_id, tool_name, argument_summary, argument_hash,
-                        status, created_at, expires_at, resolved_at, decision
-                 FROM approvals WHERE id = ?1",
-                [id.to_string()],
-                map_approval,
-            )
-            .optional()
-            .map_err(Into::into)
+        self.call(move |connection| approval_status_connection(connection, id))
+    }
+
+    pub async fn approval_status_async(&self, id: Uuid) -> Result<Option<ApprovalRequest>> {
+        self.call_async(move |connection| approval_status_connection(connection, id))
+            .await
     }
 
     pub fn pending_approvals(&self) -> Result<Vec<ApprovalRequest>> {
-        let connection = self.lock()?;
-        expire_approvals(&connection)?;
-        let mut statement = connection.prepare(
-            "SELECT id, connector_id, tool_name, argument_summary, argument_hash,
-                    status, created_at, expires_at, resolved_at, decision
-             FROM approvals WHERE status = 'pending' ORDER BY created_at",
-        )?;
-        let rows = statement.query_map([], map_approval)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.call(pending_approvals_connection)
     }
 
-    /// Deny all pending approvals and remove every temporary grant.
-    ///
-    /// This is used by the local emergency lock after the agent service has
-    /// been stopped, so no queued request can survive a later restart.
     pub fn emergency_lock(&self) -> Result<(usize, usize)> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let now = Utc::now().to_rfc3339();
-        let denied = transaction.execute(
-            "UPDATE approvals
-             SET status = 'denied', resolved_at = ?1, decision = 'deny'
-             WHERE status = 'pending'",
-            [&now],
-        )?;
-        let cleared = transaction.execute("DELETE FROM temporary_grants", [])?;
-        transaction.commit()?;
-        Ok((denied, cleared))
+        self.call(|connection| {
+            let transaction=connection.transaction()?; let now=Utc::now().to_rfc3339();
+            let denied=transaction.execute("UPDATE approvals SET status = 'denied', resolved_at = ?1, decision = 'deny' WHERE status = 'pending'", [&now])?;
+            let cleared=transaction.execute("DELETE FROM temporary_grants", [])?; transaction.commit()?; Ok((denied,cleared))
+        })
     }
 
     pub fn append_audit(&self, event: &AuditEvent) -> Result<String> {
-        let mut connection = self.lock()?;
-        let previous: String = connection
-            .query_row(
-                "SELECT record_hash FROM audit_events ORDER BY sequence DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(audit_anchor(&connection)?);
-        let payload = serde_json::to_vec(event)?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(previous.as_bytes());
-        hasher.update(&payload);
-        let record_hash = hasher.finalize().to_hex().to_string();
-        connection.execute(
-            "INSERT INTO audit_events (
-                id, timestamp, connector_id, tool_name, capability, outcome,
-                argument_hash, summary, duration_ms, output_bytes,
-                previous_hash, record_hash, payload
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                event.id.to_string(),
-                event.timestamp.to_rfc3339(),
-                event.connector_id,
-                event.tool_name,
-                event.capability,
-                serde_json::to_string(&event.outcome)?,
-                event.argument_hash,
-                event.summary,
-                event
-                    .duration_ms
-                    .and_then(|value| i64::try_from(value).ok()),
-                event
-                    .output_bytes
-                    .and_then(|value| i64::try_from(value).ok()),
-                previous,
-                record_hash,
-                payload,
-            ],
-        )?;
-        if connection.last_insert_rowid() % 128 == 0 {
-            prune_audit_connection(
-                &mut connection,
-                chrono::Duration::days(AUDIT_RETENTION_DAYS),
-                AUDIT_MAX_BYTES,
-            )?;
-        }
-        Ok(record_hash)
+        let event = event.clone();
+        self.call(move |connection| append_audit_connection(connection, &event))
     }
 
-    /// Apply the default age and storage limits to the audit log.
+    pub async fn append_audit_async(&self, event: AuditEvent) -> Result<String> {
+        self.call_async(move |connection| append_audit_connection(connection, &event))
+            .await
+    }
+
     pub fn prune_audit(&self) -> Result<usize> {
-        let mut connection = self.lock()?;
-        prune_audit_connection(
-            &mut connection,
-            chrono::Duration::days(AUDIT_RETENTION_DAYS),
-            AUDIT_MAX_BYTES,
-        )
+        self.call(|connection| {
+            prune_audit_connection(
+                connection,
+                chrono::Duration::days(AUDIT_RETENTION_DAYS),
+                AUDIT_MAX_BYTES,
+            )
+        })
     }
 
     pub fn verify_audit_chain(&self) -> Result<bool> {
-        let connection = self.lock()?;
-        let mut statement = connection.prepare(
-            "SELECT previous_hash, record_hash, payload FROM audit_events ORDER BY sequence",
-        )?;
-        let mut rows = statement.query([])?;
-        let mut expected_previous = audit_anchor(&connection)?;
-        while let Some(row) = rows.next()? {
-            let previous: String = row.get(0)?;
-            let record_hash: String = row.get(1)?;
-            let payload: Vec<u8> = row.get(2)?;
-            if previous != expected_previous {
-                return Ok(false);
-            }
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(previous.as_bytes());
-            hasher.update(&payload);
-            if hasher.finalize().to_hex().as_str() != record_hash {
-                return Ok(false);
-            }
-            expected_previous = record_hash;
-        }
-        Ok(true)
+        self.call(verify_audit_chain_connection)
     }
 
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditRecord>> {
-        let limit = i64::try_from(limit.clamp(1, 10_000)).unwrap_or(10_000);
-        let connection = self.lock()?;
-        let mut statement = connection.prepare(
-            "SELECT sequence, payload, previous_hash, record_hash
-             FROM audit_events ORDER BY sequence DESC LIMIT ?1",
-        )?;
-        let rows = statement.query_map([limit], |row| {
-            let sequence = u64::try_from(row.get::<_, i64>(0)?).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Integer,
-                    Box::new(error),
-                )
-            })?;
-            let payload: Vec<u8> = row.get(1)?;
-            let event = serde_json::from_slice::<AuditEvent>(&payload).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Blob,
-                    Box::new(error),
-                )
-            })?;
-            Ok(AuditRecord {
-                sequence,
-                event,
-                previous_hash: row.get(2)?,
-                record_hash: row.get(3)?,
-            })
-        })?;
-        let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        records.reverse();
-        Ok(records)
+        self.call(move |connection| audit_tail_connection(connection, limit))
     }
+
+    #[cfg(test)]
+    fn test_call<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        self.call(operation)
+    }
+}
+
+fn insert_approval_connection(
+    connection: &mut Connection,
+    request: &ApprovalRequest,
+) -> Result<()> {
+    connection.execute("INSERT INTO approvals (id, connector_id, tool_name, argument_summary, argument_hash, status, created_at, expires_at, resolved_at, decision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)", params![request.id.to_string(), request.connector_id, request.tool_name, request.argument_summary, request.argument_hash, status_name(request.status), request.created_at.to_rfc3339(), request.expires_at.to_rfc3339()])?;
+    Ok(())
+}
+
+fn resolve_approval_connection(
+    connection: &mut Connection,
+    id: Uuid,
+    decision: ApprovalDecision,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let now = Utc::now().to_rfc3339();
+    let status = if decision == ApprovalDecision::Deny {
+        "denied"
+    } else {
+        "approved"
+    };
+    let changed=transaction.execute("UPDATE approvals SET status = ?1, resolved_at = ?2, decision = ?3 WHERE id = ?4 AND status = 'pending' AND expires_at > ?2", params![status, now, decision_name(decision), id.to_string()])?;
+    if changed == 1 && decision == ApprovalDecision::ForTenMinutes {
+        transaction.execute("INSERT INTO temporary_grants (connector_id, tool_name, argument_hash, expires_at) SELECT connector_id, tool_name, argument_hash, ?1 FROM approvals WHERE id = ?2 ON CONFLICT(connector_id, tool_name, argument_hash) DO UPDATE SET expires_at = excluded.expires_at", params![(Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(), id.to_string()])?;
+    } else if changed == 1 && decision == ApprovalDecision::Always {
+        transaction.execute("INSERT INTO persistent_grants (connector_id, tool_name, argument_hash, argument_summary, created_at) SELECT connector_id, tool_name, argument_hash, argument_summary, ?1 FROM approvals WHERE id = ?2 ON CONFLICT(connector_id, tool_name, argument_hash) DO UPDATE SET argument_summary = excluded.argument_summary, created_at = excluded.created_at", params![Utc::now().to_rfc3339(), id.to_string()])?;
+    }
+    transaction.commit()?;
+    Ok(changed == 1)
+}
+
+fn grant_allows_connection(
+    connection: &mut Connection,
+    connector_id: &str,
+    tool_name: &str,
+    argument_hash: &str,
+) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    connection.execute(
+        "DELETE FROM temporary_grants WHERE expires_at <= ?1",
+        [&now],
+    )?;
+    Ok(connection.query_row("SELECT 1 FROM temporary_grants WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3 AND expires_at > ?4 UNION ALL SELECT 1 FROM persistent_grants WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3 LIMIT 1",params![connector_id,tool_name,argument_hash,now], |_|Ok(())).optional()?.is_some())
+}
+
+fn persistent_grants_connection(
+    connection: &mut Connection,
+    connector_id: Option<&str>,
+) -> Result<Vec<PersistentGrant>> {
+    let mut statement=connection.prepare("SELECT connector_id, tool_name, argument_summary, argument_hash, created_at FROM persistent_grants WHERE (?1 IS NULL OR connector_id = ?1) ORDER BY created_at DESC, connector_id, tool_name")?;
+    let rows = statement.query_map([connector_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (c, t, s, h, created) = row?;
+        Ok(PersistentGrant {
+            connector_id: c,
+            tool_name: t,
+            argument_summary: s,
+            argument_hash: h,
+            created_at: DateTime::<Utc>::from_str(&created)
+                .context("persistent grant has an invalid timestamp")?,
+        })
+    })
+    .collect()
+}
+
+fn approval_status_connection(
+    connection: &mut Connection,
+    id: Uuid,
+) -> Result<Option<ApprovalRequest>> {
+    expire_approvals(connection)?;
+    connection.query_row("SELECT id, connector_id, tool_name, argument_summary, argument_hash, status, created_at, expires_at, resolved_at, decision FROM approvals WHERE id = ?1",[id.to_string()],map_approval).optional().map_err(Into::into)
+}
+fn pending_approvals_connection(connection: &mut Connection) -> Result<Vec<ApprovalRequest>> {
+    expire_approvals(connection)?;
+    let mut statement=connection.prepare("SELECT id, connector_id, tool_name, argument_summary, argument_hash, status, created_at, expires_at, resolved_at, decision FROM approvals WHERE status = 'pending' ORDER BY created_at")?;
+    let rows = statement.query_map([], map_approval)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn append_audit_connection(connection: &mut Connection, event: &AuditEvent) -> Result<String> {
+    let previous: String = connection
+        .query_row(
+            "SELECT record_hash FROM audit_events ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(audit_anchor(connection)?);
+    let payload = serde_json::to_vec(event)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(previous.as_bytes());
+    hasher.update(&payload);
+    let record_hash = hasher.finalize().to_hex().to_string();
+    connection.execute("INSERT INTO audit_events (id, timestamp, connector_id, tool_name, capability, outcome, argument_hash, summary, duration_ms, output_bytes, previous_hash, record_hash, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",params![event.id.to_string(),event.timestamp.to_rfc3339(),event.connector_id,event.tool_name,event.capability,serde_json::to_string(&event.outcome)?,event.argument_hash,event.summary,event.duration_ms.and_then(|v|i64::try_from(v).ok()),event.output_bytes.and_then(|v|i64::try_from(v).ok()),previous,record_hash,payload])?;
+    if connection.last_insert_rowid() % 128 == 0 {
+        prune_audit_connection(
+            connection,
+            chrono::Duration::days(AUDIT_RETENTION_DAYS),
+            AUDIT_MAX_BYTES,
+        )?;
+    }
+    Ok(record_hash)
+}
+
+fn verify_audit_chain_connection(connection: &mut Connection) -> Result<bool> {
+    let mut statement = connection.prepare(
+        "SELECT previous_hash, record_hash, payload FROM audit_events ORDER BY sequence",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut expected = audit_anchor(connection)?;
+    while let Some(row) = rows.next()? {
+        let previous: String = row.get(0)?;
+        let record_hash: String = row.get(1)?;
+        let payload: Vec<u8> = row.get(2)?;
+        if previous != expected {
+            return Ok(false);
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(previous.as_bytes());
+        hasher.update(&payload);
+        if hasher.finalize().to_hex().as_str() != record_hash {
+            return Ok(false);
+        }
+        expected = record_hash;
+    }
+    Ok(true)
+}
+
+fn audit_tail_connection(connection: &mut Connection, limit: usize) -> Result<Vec<AuditRecord>> {
+    let limit = i64::try_from(limit.clamp(1, 10_000)).unwrap_or(10_000);
+    let mut statement=connection.prepare("SELECT sequence, payload, previous_hash, record_hash FROM audit_events ORDER BY sequence DESC LIMIT ?1")?;
+    let rows = statement.query_map([limit], |row| {
+        let sequence = u64::try_from(row.get::<_, i64>(0)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?;
+        let payload: Vec<u8> = row.get(1)?;
+        let event = serde_json::from_slice::<AuditEvent>(&payload).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?;
+        Ok(AuditRecord {
+            sequence,
+            event,
+            previous_hash: row.get(2)?,
+            record_hash: row.get(3)?,
+        })
+    })?;
+    let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    records.reverse();
+    Ok(records)
 }
 
 fn configure_connection(connection: &Connection) -> Result<()> {
@@ -681,6 +734,35 @@ mod tests {
     use super::*;
     use crate::audit::{AuditEvent, AuditOutcome};
 
+    #[tokio::test]
+    async fn async_worker_handles_authorization_state_without_blocking_connection_ownership()
+    -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let approval = ApprovalRequest::new(
+            "local",
+            "fs_write",
+            "write a file",
+            "async-hash",
+            Utc::now() + Duration::seconds(90),
+        );
+        store.insert_approval_async(approval.clone()).await?;
+        assert!(
+            store
+                .resolve_approval_async(approval.id, ApprovalDecision::ForTenMinutes)
+                .await?
+        );
+        assert!(
+            store
+                .grant_allows_async(
+                    "local".to_owned(),
+                    "fs_write".to_owned(),
+                    "async-hash".to_owned(),
+                )
+                .await?
+        );
+        Ok(())
+    }
+
     #[test]
     fn approval_can_only_be_resolved_once() -> Result<()> {
         let store = StateStore::in_memory()?;
@@ -792,13 +874,13 @@ mod tests {
             "current event",
         );
         store.append_audit(&current)?;
-        let mut connection = store.lock()?;
-        let removed = prune_audit_connection(
-            &mut connection,
-            Duration::days(AUDIT_RETENTION_DAYS),
-            AUDIT_MAX_BYTES,
-        )?;
-        drop(connection);
+        let removed = store.test_call(|connection| {
+            prune_audit_connection(
+                connection,
+                Duration::days(AUDIT_RETENTION_DAYS),
+                AUDIT_MAX_BYTES,
+            )
+        })?;
         assert_eq!(removed, 1);
         assert!(store.verify_audit_chain()?);
         assert_eq!(store.audit_tail(10)?.len(), 1);
@@ -818,10 +900,9 @@ mod tests {
                 "x".repeat(1_024),
             ))?;
         }
-        let mut connection = store.lock()?;
-        let removed =
-            prune_audit_connection(&mut connection, Duration::days(AUDIT_RETENTION_DAYS), 1_600)?;
-        drop(connection);
+        let removed = store.test_call(|connection| {
+            prune_audit_connection(connection, Duration::days(AUDIT_RETENTION_DAYS), 1_600)
+        })?;
         assert!(removed >= 2);
         assert!(store.verify_audit_chain()?);
         Ok(())

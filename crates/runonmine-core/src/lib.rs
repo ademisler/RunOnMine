@@ -18,7 +18,10 @@ pub use config::{
     ConnectorConfig, ConnectorKind, OAuthOwnerSettings, OpenAiTunnelSettings,
 };
 pub use paths::AppPaths;
-pub use policy::{Capability, PolicyDecision, PolicyEngine, PolicyMode, PolicyPreset};
+pub use policy::{
+    Capability, DecisionSource, PolicyContext, PolicyDecision, PolicyEngine, PolicyMode,
+    PolicyPreset, PolicyRule, PrincipalContext, PrincipalMatcher, ResourceContext, ResourceMatcher,
+};
 pub use storage::{AuditRecord, StateStore};
 
 /// Product identifier used for OS integration and MCP metadata.

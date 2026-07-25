@@ -1,11 +1,19 @@
 # Permissions
 
-Every connector first resolves a tool in this order:
+Every connector resolves a tool in this order:
 
-1. connector tool override;
-2. connector capability override;
-3. selected preset;
-4. deny.
+1. the most specific matching principal/resource rule;
+2. connector tool override;
+3. connector capability override;
+4. selected preset;
+5. deny.
+
+Principal matchers can target local requests, a specific OAuth client, or a
+specific OAuth subject. Resource matchers can restrict a rule to a filesystem
+prefix, browser origin, executable path, or command prefix. At equal
+specificity, `deny` wins over `ask`, which wins over `allow`. Rules are stored
+in the connector's `policy_rules` configuration and are validated when the
+configuration is loaded.
 
 A final safety ceiling is then applied to internet-facing Cloudflare and OpenAI
 connectors. File writes, user shell, browser actions, desktop control, and
@@ -68,8 +76,12 @@ separate local capability policy.
 
 ## Important boundaries
 
-File tools canonicalize configured roots and requested paths and reject symlink
-escapes. `fs_delete` uses the operating-system trash by default.
+File roots are opened once as directory capabilities. Reads, listings, searches,
+writes, renames, and deletion staging are performed descriptor-relative to
+those open handles. Parent traversal, symlink/reparse-point traversal, and
+non-regular targets are rejected without a separate canonicalize-then-open
+window. `fs_delete` moves entries into a private `.runonmine-trash` directory
+inside the same selected root so the move remains descriptor-relative.
 
 `shell_exec` is not a sandbox. When approved, it can run any command available
 to the agent's user account. `admin_exec` is not a root shell: the helper accepts
