@@ -23,14 +23,14 @@ jobs:
     runs-on: [self-hosted, Linux, X64, runonmine]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
         with:
           toolchain: 1.95.0
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Enforce headless line coverage baseline
@@ -38,7 +38,7 @@ jobs:
           cargo llvm-cov --workspace --exclude runonmine-desktop
           --no-default-features --locked --fail-under-lines 45
           --lcov --output-path coverage.lcov
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runonmine-coverage-lcov
           path: coverage.lcov
