@@ -41,6 +41,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Extract MCP session limits, idle expiry, and protocol session tracking into a dedicated lifecycle module with direct permit-release regression coverage.
 - Add a unified `xtask verify` command, machine-readable release acceptance gates, clean-machine smoke scripts, enforced coverage, scheduled fuzzing, and tested desktop layout breakpoints.
 - Mark workspace crates as non-publishable by default and provide consistent package description/homepage metadata.
 - Add deterministic directory pagination, fixed-size managed-trash names, joined SQLite/supervisor lifecycles, exact platform package manifests, and automatic full-feature/platform CI gates.
