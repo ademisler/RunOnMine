@@ -36,7 +36,7 @@ runonmine-platform = { version = "=0.1.0-beta.1", path = "crates/runonmine-platf
 anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.8.9", features = ["form", "http1", "json", "tokio"] }
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1.8"
 cap-std = "4.0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
