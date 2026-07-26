@@ -1,0 +1,50 @@
+name: Release readiness
+description: Track acceptance evidence for a RunOnMine beta candidate.
+title: "[Release]: v"
+labels: [release]
+body:
+  - type: input
+    id: commit
+    attributes:
+      label: Release commit
+      description: Full Git commit SHA under review.
+    validations:
+      required: true
+  - type: checkboxes
+    id: automated
+    attributes:
+      label: Automated gates
+      options:
+        - label: Formatting, version consistency, Clippy, and all tests pass.
+          required: true
+        - label: Dependency policy and complete-history secret scan pass.
+          required: true
+        - label: Coverage remains above the enforced baseline.
+          required: true
+        - label: Scheduled fuzz targets have no unresolved crash artifact.
+          required: true
+  - type: checkboxes
+    id: platforms
+    attributes:
+      label: Clean-machine acceptance
+      options:
+        - label: macOS acceptance evidence attached.
+        - label: Linux acceptance evidence attached.
+        - label: Windows acceptance evidence attached.
+        - label: Hosted cross-platform matrix passed for this commit.
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security and release review
+      options:
+        - label: Windows helper boundary review completed.
+        - label: Remaining risks were presented to the owner.
+        - label: Artifact hashes and SBOMs were verified.
+        - label: Signing/notarization status is accurately disclosed.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Add links to logs, reports, VM snapshots, and artifact checksums. Never paste credentials or private machine data.
+    validations:
+      required: true

@@ -22,6 +22,8 @@ license = "Apache-2.0"
 repository = "https://github.com/ademisler/RunOnMine"
 homepage = "https://github.com/ademisler/RunOnMine"
 authors = ["RunOnMine contributors"]
+description = "Local-first security control plane for AI tools on machines you own."
+publish = false
 
 [workspace.dependencies]
 runonmine-browser = { version = "=0.1.0-beta.1", path = "crates/runonmine-browser" }

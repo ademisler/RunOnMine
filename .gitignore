@@ -24,3 +24,10 @@ state.db-*
 dist/
 artifacts/
 
+
+# Fuzzing output and generated corpora.
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/target/
+/coverage.lcov
+*.profraw

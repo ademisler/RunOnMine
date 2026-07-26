@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "OAuth 2.1 authorization server primitives for RunOnMine"
+publish.workspace = true
 repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 async-trait.workspace = true

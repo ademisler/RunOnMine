@@ -17,7 +17,9 @@ Linux, or Windows machine.
 
 The Rust `0.1.0-beta.1` implementation is in security-hardening and acceptance
 testing. The repository must remain private until the final security review is
-presented to its owner. There is no supported production release yet.
+presented to its owner. Release tags are blocked by machine-readable acceptance
+gates until clean-machine, cross-platform, and owner-review evidence is recorded.
+There is no supported production release yet.
 
 Implemented connection modes:
 
@@ -111,10 +113,16 @@ Requirements:
 - the platform C/C++ toolchain required by bundled SQLite and desktop crates.
 
 ```console
-cargo fmt --all --check
-cargo run --locked -p xtask -- verify-versions
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
+cargo run --locked -p xtask -- verify
+```
+
+Use `--headless` on a Linux/VPS development host and `--skip-secret-scan` only
+when Gitleaks is unavailable locally. CI separately enforces a 45% headless line
+coverage floor and runs scheduled parser/policy fuzz targets. The isolated CLI
+acceptance smoke test is available as:
+
+```console
+./scripts/acceptance/cli-smoke.sh
 ```
 
 Build a Linux/VPS agent without desktop dependencies:
@@ -138,6 +146,7 @@ be committed.
 - [Linux and VPS](docs/platforms/linux.md)
 - [Windows](docs/platforms/windows.md)
 - [Release process](docs/releasing.md)
+- [Release acceptance](docs/acceptance.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 ## License
