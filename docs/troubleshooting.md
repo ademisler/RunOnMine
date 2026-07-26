@@ -50,6 +50,30 @@ session with Secret Service or supply a valid 32-byte `RUNONMINE_MASTER_KEY`
 through the host's secret manager. RunOnMine deliberately does not create a
 fallback plaintext store.
 
+## Redacted support bundle
+
+Run the doctor first, then create a private support ZIP when diagnostics need to
+be shared:
+
+```console
+runonmine doctor
+runonmine support-bundle --output runonmine-support.zip
+```
+
+The archive is written without overwriting an existing file and is owner-only on
+Unix. It contains generated structural configuration and service summaries, a
+bounded audit outcome sample without connector IDs, argument hashes, or event
+summaries, a checksum manifest, and up to five recent bounded log tails from
+`.log`, `.txt`, `.jsonl`, or `.ndjson` files.
+
+RunOnMine does not copy the raw config file, state database, credential store,
+browser profiles, audit arguments, connector identifiers, hostnames, URLs, or
+filesystem roots into the archive. Known local values plus generic credentials,
+URLs, email addresses, absolute paths, IP addresses, hostnames, and high-entropy
+tokens are redacted from included log fragments. Redaction cannot prove that
+arbitrary application text contains no personal data, so inspect the ZIP before
+sharing it.
+
 ## Service diagnostics
 
 ```console

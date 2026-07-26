@@ -80,6 +80,8 @@ enum Command {
     Lock(LockArgs),
     /// Remove the per-user service. User data is retained unless purge is explicit.
     Uninstall(UninstallArgs),
+    /// Create a bounded, redacted ZIP for troubleshooting.
+    SupportBundle(SupportBundleArgs),
     Doctor,
     Audit {
         #[command(subcommand)]
@@ -405,6 +407,13 @@ struct UninstallArgs {
     confirm: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct SupportBundleArgs {
+    /// Output ZIP. Defaults to a timestamped file in the current directory.
+    #[arg(long, value_name = "FILE")]
+    output: Option<PathBuf>,
+}
+
 #[derive(Debug, Subcommand)]
 enum AuditCommand {
     Tail {
@@ -512,13 +521,16 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Service { command } => service(command),
         Command::Lock(args) => emergency_lock(&args),
         Command::Uninstall(args) => uninstall(&args),
+        Command::SupportBundle(args) => create_support_bundle(args.output.as_deref()),
         Command::Doctor => doctor().await,
         Command::Audit { command } => audit(command),
     }
 }
 
 mod commands;
+mod support_bundle;
 use commands::{
     admin, approvals, audit, browser, connect, doctor, emergency_lock, oauth, policy, service,
     setup, spawn_sibling, uninstall,
 };
+use support_bundle::create_support_bundle;

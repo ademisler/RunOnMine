@@ -32,6 +32,7 @@ compromised.
 | A token asks for more authority than granted locally | OAuth scope is intersected with policy and never expands it |
 | A file path escapes a selected root or a move targets a differently restricted path | descriptor-relative root capabilities, component checks, symlink rejection, authorization of both source and destination, bounded operations |
 | Output or errors reveal credentials | generic remote errors, bounded output, desktop child-output redaction, approval redaction, cleared shell environment, no raw environment or stdin audit data |
+| Support material reveals credentials or private machine data | generated summaries instead of raw config/state files, allowlisted text-log extensions, bounded file count and tails, known-value plus generic redaction, omission of audit arguments and connector identity, no-overwrite owner-only ZIP, per-entry checksum manifest, explicit user review warning |
 | A timed-out command leaves descendants running | Unix process groups and Windows Job Objects terminate the process tree |
 | Concurrent local processes overwrite encrypted fallback secrets | owner-only inter-process file locking around every read-modify-write transaction |
 | OAuth registration floods survive behind a public tunnel | SQLite-backed atomic registration windows, registered-client cap, restart-persistent pruning |

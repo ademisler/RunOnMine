@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -115,6 +116,26 @@ fn setup_policy_lock_and_purge_run_as_an_isolated_user_flow() -> Result<()> {
     let approvals = cli.run_ok(&["approvals", "list"])?;
     assert!(approvals.contains("No pending approvals."));
     let _audit = cli.run_ok(&["audit", "tail", "--limit", "5"])?;
+
+    let bundle_path = cli.root.path().join("support.zip");
+    let bundle_path_text = bundle_path.to_string_lossy().into_owned();
+    let bundle = cli.run_ok(&["support-bundle", "--output", &bundle_path_text])?;
+    assert!(bundle.contains("Created redacted support bundle"));
+    assert!(bundle_path.is_file());
+    assert_below(&bundle_path, cli.root.path())?;
+    let mut archive = zip::ZipArchive::new(fs::File::open(&bundle_path)?)?;
+    let mut bundle_contents = String::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        bundle_contents.push_str(entry.name());
+        bundle_contents.push('\n');
+        entry.read_to_string(&mut bundle_contents)?;
+        bundle_contents.push('\n');
+    }
+    assert!(bundle_contents.contains("manifest.json"));
+    assert!(bundle_contents.contains("summary.json"));
+    assert!(bundle_contents.contains("audit-summary.json"));
+    assert!(!bundle_contents.contains(&project));
 
     let locked = cli.run_ok(&["lock"])?;
     assert!(locked.contains("RunOnMine is locked."));

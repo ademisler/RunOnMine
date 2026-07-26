@@ -4339,13 +4339,16 @@ dependencies = [
  "runonmine-oauth",
  "runonmine-platform",
  "secrecy",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]

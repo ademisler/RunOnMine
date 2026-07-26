@@ -60,9 +60,12 @@ Inspect a portable archive and SBOM with:
 ## Evidence
 
 Evidence must not contain credentials, private paths, cookies, personal data, or
-raw audit payloads. Attach redacted command output and screenshots to the release
-readiness issue, then update only the corresponding gate in
-`acceptance/release-gates.toml`.
+raw audit payloads. Prefer `runonmine support-bundle --output runonmine-support.zip`
+over copying raw application directories, and inspect every generated ZIP before
+attaching it. The support bundle intentionally omits raw config/state data and
+applies bounded redaction, but user review remains mandatory. Attach the reviewed
+bundle, redacted command output, and screenshots to the release readiness issue,
+then update only the corresponding gate in `acceptance/release-gates.toml`.
 
 ## Fuzz dependency maintenance
 
