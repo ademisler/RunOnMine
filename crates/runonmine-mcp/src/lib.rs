@@ -1,11 +1,11 @@
 //! Policy-aware MCP server and local transports.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -65,7 +65,9 @@ use tower::limit::ConcurrencyLimitLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use url::Url;
 
+mod rate_limit;
 mod session;
+use rate_limit::PrincipalRateLimiter;
 use session::{IdleSessionManager, SessionPermit};
 
 pub const SERVER_NAME: &str = "runonmine";
@@ -94,8 +96,7 @@ struct RuntimeInner {
     process_timeout: Duration,
     max_process_timeout: Duration,
     max_output_bytes: usize,
-    calls_per_minute: usize,
-    calls: Mutex<HashMap<String, VecDeque<Instant>>>,
+    rate_limiter: PrincipalRateLimiter,
     max_sessions: usize,
     active_sessions: Arc<AtomicUsize>,
 }
@@ -214,8 +215,9 @@ impl Runtime {
             process_timeout: Duration::from_secs(config.limits.default_process_timeout_seconds),
             max_process_timeout: Duration::from_secs(config.limits.max_process_timeout_seconds),
             max_output_bytes: config.limits.max_output_bytes,
-            calls_per_minute: usize::try_from(config.limits.calls_per_minute).unwrap_or(usize::MAX),
-            calls: Mutex::new(HashMap::new()),
+            rate_limiter: PrincipalRateLimiter::new(
+                usize::try_from(config.limits.calls_per_minute).unwrap_or(usize::MAX),
+            ),
             max_sessions: config.limits.max_sessions,
             active_sessions: Arc::new(AtomicUsize::new(0)),
         })))
@@ -237,25 +239,7 @@ impl Runtime {
     }
 
     fn check_rate_limit(&self, principal: &str) -> Result<()> {
-        let mut calls = self
-            .0
-            .calls
-            .lock()
-            .map_err(|_| anyhow::anyhow!("rate limit lock failed"))?;
-        let now = Instant::now();
-        let cutoff = now.checked_sub(Duration::from_mins(1)).unwrap_or(now);
-        for entries in calls.values_mut() {
-            while entries.front().is_some_and(|instant| *instant < cutoff) {
-                entries.pop_front();
-            }
-        }
-        calls.retain(|_, entries| !entries.is_empty());
-        let entries = calls.entry(principal.to_owned()).or_default();
-        if entries.len() >= self.0.calls_per_minute {
-            bail!("principal rate limit reached");
-        }
-        entries.push_back(now);
-        Ok(())
+        self.0.rate_limiter.check(principal)
     }
 }
 
