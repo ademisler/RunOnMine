@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Correctly distinguish 64-character hexadecimal master keys from Base64 and exercise the encrypted fallback through isolated real-binary acceptance tests.
 - Make explicit deny rules override exact-action grants and authorize every filesystem resource in multi-path operations.
 - Require immutable GitHub numeric owner IDs for OAuth connectors and persist dynamic registration rate limits across restarts.
 - Serialize fallback encrypted-secret updates across processes and enforce private SQLite database, WAL, and shared-memory permissions.
@@ -40,6 +41,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Add a unified `xtask verify` command, machine-readable release acceptance gates, clean-machine smoke scripts, enforced coverage, scheduled fuzzing, and tested desktop layout breakpoints.
+- Mark workspace crates as non-publishable by default and provide consistent package description/homepage metadata.
 - Add deterministic directory pagination, fixed-size managed-trash names, joined SQLite/supervisor lifecycles, exact platform package manifests, and automatic full-feature/platform CI gates.
 - Use one macOS packager configuration source and require advisory-free dependency checks in contributor and CI workflows.
 - Redesign the desktop control center with a cohesive dark theme, persistent sidebar navigation, status cards, improved empty states, modern connector and policy workflows, and clearer destructive-action confirmation.

@@ -7,12 +7,18 @@ separate owner decision and is never changed by CI.
 
 Before creating a tag:
 
-1. run formatting, `xtask verify-versions`, Clippy with warnings denied, and the complete test suite;
-2. run `cargo audit --deny warnings`, `cargo deny check`, and a full-history secret scan;
+1. run `cargo run --locked -p xtask -- verify` without skipping the secret scan;
+2. keep headless line coverage at or above the enforced baseline and review the latest scheduled fuzz run;
 3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, and Windows x86_64 builds;
-4. complete install, restart, connect, tool-call, and uninstall acceptance on a Mac, clean Linux VPS, and Windows VM;
+4. complete install, restart, connect, tool-call, lock, and uninstall acceptance on a Mac, clean Linux VPS, and Windows VM;
 5. confirm no MacMCP service, file, or port was changed;
-6. present remaining risks and the secret-scan result to the repository owner.
+6. record evidence in `acceptance/release-gates.toml` and pass `cargo run --locked -p xtask -- release-readiness --profile private-beta`;
+7. present remaining risks and the secret-scan result to the repository owner.
+
+The release workflow independently runs the private-beta readiness command and
+stops before packaging while any required gate is `pending` or `blocked`. Public
+beta also requires signing/notarization and protected-main gates. See
+[release acceptance](acceptance.md).
 
 The tag must exactly match the Cargo version:
 
@@ -42,7 +48,8 @@ The workflow opens a draft prerelease only. Artifacts are deliberately unsigned 
 ## Local packaging helpers
 
 ```console
-cargo run --locked -p xtask -- verify-versions
+cargo run --locked -p xtask -- verify
+cargo run --locked -p xtask -- release-readiness --profile private-beta
 cargo run --locked -p xtask -- sync-versions
 cargo run -p xtask -- package --target <rust-target>
 cargo run -p xtask -- stage-packager --target <rust-target>

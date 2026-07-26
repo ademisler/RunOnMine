@@ -280,6 +280,13 @@ impl SecretStore for EncryptedFileSecretStore {
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub fn default_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("RUNONMINE_TEST_FILE_SECRETS").is_some() {
+        return Ok(Box::new(EncryptedFileSecretStore::from_environment(
+            paths.state_dir.join("secrets.enc"),
+            "dev.runonmine.agent",
+        )?));
+    }
     #[cfg(target_os = "linux")]
     {
         let desktop_secret_service = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
@@ -295,11 +302,15 @@ pub fn default_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
 }
 
 fn decode_master_key(value: &str) -> Result<[u8; 32]> {
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(value)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value))
-        .or_else(|_| hex::decode(value))
-        .context("RUNONMINE_MASTER_KEY must be 32 bytes encoded as base64 or hex")?;
+    let decoded = if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        hex::decode(value)
+            .context("RUNONMINE_MASTER_KEY must be 32 bytes encoded as base64 or hex")?
+    } else {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value))
+            .context("RUNONMINE_MASTER_KEY must be 32 bytes encoded as base64 or hex")?
+    };
     decoded
         .try_into()
         .map_err(|_| anyhow!("RUNONMINE_MASTER_KEY must decode to exactly 32 bytes"))
@@ -334,6 +345,17 @@ fn restrict_secret_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn master_key_decoder_distinguishes_hex_from_base64() -> Result<()> {
+        let expected = [0xab_u8; 32];
+        let hexadecimal = "ab".repeat(32);
+        assert_eq!(decode_master_key(&hexadecimal)?, expected);
+
+        let base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(expected);
+        assert_eq!(decode_master_key(&base64)?, expected);
+        Ok(())
+    }
 
     #[test]
     fn encrypted_store_serializes_updates_across_instances() -> Result<()> {

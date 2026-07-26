@@ -12,3 +12,6 @@
 /crates/runonmine-oauth/ @ademisler
 /crates/runonmine-platform/ @ademisler
 /xtask/ @ademisler
+/acceptance/ @ademisler
+/scripts/acceptance/ @ademisler
+/fuzz/ @ademisler

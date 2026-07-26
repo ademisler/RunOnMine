@@ -18,16 +18,13 @@ Use Rust `1.95.0` from `rust-toolchain.toml` and keep `Cargo.lock` committed.
 Before opening a pull request, run:
 
 ```console
-cargo fmt --all --check
-cargo run --locked -p xtask -- verify-versions
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
-cargo clippy --workspace --exclude runonmine-desktop --no-default-features --all-targets --locked -- -D warnings
-cargo test --workspace --exclude runonmine-desktop --no-default-features --locked
-cargo audit --deny warnings
-cargo deny check
-gitleaks git --redact --no-banner --verbose
+cargo run --locked -p xtask -- verify
 ```
+
+Use `--headless` only on supported Linux/VPS development hosts. Run
+`./scripts/acceptance/cli-smoke.sh` after changing setup, secrets, policy,
+approvals, audit, lock, uninstall, or path discovery. Do not skip the secret
+scan for release work.
 
 Dependency advisories are release blockers. Do not add an advisory exception without an owner-approved, time-bounded risk record and an automated dependency-path assertion.
 

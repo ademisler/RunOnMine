@@ -36,6 +36,8 @@ and the smallest proof needed to demonstrate the problem.
 ## Security release gate
 
 A beta candidate must pass formatting, Clippy, tests, dependency policy, full
-Git-history secret scanning, platform builds, clean-machine acceptance tests,
-and an owner risk review. Packages remain unsupported until signing and platform
-acceptance are complete.
+Git-history secret scanning, the enforced coverage floor, scheduled fuzzing,
+platform builds, clean-machine acceptance tests, and an owner risk review. The
+tag workflow reads `acceptance/release-gates.toml` and fails while required
+evidence is pending or blocked. Packages remain unsupported until signing and
+platform acceptance are complete.

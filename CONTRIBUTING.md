@@ -7,15 +7,19 @@ profiles, logs, or generated MCP URLs to the repository.
 Before opening a pull request, run:
 
 ```console
-cargo fmt --all --check
-cargo run --locked -p xtask -- verify-versions
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
-cargo clippy --workspace --exclude runonmine-desktop --no-default-features --all-targets --locked -- -D warnings
-cargo test --workspace --exclude runonmine-desktop --no-default-features --locked
-cargo audit --deny warnings
-cargo deny check
-gitleaks git --redact --no-banner --verbose
+cargo run --locked -p xtask -- verify
+```
+
+On a headless Linux development machine, use `--headless`. The full command
+runs formatting, version consistency, desktop/full-feature and headless Clippy
+and tests, dependency policy, and the complete-history Gitleaks scan. Do not use
+`--skip-secret-scan` for a release candidate.
+
+Run the isolated real-binary flow after changing setup, policy, connector,
+approval, audit, lock, uninstall, secret, or path behavior:
+
+```console
+./scripts/acceptance/cli-smoke.sh
 ```
 
 Changes to authentication, policy evaluation, privileged IPC, process

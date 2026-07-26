@@ -28,6 +28,7 @@ jobs:
           tool: cargo-dist@0.32.0
       - run: cargo run --locked -p xtask -- verify-versions
       - run: cargo run --locked -p xtask -- verify-release-tag --tag "${{ github.ref_name }}"
+      - run: cargo run --locked -p xtask -- release-readiness --profile private-beta
       - run: dist plan --output-format=json
 
   macos-universal:
