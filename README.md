@@ -80,6 +80,21 @@ and invalidate temporary connector credentials with:
 runonmine lock
 ```
 
+For private troubleshooting, generate a bounded support archive instead of
+sharing raw configuration, state, or log directories:
+
+```console
+runonmine doctor
+runonmine support-bundle --output runonmine-support.zip
+```
+
+The ZIP contains generated structural summaries, service state, an audit outcome
+summary, per-entry checksums, and at most five bounded redacted text-log tails.
+It excludes raw configuration, the state database, credential stores, browser
+profiles, audit arguments, connector identifiers, hostnames, URLs, and selected
+filesystem roots. Redaction is defense in depth, so review the ZIP before
+sharing it.
+
 ## Security model
 
 - Connector policy first evaluates principal/resource rules, then tool override, capability override, preset, and finally deny. Explicit deny decisions are evaluated before exact-action grants, and multi-path operations such as `fs_move` must authorize every source and destination resource.
