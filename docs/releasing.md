@@ -43,7 +43,9 @@ The workflow opens a draft prerelease only. Artifacts are deliberately unsigned 
 
 ## Hosted platform validation
 
-`CI` always runs the supported Linux headless workspace plus the desktop crate's no-UI contract on the hardened self-hosted runner. `Platform CI` also runs the Linux platform contract there. The full desktop-enabled macOS/Windows and ARM headless matrix runs for manual dispatches, or automatically when the repository variable `ENABLE_GITHUB_HOSTED_PLATFORM_CI` is set to `true`. This guard prevents account billing or spending-limit failures from appearing as product failures while keeping the full matrix ready to enable without changing workflow code. Linux desktop UI dependencies are intentionally not part of the product's headless Linux target.
+`CI` runs one consolidated Linux quality job on the hardened self-hosted runner. It executes `xtask verify --headless` (formatting, version consistency, headless Clippy/tests, both dependency audits, dependency policy, and the complete-history Gitleaks scan), the desktop crate's no-UI contract, and the enforced coverage baseline in one checkout. The job uses an ephemeral Cargo target directory and removes it even after failure, avoiding repeated clean builds and stale runner disk growth. Independent `Security` and `Coverage` workflows remain available for manual dispatch and scheduled sweeps.
+
+`Platform CI` is separate from the self-hosted quality path. The full desktop-enabled macOS/Windows and ARM headless matrix runs for manual dispatches, or on pull requests when the repository variable `ENABLE_GITHUB_HOSTED_PLATFORM_CI` is set to `true`. This guard prevents account billing or spending-limit failures from appearing as product failures while keeping the full matrix ready to enable without changing workflow code. Linux desktop UI dependencies are intentionally not part of the product's headless Linux target.
 
 ## Local packaging helpers
 
