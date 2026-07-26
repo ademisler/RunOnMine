@@ -16,6 +16,8 @@ jobs:
   core-parsers:
     runs-on: [self-hosted, Linux, X64, runonmine]
     timeout-minutes: 30
+    env:
+      RUSTFLAGS: -C target-feature=-crt-static
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -27,9 +29,9 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.2
       - name: Fuzz configuration parsing and validation
-        run: cargo +nightly-2026-07-18 fuzz run config_toml -- -max_total_time=90 -rss_limit_mb=2048
+        run: cargo +nightly-2026-07-18 fuzz run config_toml --target x86_64-unknown-linux-gnu -- -max_total_time=90 -rss_limit_mb=2048
       - name: Fuzz policy rule evaluation
-        run: cargo +nightly-2026-07-18 fuzz run policy_engine -- -max_total_time=90 -rss_limit_mb=2048
+        run: cargo +nightly-2026-07-18 fuzz run policy_engine --target x86_64-unknown-linux-gnu -- -max_total_time=90 -rss_limit_mb=2048
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
