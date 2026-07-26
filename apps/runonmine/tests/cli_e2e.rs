@@ -100,7 +100,7 @@ fn setup_policy_lock_and_purge_run_as_an_isolated_user_flow() -> Result<()> {
     assert!(setup.contains("Allowed roots: 1"));
 
     let config_path = config_path_from_setup(&setup)?;
-    assert_below(&config_path, &cli.home)?;
+    assert_below(&config_path, cli.root.path())?;
     assert!(config_path.is_file());
 
     let policy = cli.run_ok(&["policy", "show"])?;

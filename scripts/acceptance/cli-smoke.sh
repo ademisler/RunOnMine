@@ -36,8 +36,8 @@ run_cli audit tail --limit 5 >/dev/null
 run_cli lock | grep -F 'RunOnMine is locked.' >/dev/null
 run_cli uninstall --purge --confirm PURGE | grep -F 'permanently removed' >/dev/null
 
-if find "$sandbox/home" -type f -print -quit | grep . >/dev/null; then
-  echo 'isolated smoke test left files below the temporary home' >&2
+if find "$sandbox" -type f -print -quit | grep . >/dev/null; then
+  echo 'isolated smoke test left files below the temporary sandbox' >&2
   exit 1
 fi
 
