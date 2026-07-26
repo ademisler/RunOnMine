@@ -63,3 +63,7 @@ Evidence must not contain credentials, private paths, cookies, personal data, or
 raw audit payloads. Attach redacted command output and screenshots to the release
 readiness issue, then update only the corresponding gate in
 `acceptance/release-gates.toml`.
+
+## Fuzz dependency maintenance
+
+The fuzz harness has its own committed lockfile and is scanned by the security workflow. Workspace dependency upgrades are managed from the repository root because the harness consumes `runonmine-core` through a path dependency; a second Dependabot Cargo source would create duplicate PRs that can also alter production dependency constraints.
