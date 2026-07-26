@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -47,6 +48,20 @@ enum XtaskCommand {
         #[arg(long)]
         tag: String,
     },
+    /// Run the repository quality gates through one local command.
+    Verify {
+        /// Run only the supported headless workspace checks.
+        #[arg(long)]
+        headless: bool,
+        /// Skip the full-history Gitleaks scan when it is unavailable locally.
+        #[arg(long)]
+        skip_secret_scan: bool,
+    },
+    /// Report and enforce the manual release-acceptance gates for a profile.
+    ReleaseReadiness {
+        #[arg(long, default_value = "private-beta")]
+        profile: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -58,6 +73,11 @@ fn main() -> Result<()> {
         XtaskCommand::VerifyVersions => verify_versions(),
         XtaskCommand::SyncVersions => sync_versions(),
         XtaskCommand::VerifyReleaseTag { tag } => verify_release_tag(&tag),
+        XtaskCommand::Verify {
+            headless,
+            skip_secret_scan,
+        } => verify(headless, skip_secret_scan),
+        XtaskCommand::ReleaseReadiness { profile } => release_readiness(&profile),
     }
 }
 
@@ -150,6 +170,151 @@ fn verify_release_tag(tag: &str) -> Result<()> {
         bail!("release tag must be {expected}, received {tag}");
     }
     Ok(())
+}
+
+fn verify(headless: bool, skip_secret_scan: bool) -> Result<()> {
+    verify_versions()?;
+    run_checked("cargo", &["fmt", "--all", "--check"])?;
+    if !headless {
+        run_checked(
+            "cargo",
+            &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        )?;
+        run_checked(
+            "cargo",
+            &["test", "--workspace", "--all-features", "--locked"],
+        )?;
+    }
+    run_checked(
+        "cargo",
+        &[
+            "clippy",
+            "--workspace",
+            "--exclude",
+            "runonmine-desktop",
+            "--no-default-features",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+    run_checked(
+        "cargo",
+        &[
+            "test",
+            "--workspace",
+            "--exclude",
+            "runonmine-desktop",
+            "--no-default-features",
+            "--locked",
+        ],
+    )?;
+    run_checked("cargo", &["audit", "--deny", "warnings"])?;
+    run_checked(
+        "cargo",
+        &["audit", "--deny", "warnings", "--file", "fuzz/Cargo.lock"],
+    )?;
+    run_checked("cargo", &["deny", "check"])?;
+    if !skip_secret_scan {
+        run_checked("gitleaks", &["git", "--redact", "--no-banner", "--verbose"])?;
+    }
+    println!("RunOnMine verification passed.");
+    Ok(())
+}
+
+fn run_checked(program: &str, arguments: &[&str]) -> Result<()> {
+    let root = workspace_root()?;
+    let status = Command::new(program)
+        .args(arguments)
+        .current_dir(root)
+        .status()
+        .with_context(|| format!("failed to start {program}"))?;
+    if !status.success() {
+        bail!("{program} {} failed with {status}", arguments.join(" "));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseGateManifest {
+    schema: u32,
+    gate: Vec<ReleaseGate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseGate {
+    id: String,
+    description: String,
+    status: String,
+    required_for: Vec<String>,
+    #[serde(default)]
+    evidence: String,
+}
+
+fn release_readiness(profile: &str) -> Result<()> {
+    if !matches!(profile, "private-beta" | "public-beta") {
+        bail!("release profile must be private-beta or public-beta");
+    }
+    let path = workspace_root()?.join("acceptance/release-gates.toml");
+    let manifest: ReleaseGateManifest = toml::from_str(&fs::read_to_string(&path)?)?;
+    if manifest.schema != 1 {
+        bail!("unsupported release-gate schema {}", manifest.schema);
+    }
+    let pending = pending_release_gates(&manifest, profile)?;
+    if pending.is_empty() {
+        println!("All {profile} acceptance gates passed.");
+        return Ok(());
+    }
+    for gate in &pending {
+        eprintln!("{} [{}]: {}", gate.id, gate.status, gate.description);
+        if !gate.evidence.trim().is_empty() {
+            eprintln!("  evidence/blocker: {}", gate.evidence);
+        }
+    }
+    bail!(
+        "{} required {profile} acceptance gate(s) are not passed",
+        pending.len()
+    )
+}
+
+fn pending_release_gates<'a>(
+    manifest: &'a ReleaseGateManifest,
+    profile: &str,
+) -> Result<Vec<&'a ReleaseGate>> {
+    let mut pending = Vec::new();
+    let mut identifiers = std::collections::BTreeSet::new();
+    for gate in &manifest.gate {
+        if gate.id.trim().is_empty() || !identifiers.insert(gate.id.as_str()) {
+            bail!("release gate identifiers must be non-empty and unique");
+        }
+        if !matches!(gate.status.as_str(), "pending" | "blocked" | "passed") {
+            bail!(
+                "release gate {} has invalid status {}",
+                gate.id,
+                gate.status
+            );
+        }
+        if gate.status == "passed" && gate.evidence.trim().is_empty() {
+            bail!("passed release gate {} must include evidence", gate.id);
+        }
+        if gate.required_for.iter().any(|item| item == profile) && gate.status != "passed" {
+            pending.push(gate);
+        }
+    }
+    Ok(pending)
 }
 
 const HEADLESS_BINARIES: [&str; 3] = ["runonmine", "runonmine-agent", "runonmine-helper"];
@@ -615,6 +780,54 @@ mod tests {
         );
         assert_eq!(sbom["metadata"]["properties"][0]["value"], "lock-hash");
         Ok(())
+    }
+
+    #[test]
+    fn release_profiles_require_only_their_declared_gates() -> Result<()> {
+        let manifest = ReleaseGateManifest {
+            schema: 1,
+            gate: vec![
+                ReleaseGate {
+                    id: "private".to_owned(),
+                    description: "private gate".to_owned(),
+                    status: "pending".to_owned(),
+                    required_for: vec!["private-beta".to_owned(), "public-beta".to_owned()],
+                    evidence: String::new(),
+                },
+                ReleaseGate {
+                    id: "public".to_owned(),
+                    description: "public gate".to_owned(),
+                    status: "blocked".to_owned(),
+                    required_for: vec!["public-beta".to_owned()],
+                    evidence: "certificate required".to_owned(),
+                },
+                ReleaseGate {
+                    id: "done".to_owned(),
+                    description: "completed gate".to_owned(),
+                    status: "passed".to_owned(),
+                    required_for: vec!["private-beta".to_owned()],
+                    evidence: "report".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(pending_release_gates(&manifest, "private-beta")?.len(), 1);
+        assert_eq!(pending_release_gates(&manifest, "public-beta")?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn passed_release_gate_requires_evidence() {
+        let manifest = ReleaseGateManifest {
+            schema: 1,
+            gate: vec![ReleaseGate {
+                id: "gate".to_owned(),
+                description: "completed gate".to_owned(),
+                status: "passed".to_owned(),
+                required_for: vec!["private-beta".to_owned()],
+                evidence: String::new(),
+            }],
+        };
+        assert!(pending_release_gates(&manifest, "private-beta").is_err());
     }
 
     #[test]

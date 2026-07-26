@@ -5,6 +5,8 @@ mod credential_update;
 #[cfg(feature = "desktop-ui")]
 mod desktop_process;
 #[cfg(feature = "desktop-ui")]
+mod layout;
+#[cfg(feature = "desktop-ui")]
 mod policy_editor;
 #[cfg(feature = "desktop-ui")]
 mod theme;
@@ -27,6 +29,7 @@ mod desktop {
     use crate::connector_wizard::{ConnectorCommand, ConnectorWizardState, rotation_label};
     use crate::credential_update::replace_secrets_transactionally;
     use crate::desktop_process::{BackgroundCliTask, run_cli};
+    use crate::layout;
     use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
     use crate::theme::{self, Icon as UiIcon, StatusTone};
     use runonmine_oauth::{OAuthSession, RegisteredClient, SqliteOAuthStore};
@@ -37,8 +40,8 @@ mod desktop {
     pub fn run() -> Result<()> {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1320.0, 860.0])
-                .with_min_inner_size([1040.0, 680.0]),
+                .with_inner_size(layout::DEFAULT_VIEWPORT)
+                .with_min_inner_size(layout::MINIMUM_VIEWPORT),
             ..Default::default()
         };
         eframe::run_native(
@@ -713,7 +716,7 @@ mod desktop {
             ];
 
             let mut navigate_to = None;
-            let metric_columns = if ui.available_width() >= 1120.0 { 6 } else { 3 };
+            let metric_columns = layout::metric_columns(ui.available_width());
             for row in metrics.chunks(metric_columns) {
                 ui.columns(row.len(), |columns| {
                     for (column, metric) in columns.iter_mut().zip(row.iter()) {
@@ -1862,7 +1865,7 @@ mod desktop {
 
             let full_rect = ui.available_rect_before_wrap();
             ui.allocate_rect(full_rect, egui::Sense::hover());
-            let sidebar_width = 232.0_f32.min(full_rect.width() * 0.25);
+            let sidebar_width = layout::sidebar_width(full_rect.width());
             let sidebar_rect = egui::Rect::from_min_max(
                 full_rect.min,
                 egui::pos2(full_rect.left() + sidebar_width, full_rect.bottom()),
