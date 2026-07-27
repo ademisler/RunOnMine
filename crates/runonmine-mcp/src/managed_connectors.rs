@@ -255,15 +255,16 @@ fn persist_quick_public_url(
     connector_id: &str,
     url: Url,
 ) -> Result<()> {
-    let mut config = AppConfig::load(config_path)?;
-    let connector = config
-        .connector_mut(connector_id)
-        .context("Quick Tunnel connector was removed")?;
-    if connector.kind != ConnectorKind::CloudflareQuick {
-        bail!("connector is no longer a Quick Tunnel");
-    }
-    connector.public_base_url = Some(url);
-    config.save(config_path)
+    AppConfig::update(config_path, |config| {
+        let connector = config
+            .connector_mut(connector_id)
+            .context("Quick Tunnel connector was removed")?;
+        if connector.kind != ConnectorKind::CloudflareQuick {
+            bail!("connector is no longer a Quick Tunnel");
+        }
+        connector.public_base_url = Some(url);
+        Ok(())
+    })
 }
 
 fn ensure_private_directory(path: &std::path::Path) -> Result<()> {

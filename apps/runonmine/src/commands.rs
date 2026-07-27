@@ -10,10 +10,10 @@ use connectors::{
 
 pub(super) fn policy(command: PolicyCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
-    let mut config =
-        AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
+    let config_path = paths.config_file();
     match command {
         PolicyCommand::Show { connector } => {
+            let config = AppConfig::load(&config_path).context("run `runonmine setup` first")?;
             let selected = connector.as_deref().map_or_else(
                 || config.connectors.iter().collect(),
                 |id| config.connector(id).into_iter().collect::<Vec<_>>(),
@@ -38,23 +38,24 @@ pub(super) fn policy(command: PolicyCommand) -> Result<()> {
             }
         }
         PolicyCommand::Preset { preset, connector } => {
-            let id = match connector {
-                Some(id) => id,
-                None => config
-                    .connectors
-                    .first()
-                    .context("no connectors are configured")?
-                    .id
-                    .clone(),
-            };
-            let item = config
-                .connector_mut(&id)
-                .context("connector was not found")?;
-            item.policy_preset = preset.into();
-            item.pack_overrides.clear();
-            item.tool_overrides.clear();
-            let updated_preset = item.policy_preset;
-            config.save(&paths.config_file())?;
+            let (id, updated_preset) = AppConfig::update(&config_path, move |config| {
+                let id = match connector {
+                    Some(id) => id,
+                    None => config
+                        .connectors
+                        .first()
+                        .context("no connectors are configured")?
+                        .id
+                        .clone(),
+                };
+                let item = config
+                    .connector_mut(&id)
+                    .context("connector was not found")?;
+                item.policy_preset = preset.into();
+                item.pack_overrides.clear();
+                item.tool_overrides.clear();
+                Ok((id, item.policy_preset))
+            })?;
             println!("Updated connector {id} to {updated_preset:?}.");
         }
         PolicyCommand::Set {
@@ -62,11 +63,14 @@ pub(super) fn policy(command: PolicyCommand) -> Result<()> {
             capability,
             mode,
         } => {
-            let item = config
-                .connector_mut(&connector)
-                .context("connector was not found")?;
-            item.pack_overrides.insert(capability.into(), mode.into());
-            config.save(&paths.config_file())?;
+            AppConfig::update(&config_path, |config| {
+                config
+                    .connector_mut(&connector)
+                    .context("connector was not found")?
+                    .pack_overrides
+                    .insert(capability.into(), mode.into());
+                Ok(())
+            })?;
             println!("Updated connector {connector}.");
         }
     }
@@ -163,7 +167,7 @@ pub(super) fn approvals(command: ApprovalCommand) -> Result<()> {
 pub(super) fn browser(command: BrowserCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
-    let mut config = AppConfig::load_or_create(&paths.config_file())?;
+    let config_path = paths.config_file();
     match command {
         BrowserCommand::Profile {
             command: BrowserProfileCommand::Create { name },
@@ -171,10 +175,12 @@ pub(super) fn browser(command: BrowserCommand) -> Result<()> {
             validate_profile_name(&name)?;
             let directory = paths.browser_profiles().join(&name);
             ensure_private_directory(&directory)?;
-            config.browser.profile_name = name;
-            config.browser.profile_mode = BrowserProfileMode::Persistent;
-            config.browser.external_cdp_url = None;
-            config.save(&paths.config_file())?;
+            AppConfig::update(&config_path, move |config| {
+                config.browser.profile_name = name;
+                config.browser.profile_mode = BrowserProfileMode::Persistent;
+                config.browser.external_cdp_url = None;
+                Ok(())
+            })?;
             println!(
                 "Selected persistent browser profile at {}.",
                 directory.display()
@@ -184,16 +190,19 @@ pub(super) fn browser(command: BrowserCommand) -> Result<()> {
             command: BrowserProfileCommand::Ephemeral { name },
         } => {
             validate_profile_name(&name)?;
-            config.browser.profile_name = name;
-            config.browser.profile_mode = BrowserProfileMode::Ephemeral;
-            config.browser.external_cdp_url = None;
-            config.save(&paths.config_file())?;
+            AppConfig::update(&config_path, move |config| {
+                config.browser.profile_name = name;
+                config.browser.profile_mode = BrowserProfileMode::Ephemeral;
+                config.browser.external_cdp_url = None;
+                Ok(())
+            })?;
             println!("Selected disposable browser profile mode.");
         }
         BrowserCommand::Profile {
             command: BrowserProfileCommand::Delete { name },
         } => {
             validate_profile_name(&name)?;
+            let config = AppConfig::load_or_create(&config_path)?;
             if config.browser.profile_mode == BrowserProfileMode::Persistent
                 && config.browser.profile_name == name
                 && config.browser.external_cdp_url.is_none()
@@ -216,16 +225,21 @@ pub(super) fn browser(command: BrowserCommand) -> Result<()> {
         }
         BrowserCommand::Attach { loopback_cdp_url } => {
             runonmine_browser_guard(&loopback_cdp_url)?;
-            config.browser.external_cdp_url = Some(loopback_cdp_url);
-            config.save(&paths.config_file())?;
+            AppConfig::update(&config_path, move |config| {
+                config.browser.external_cdp_url = Some(loopback_cdp_url);
+                Ok(())
+            })?;
             println!(
                 "Configured expert CDP attachment. RunOnMine will not launch your daily profile."
             );
         }
         BrowserCommand::PrivateNetwork { access } => {
-            config.browser.allow_private_network = matches!(access, PrivateNetworkAccess::Allow);
-            config.save(&paths.config_file())?;
-            if config.browser.allow_private_network {
+            let allowed = AppConfig::update(&config_path, |config| {
+                config.browser.allow_private_network =
+                    matches!(access, PrivateNetworkAccess::Allow);
+                Ok(config.browser.allow_private_network)
+            })?;
+            if allowed {
                 println!(
                     "Private-network browser access enabled for local connectors. Remote connectors remain blocked."
                 );

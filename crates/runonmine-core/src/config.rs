@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
@@ -244,6 +245,60 @@ impl Default for AppConfig {
     }
 }
 
+#[derive(Debug)]
+struct ConfigFileLock(File);
+
+impl ConfigFileLock {
+    fn acquire(config_path: &Path) -> Result<Self> {
+        let lock_path = config_lock_path(config_path)?;
+        if lock_path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!("refusing to use a symlinked configuration lock");
+        }
+        let parent = lock_path
+            .parent()
+            .context("config lock path has no parent")?;
+        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(&lock_path)?
+        };
+        #[cfg(not(unix))]
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        restrict_file(&lock_path)?;
+        file.lock_exclusive()
+            .context("failed to lock RunOnMine configuration")?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ConfigFileLock {
+    fn drop(&mut self) {
+        let _ignored = self.0.unlock();
+    }
+}
+
+fn config_lock_path(path: &Path) -> Result<PathBuf> {
+    let filename = path.file_name().context("config path has no file name")?;
+    let mut lock_name = filename.to_os_string();
+    lock_name.push(".lock");
+    Ok(path.with_file_name(lock_name))
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)
@@ -266,12 +321,33 @@ impl AppConfig {
         if path.exists() {
             return Self::load(path);
         }
+        let _lock = ConfigFileLock::acquire(path)?;
+        if path.exists() {
+            return Self::load(path);
+        }
         let config = Self::default();
-        config.save(path)?;
+        config.save_unlocked(path)?;
         Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        let _lock = ConfigFileLock::acquire(path)?;
+        self.save_unlocked(path)
+    }
+
+    pub fn update<T>(path: &Path, update: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let _lock = ConfigFileLock::acquire(path)?;
+        let mut config = if path.exists() {
+            Self::load(path)?
+        } else {
+            Self::default()
+        };
+        let output = update(&mut config)?;
+        config.save_unlocked(path)?;
+        Ok(output)
+    }
+
+    fn save_unlocked(&self, path: &Path) -> Result<()> {
         self.validate()?;
         let parent = path.parent().context("config path has no parent")?;
         fs::create_dir_all(parent)?;
@@ -703,6 +779,80 @@ mod tests {
         assert_eq!(loaded.default_preset, PolicyPreset::Safe);
         Ok(())
     }
+    #[test]
+    fn concurrent_updates_preserve_both_changes() -> Result<()> {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        AppConfig::default().save(&path)?;
+        let roots = [dir.path().join("root-a"), dir.path().join("root-b")];
+        for root in &roots {
+            fs::create_dir(root)?;
+        }
+        let barrier = Arc::new(Barrier::new(roots.len()));
+        let mut handles = Vec::new();
+        for root in roots {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || -> Result<()> {
+                let root = root.canonicalize()?;
+                barrier.wait();
+                AppConfig::update(&path, |config| {
+                    config.allowed_roots.push(root);
+                    config.allowed_roots.sort();
+                    Ok(())
+                })
+            }));
+        }
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("config update thread panicked"))??;
+        }
+        let loaded = AppConfig::load(&path)?;
+        assert_eq!(loaded.allowed_roots.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_update_does_not_replace_configuration() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        let original = AppConfig::default();
+        original.save(&path)?;
+
+        let result: Result<()> = AppConfig::update(&path, |config| {
+            config.port = 1;
+            bail!("abort update")
+        });
+        assert!(result.is_err());
+        assert_eq!(AppConfig::load(&path)?.port, original.port);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_lock_is_private_and_rejects_symlinks() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        AppConfig::default().save(&path)?;
+        let lock_path = config_lock_path(&path)?;
+        assert_eq!(
+            fs::metadata(&lock_path)?.permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::remove_file(&lock_path)?;
+        let target = dir.path().join("lock-target");
+        fs::write(&target, b"target")?;
+        symlink(&target, &lock_path)?;
+        assert!(AppConfig::update(&path, |_| Ok(())).is_err());
+        Ok(())
+    }
+
     #[test]
     fn local_http_is_disabled_by_default() -> Result<()> {
         let config = AppConfig::default();

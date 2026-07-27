@@ -47,12 +47,12 @@ rejects session reuse through a different connector.
 
 ## Local data
 
-- `config.toml` contains non-secret configuration and is replaced atomically.
+- `config.toml` contains non-secret configuration, is replaced atomically, and uses an owner-only sidecar lock for transactional read-modify-write updates.
 - `state.db` contains approvals, sessions, OAuth token hashes, and audit records.
 - platform credential storage contains connector paths and external API credentials.
 - isolated Chromium profiles live below the per-user RunOnMine data directory.
 
-On headless Linux without Secret Service, secrets are stored only when an explicit `RUNONMINE_MASTER_KEY` supplies a 32-byte key. The file backend uses XChaCha20-Poly1305 with a random nonce and per-entry associated data. An owner-only file lock serializes updates across CLI, desktop, and agent processes. Missing or invalid key material fails closed.
+Quick Tunnel URL discovery plus desktop, setup, browser, and policy mutations use the shared configuration transaction API, which reloads the latest validated document while holding the sidecar lock before atomically replacing it. On headless Linux without Secret Service, secrets are stored only when an explicit `RUNONMINE_MASTER_KEY` supplies a 32-byte key. The file backend uses XChaCha20-Poly1305 with a random nonce and per-entry associated data. A separate owner-only file lock serializes secret updates across CLI, desktop, and agent processes. Missing or invalid key material fails closed.
 
 The audit log is hash-chained. Retention pruning stores a chain anchor, so the remaining records continue to verify after the default 30-day/100-MiB retention window removes old records. State directories use owner-only permissions; SQLite database, WAL, and shared-memory files are restricted to the owning account. Dedicated database workers and connector supervisor tasks have explicit shutdown and join lifecycles.
 
