@@ -65,7 +65,7 @@ Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days; r
 
 The public hostname, Cloudflare tunnel ID, credentials file, GitHub OAuth client
 ID, expected GitHub owner login, and immutable positive GitHub numeric owner ID are required. The CLI prompts for secrets rather
-than accepting them in command-line arguments.
+than accepting them in command-line arguments. Incoming OAuth and MCP requests must use the configured public hostname with no explicit port or HTTPS port `443`; other Host authorities return 404.
 
 ## OpenAI Secure MCP Tunnel
 

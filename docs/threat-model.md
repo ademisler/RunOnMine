@@ -28,6 +28,7 @@ compromised.
 | Threat | Primary controls |
 | --- | --- |
 | An internet user discovers a tunnel endpoint | Quick paths contain 256 random bits; permanent connections use OAuth; invalid paths return 404 |
+| A forged Host authority routes a request into the public OAuth connector | exact configured hostname matching, only absent/default HTTPS port 443 accepted, unmatched authorities return 404 |
 | A confused-deputy or prompt-injection request invokes a destructive tool | deny/ask/allow policy, argument-aware local-only approval, exact-hash temporary grants, explicit deny precedence over grants, remote safety ceiling, truthful destructive/open-world annotations |
 | A token asks for more authority than granted locally | OAuth scope is intersected with policy and never expands it |
 | A file path escapes a selected root or a move targets a differently restricted path | descriptor-relative root capabilities, component checks, symlink rejection, authorization of both source and destination, bounded operations |
