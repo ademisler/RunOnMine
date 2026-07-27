@@ -21,6 +21,63 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, name: &str) -> Result<()>;
 }
 
+/// Records original secret values before mutation so a coordinating caller
+/// can restore them after a handled error without exposing secret contents.
+pub struct SecretTransaction<'a> {
+    store: &'a dyn SecretStore,
+    backups: BTreeMap<String, Option<SecretString>>,
+}
+
+impl std::fmt::Debug for SecretTransaction<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecretTransaction")
+            .field("backup_count", &self.backups.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> SecretTransaction<'a> {
+    /// Starts an empty transaction against the selected secret store.
+    pub fn new(store: &'a dyn SecretStore) -> Self {
+        Self {
+            store,
+            backups: BTreeMap::new(),
+        }
+    }
+
+    fn remember(&mut self, name: &str) -> Result<()> {
+        if !self.backups.contains_key(name) {
+            self.backups.insert(name.to_owned(), self.store.get(name)?);
+        }
+        Ok(())
+    }
+
+    /// Stores a value after snapshotting the previous value once.
+    pub fn set(&mut self, name: &str, value: &SecretString) -> Result<()> {
+        self.remember(name)?;
+        self.store.set(name, value)
+    }
+
+    /// Deletes a value after snapshotting the previous value once.
+    pub fn delete(&mut self, name: &str) -> Result<()> {
+        self.remember(name)?;
+        self.store.delete(name)
+    }
+
+    /// Restores every snapshotted value and clears the rollback journal.
+    pub fn rollback(&mut self) -> Result<()> {
+        for (name, value) in &self.backups {
+            match value {
+                Some(value) => self.store.set(name, value)?,
+                None => self.store.delete(name)?,
+            }
+        }
+        self.backups.clear();
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct KeyringSecretStore {
     service: String,
@@ -345,6 +402,60 @@ fn restrict_secret_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MemorySecretStore {
+        values: Mutex<BTreeMap<String, String>>,
+    }
+
+    impl SecretStore for MemorySecretStore {
+        fn get(&self, name: &str) -> Result<Option<SecretString>> {
+            Ok(self
+                .values
+                .lock()
+                .map_err(|_| anyhow!("test secret store lock failed"))?
+                .get(name)
+                .cloned()
+                .map(SecretString::from))
+        }
+
+        fn set(&self, name: &str, value: &SecretString) -> Result<()> {
+            self.values
+                .lock()
+                .map_err(|_| anyhow!("test secret store lock failed"))?
+                .insert(name.to_owned(), value.expose_secret().to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, name: &str) -> Result<()> {
+            self.values
+                .lock()
+                .map_err(|_| anyhow!("test secret store lock failed"))?
+                .remove(name);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn secret_transaction_restores_the_original_value_after_repeated_mutations() -> Result<()> {
+        let store = MemorySecretStore::default();
+        store.set("existing", &SecretString::from("original".to_owned()))?;
+        let mut transaction = SecretTransaction::new(&store);
+        transaction.set("existing", &SecretString::from("first".to_owned()))?;
+        transaction.set("existing", &SecretString::from("second".to_owned()))?;
+        transaction.set("new", &SecretString::from("temporary".to_owned()))?;
+        transaction.delete("existing")?;
+        transaction.rollback()?;
+
+        assert_eq!(
+            store
+                .get("existing")?
+                .map(|value| value.expose_secret().to_owned()),
+            Some("original".to_owned())
+        );
+        assert!(store.get("new")?.is_none());
+        Ok(())
+    }
 
     #[test]
     fn master_key_decoder_distinguishes_hex_from_base64() -> Result<()> {

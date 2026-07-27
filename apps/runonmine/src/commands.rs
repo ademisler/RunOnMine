@@ -1,12 +1,14 @@
 use super::*;
 
+mod connector_transactions;
 mod connectors;
-pub(crate) use connectors::{connect, setup};
 #[cfg(test)]
-use connectors::{connector_secret_suffixes, save_config_after_secret_deletion};
-use connectors::{
-    ensure_private_directory, generate_path_secret, load_connector_binary, local_http_secret_name,
+use connector_transactions::{
+    commit_new_connector, connector_secret_suffixes, remove_connector_transactionally,
 };
+use connector_transactions::{local_http_secret_name, update_config_with_secrets};
+pub(crate) use connectors::{connect, setup};
+use connectors::{ensure_private_directory, generate_path_secret, load_connector_binary};
 
 pub(super) fn policy(command: PolicyCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
@@ -419,34 +421,43 @@ pub(super) fn emergency_lock(arguments: &LockArgs) -> Result<()> {
     let oauth = SqliteOAuthStore::open(&paths.state_db())?;
     let revoked_tokens = oauth.emergency_revoke_all()?;
 
-    let config = AppConfig::load(&paths.config_file())?;
+    let config_path = paths.config_file();
     let secrets = default_secret_store(&paths)?;
-    let mut rotated_local_http_tokens = 0_usize;
-    let mut rotated_quick_tunnels = 0_usize;
-    let mut removed_openai_keys = 0_usize;
-    for connector in &config.connectors {
-        match connector.kind {
-            ConnectorKind::LocalHttp => {
-                secrets.set(
-                    &local_http_secret_name(&connector.id),
-                    &SecretString::from(generate_path_secret()),
-                )?;
-                rotated_local_http_tokens += 1;
+    let (rotated_local_http_tokens, rotated_quick_tunnels, removed_openai_keys) =
+        update_config_with_secrets(&config_path, secrets.as_ref(), |config, transaction| {
+            let mut rotated_local_http_tokens = 0_usize;
+            let mut rotated_quick_tunnels = 0_usize;
+            let mut removed_openai_keys = 0_usize;
+            for connector in &config.connectors {
+                match connector.kind {
+                    ConnectorKind::LocalHttp => {
+                        transaction.set(
+                            &local_http_secret_name(&connector.id),
+                            &SecretString::from(generate_path_secret()),
+                        )?;
+                        rotated_local_http_tokens += 1;
+                    }
+                    ConnectorKind::CloudflareQuick => {
+                        transaction.set(
+                            &format!("connector.{}.path_secret", connector.id),
+                            &SecretString::from(generate_path_secret()),
+                        )?;
+                        rotated_quick_tunnels += 1;
+                    }
+                    ConnectorKind::OpenAiTunnel => {
+                        transaction
+                            .delete(&format!("connector.{}.runtime_api_key", connector.id))?;
+                        removed_openai_keys += 1;
+                    }
+                    ConnectorKind::LocalStdio | ConnectorKind::CloudflareOauth => {}
+                }
             }
-            ConnectorKind::CloudflareQuick => {
-                secrets.set(
-                    &format!("connector.{}.path_secret", connector.id),
-                    &SecretString::from(generate_path_secret()),
-                )?;
-                rotated_quick_tunnels += 1;
-            }
-            ConnectorKind::OpenAiTunnel => {
-                secrets.delete(&format!("connector.{}.runtime_api_key", connector.id))?;
-                removed_openai_keys += 1;
-            }
-            ConnectorKind::LocalStdio | ConnectorKind::CloudflareOauth => {}
-        }
-    }
+            Ok((
+                rotated_local_http_tokens,
+                rotated_quick_tunnels,
+                removed_openai_keys,
+            ))
+        })?;
 
     println!("RunOnMine is locked.");
     println!("Denied pending approvals: {denied}");
@@ -495,21 +506,24 @@ pub(super) fn uninstall(arguments: &UninstallArgs) -> Result<()> {
             "configuration is missing; connector credentials cannot be enumerated for a safe purge"
         );
     }
-    if let Some(config) = &config {
+    if config.is_some() {
         match default_secret_store(&paths) {
             Ok(store) => {
-                for connector in &config.connectors {
-                    for suffix in [
-                        "local_http_token",
-                        "path_secret",
-                        "github_client_id",
-                        "github_client_secret",
-                        "oauth_hash_key",
-                        "runtime_api_key",
-                    ] {
-                        store.delete(&format!("connector.{}.{suffix}", connector.id))?;
+                update_config_with_secrets(&config_path, store.as_ref(), |config, transaction| {
+                    for connector in &config.connectors {
+                        for suffix in [
+                            "local_http_token",
+                            "path_secret",
+                            "github_client_id",
+                            "github_client_secret",
+                            "oauth_hash_key",
+                            "runtime_api_key",
+                        ] {
+                            transaction.delete(&format!("connector.{}.{suffix}", connector.id))?;
+                        }
                     }
-                }
+                    Ok(())
+                })?;
             }
             Err(error) if paths.state_dir.join("secrets.enc").is_file() => {
                 tracing::warn!(%error, "encrypted secret file will be removed with local state");
@@ -1018,6 +1032,17 @@ mod tests {
     #[derive(Default)]
     struct MemorySecretStore {
         values: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+        fail_set_once: std::sync::Mutex<Option<String>>,
+    }
+
+    impl MemorySecretStore {
+        fn fail_next_set(&self, name: &str) -> Result<()> {
+            *self
+                .fail_set_once
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test failure lock failed"))? = Some(name.to_owned());
+            Ok(())
+        }
     }
 
     impl runonmine_core::secrets::SecretStore for MemorySecretStore {
@@ -1030,6 +1055,15 @@ mod tests {
         }
 
         fn set(&self, name: &str, value: &SecretString) -> Result<()> {
+            let mut failure = self
+                .fail_set_once
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test failure lock failed"))?;
+            if failure.as_deref() == Some(name) {
+                *failure = None;
+                bail!("injected secret-store failure");
+            }
+            drop(failure);
             self.values
                 .lock()
                 .map_err(|_| anyhow::anyhow!("test secret store lock failed"))?
@@ -1046,43 +1080,130 @@ mod tests {
         }
     }
 
+    fn quick_connector(id: &str) -> ConnectorConfig {
+        ConnectorConfig {
+            id: id.to_owned(),
+            name: "Quick test connector".to_owned(),
+            kind: ConnectorKind::CloudflareQuick,
+            enabled: true,
+            policy_preset: PolicyPreset::Safe,
+            pack_overrides: BTreeMap::default(),
+            tool_overrides: BTreeMap::default(),
+            policy_rules: Vec::new(),
+            public_base_url: None,
+            cloudflare_quick: Some(CloudflareQuickSettings::default()),
+            cloudflare_named: None,
+            oauth_owner: None,
+            openai_tunnel: None,
+        }
+    }
+
     #[test]
-    fn secret_deletion_is_committed_with_config_save() -> Result<()> {
+    fn connector_removal_deletes_credentials_and_preserves_unrelated_config() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let config_path = directory.path().join("config.toml");
+        let root = directory.path().join("allowed");
+        std::fs::create_dir(&root)?;
+        let root = root.canonicalize()?;
+        let mut config = AppConfig::default();
+        let connector = quick_connector("quick-remove");
+        config.allowed_roots.push(root.clone());
+        config.connectors.push(connector);
+        config.save(&config_path)?;
+
         let store = MemorySecretStore::default();
-        let name = "connector.local.local_http_token".to_owned();
+        let name = "connector.quick-remove.path_secret".to_owned();
         store.set(&name, &SecretString::from("token".to_owned()))?;
-        save_config_after_secret_deletion(
-            &AppConfig::default(),
-            &config_path,
-            &store,
-            std::slice::from_ref(&name),
-        )?;
+        let removed = remove_connector_transactionally(&config_path, &store, "quick-remove")?;
+
+        assert_eq!(removed.id, "quick-remove");
         assert!(store.get(&name)?.is_none());
-        assert!(config_path.is_file());
+        let updated = AppConfig::load(&config_path)?;
+        assert_eq!(updated.allowed_roots, vec![root]);
+        assert!(updated.connector("quick-remove").is_none());
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
-    fn secret_deletion_rolls_back_when_config_save_fails() -> Result<()> {
-        use std::os::unix::fs::symlink;
-
+    fn failed_config_validation_restores_deleted_credential() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let target = directory.path().join("target.toml");
-        std::fs::write(&target, "unchanged")?;
         let config_path = directory.path().join("config.toml");
-        symlink(&target, &config_path)?;
+        AppConfig::default().save(&config_path)?;
         let store = MemorySecretStore::default();
         let name = "connector.local.local_http_token".to_owned();
         store.set(&name, &SecretString::from("token".to_owned()))?;
+
+        let result: Result<()> =
+            update_config_with_secrets(&config_path, &store, |config, transaction| {
+                transaction.delete(&name)?;
+                config.port = 0;
+                Ok(())
+            });
+        assert!(result.is_err());
+        assert_eq!(
+            store
+                .get(&name)?
+                .map(|value| value.expose_secret().to_owned()),
+            Some("token".to_owned())
+        );
+        assert_eq!(
+            AppConfig::load(&config_path)?.port,
+            AppConfig::default().port
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_multi_secret_write_restores_every_previous_value() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        AppConfig::default().save(&config_path)?;
+        let store = MemorySecretStore::default();
+        let first = "connector.oauth.client_id";
+        let second = "connector.oauth.client_secret";
+        store.set(first, &SecretString::from("old-client".to_owned()))?;
+        store.set(second, &SecretString::from("old-secret".to_owned()))?;
+        store.fail_next_set(second)?;
+
+        let result: Result<()> =
+            update_config_with_secrets(&config_path, &store, |_config, transaction| {
+                transaction.set(first, &SecretString::from("new-client".to_owned()))?;
+                transaction.set(second, &SecretString::from("new-secret".to_owned()))?;
+                Ok(())
+            });
+        assert!(result.is_err());
+        assert_eq!(
+            store
+                .get(first)?
+                .map(|value| value.expose_secret().to_owned()),
+            Some("old-client".to_owned())
+        );
+        assert_eq!(
+            store
+                .get(second)?
+                .map(|value| value.expose_secret().to_owned()),
+            Some("old-secret".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_connector_commit_restores_overwritten_credential() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        let mut config = AppConfig::default();
+        config.connectors.push(quick_connector("quick-existing"));
+        config.save(&config_path)?;
+
+        let store = MemorySecretStore::default();
+        let name = "connector.quick-new.path_secret".to_owned();
+        store.set(&name, &SecretString::from("previous".to_owned()))?;
         assert!(
-            save_config_after_secret_deletion(
-                &AppConfig::default(),
+            commit_new_connector(
+                quick_connector("quick-new"),
                 &config_path,
                 &store,
-                std::slice::from_ref(&name),
+                &[(name.clone(), SecretString::from("replacement".to_owned()))],
             )
             .is_err()
         );
@@ -1090,7 +1211,49 @@ mod tests {
             store
                 .get(&name)?
                 .map(|value| value.expose_secret().to_owned()),
-            Some("token".to_owned())
+            Some("previous".to_owned())
+        );
+        assert!(
+            AppConfig::load(&config_path)?
+                .connector("quick-new")
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn connector_commit_uses_latest_preset_without_losing_other_updates() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        let root = directory.path().join("allowed");
+        std::fs::create_dir(&root)?;
+        let root = root.canonicalize()?;
+        AppConfig::default().save(&config_path)?;
+        let candidate = quick_connector("quick-latest");
+        AppConfig::update(&config_path, |config| {
+            config.default_preset = PolicyPreset::Developer;
+            config.allowed_roots.push(root.clone());
+            Ok(())
+        })?;
+
+        let store = MemorySecretStore::default();
+        commit_new_connector(
+            candidate,
+            &config_path,
+            &store,
+            &[(
+                "connector.quick-latest.path_secret".to_owned(),
+                SecretString::from("token".to_owned()),
+            )],
+        )?;
+        let updated = AppConfig::load(&config_path)?;
+        assert_eq!(updated.allowed_roots, vec![root]);
+        assert_eq!(
+            updated
+                .connector("quick-latest")
+                .context("new connector is missing")?
+                .policy_preset,
+            PolicyPreset::Developer
         );
         Ok(())
     }

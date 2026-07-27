@@ -1,3 +1,8 @@
+use super::connector_transactions::{
+    commit_new_connector, disable_local_http_transactionally, enable_local_http_transactionally,
+    ensure_connector_credentials, local_http_secret_name, remove_connector_transactionally,
+    update_config_with_secrets,
+};
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use std::io::Read as _;
@@ -37,7 +42,8 @@ pub(crate) fn setup(roots: &[PathBuf]) -> Result<()> {
 pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
-    let mut config = AppConfig::load_or_create(&paths.config_file())?;
+    let config_path = paths.config_file();
+    let config = AppConfig::load_or_create(&config_path)?;
     let secrets = default_secret_store(&paths)?;
     match command {
         ConnectCommand::List => {
@@ -62,25 +68,29 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(connector)?);
         }
         ConnectCommand::Enable { connector } => {
-            let item = config
-                .connector(&connector)
-                .context("connector was not found")?;
-            ensure_connector_credentials(item, secrets.as_ref())?;
-            config
-                .connector_mut(&connector)
-                .context("connector was not found")?
-                .enabled = true;
-            config.save(&paths.config_file())?;
+            AppConfig::update(&config_path, |config| {
+                let item = config
+                    .connector(&connector)
+                    .context("connector was not found")?;
+                ensure_connector_credentials(item, secrets.as_ref())?;
+                config
+                    .connector_mut(&connector)
+                    .context("connector was not found")?
+                    .enabled = true;
+                Ok(())
+            })?;
             println!(
                 "Enabled connector {connector}. Restart the agent to apply transport changes."
             );
         }
         ConnectCommand::Disable { connector } => {
-            config
-                .connector_mut(&connector)
-                .context("connector was not found")?
-                .enabled = false;
-            config.save(&paths.config_file())?;
+            AppConfig::update(&config_path, |config| {
+                config
+                    .connector_mut(&connector)
+                    .context("connector was not found")?
+                    .enabled = false;
+                Ok(())
+            })?;
             println!(
                 "Disabled connector {connector}. Restart the agent to close live transport sessions."
             );
@@ -89,22 +99,8 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             if confirm != "REMOVE" {
                 bail!("connector removal requires --confirm REMOVE");
             }
-            let index = config
-                .connectors
-                .iter()
-                .position(|item| item.id == connector)
-                .context("connector was not found")?;
-            let removed = config.connectors.remove(index);
-            let secret_names = connector_secret_suffixes(removed.kind)
-                .iter()
-                .map(|suffix| format!("connector.{}.{suffix}", removed.id))
-                .collect::<Vec<_>>();
-            save_config_after_secret_deletion(
-                &config,
-                &paths.config_file(),
-                secrets.as_ref(),
-                &secret_names,
-            )?;
+            let removed =
+                remove_connector_transactionally(&config_path, secrets.as_ref(), &connector)?;
             StateStore::open(&paths.state_db())?.clear_persistent_grants(Some(&removed.id))?;
             if removed.kind == ConnectorKind::CloudflareOauth {
                 SqliteOAuthStore::open(&paths.state_db())?.emergency_revoke_all()?;
@@ -116,68 +112,63 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             );
             println!("Restart the agent to close any live transport process.");
         }
-        ConnectCommand::LocalHttp { command } => {
-            let connector_index = config
-                .connectors
-                .iter()
-                .position(|connector| connector.kind == ConnectorKind::LocalHttp);
-            let connector_index = if let Some(index) = connector_index {
-                index
-            } else {
-                let mut connector = ConnectorConfig::local_http_default();
-                connector.policy_preset = config.default_preset;
-                config.connectors.push(connector);
-                config.connectors.len() - 1
-            };
-            let connector_id = config.connectors[connector_index].id.clone();
-            let secret_name = local_http_secret_name(&connector_id);
-            match command {
-                LocalHttpCommand::Enable => {
-                    config.connectors[connector_index].enabled = true;
-                    config.connectors[connector_index].policy_preset = config.default_preset;
-                    let token = generate_path_secret();
-                    commit_connector(
-                        &config,
-                        &paths,
-                        secrets.as_ref(),
-                        &[(secret_name, SecretString::from(token.clone()))],
-                    )?;
-                    print_local_http_credentials(config.port, &connector_id, &token);
-                }
-                LocalHttpCommand::Disable => {
-                    config.connectors[connector_index].enabled = false;
-                    save_config_after_secret_deletion(
-                        &config,
-                        &paths.config_file(),
-                        secrets.as_ref(),
-                        std::slice::from_ref(&secret_name),
-                    )?;
-                    println!(
-                        "Local HTTP connector {connector_id} is disabled and its token was deleted."
-                    );
-                }
-                LocalHttpCommand::Rotate => {
-                    if !config.connectors[connector_index].enabled {
-                        bail!("local HTTP is disabled; enable it before rotating its token");
-                    }
-                    let token = generate_path_secret();
-                    secrets.set(&secret_name, &SecretString::from(token.clone()))?;
-                    print_local_http_credentials(config.port, &connector_id, &token);
-                }
-                LocalHttpCommand::Status { show_token } => {
-                    let enabled = config.connectors[connector_index].enabled;
-                    println!("Connector: {connector_id}");
-                    println!("Enabled: {enabled}");
-                    println!("Endpoint: http://127.0.0.1:{}/mcp", config.port);
-                    let token = secrets.get(&secret_name)?;
-                    println!("Token configured: {}", token.is_some());
-                    if show_token {
-                        let token = token.context("local HTTP token is not configured")?;
-                        println!("Bearer token: {}", token.expose_secret());
-                    }
+        ConnectCommand::LocalHttp { command } => match command {
+            LocalHttpCommand::Enable => {
+                let token = generate_path_secret();
+                let secret = SecretString::from(token.clone());
+                let (connector_id, port) =
+                    enable_local_http_transactionally(&config_path, secrets.as_ref(), &secret)?;
+                print_local_http_credentials(port, &connector_id, &token);
+            }
+            LocalHttpCommand::Disable => {
+                let connector_id =
+                    disable_local_http_transactionally(&config_path, secrets.as_ref())?;
+                println!(
+                    "Local HTTP connector {connector_id} is disabled and its token was deleted."
+                );
+            }
+            LocalHttpCommand::Rotate => {
+                let token = generate_path_secret();
+                let secret = SecretString::from(token.clone());
+                let (connector_id, port) = update_config_with_secrets(
+                    &config_path,
+                    secrets.as_ref(),
+                    |config, transaction| {
+                        let connector = config
+                            .connectors
+                            .iter()
+                            .find(|connector| connector.kind == ConnectorKind::LocalHttp)
+                            .context("local HTTP connector is missing")?;
+                        if !connector.enabled {
+                            bail!("local HTTP is disabled; enable it before rotating its token");
+                        }
+                        let connector_id = connector.id.clone();
+                        transaction.set(&local_http_secret_name(&connector_id), &secret)?;
+                        Ok((connector_id, config.port))
+                    },
+                )?;
+                print_local_http_credentials(port, &connector_id, &token);
+            }
+            LocalHttpCommand::Status { show_token } => {
+                let connector = config
+                    .connectors
+                    .iter()
+                    .find(|connector| connector.kind == ConnectorKind::LocalHttp)
+                    .context("local HTTP connector is missing")?;
+                let connector_id = connector.id.clone();
+                let enabled = connector.enabled;
+                let secret_name = local_http_secret_name(&connector_id);
+                println!("Connector: {connector_id}");
+                println!("Enabled: {enabled}");
+                println!("Endpoint: http://127.0.0.1:{}/mcp", config.port);
+                let token = secrets.get(&secret_name)?;
+                println!("Token configured: {}", token.is_some());
+                if show_token {
+                    let token = token.context("local HTTP token is not configured")?;
+                    println!("Bearer token: {}", token.expose_secret());
                 }
             }
-        }
+        },
         ConnectCommand::Cloudflare {
             command:
                 CloudflareCommand::Quick {
@@ -186,14 +177,19 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 },
         } => {
             if let Some(id) = rotate {
-                let connector = config.connector(&id).context("connector was not found")?;
-                if connector.kind != ConnectorKind::CloudflareQuick {
-                    bail!("secret rotation is only valid for a Cloudflare Quick Tunnel connector");
-                }
-                let path_secret = generate_path_secret();
-                secrets.set(
-                    &format!("connector.{id}.path_secret"),
-                    &SecretString::from(path_secret),
+                let path_secret = SecretString::from(generate_path_secret());
+                update_config_with_secrets(
+                    &config_path,
+                    secrets.as_ref(),
+                    |config, transaction| {
+                        let connector = config.connector(&id).context("connector was not found")?;
+                        if connector.kind != ConnectorKind::CloudflareQuick {
+                            bail!(
+                                "secret rotation is only valid for a Cloudflare Quick Tunnel connector"
+                            );
+                        }
+                        transaction.set(&format!("connector.{id}.path_secret"), &path_secret)
+                    },
                 )?;
                 println!("Rotated the temporary connector secret. The previous URL is invalid.");
                 return Ok(());
@@ -207,12 +203,12 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             .await?;
             let id = Uuid::new_v4().to_string();
             let path_secret = generate_path_secret();
-            config.connectors.push(ConnectorConfig {
+            let connector = ConnectorConfig {
                 id: id.clone(),
                 name: "Cloudflare Quick Tunnel".to_owned(),
                 kind: ConnectorKind::CloudflareQuick,
                 enabled: true,
-                policy_preset: config.default_preset,
+                policy_preset: PolicyPreset::Safe,
                 pack_overrides: BTreeMap::default(),
                 tool_overrides: BTreeMap::default(),
                 policy_rules: Vec::new(),
@@ -224,10 +220,10 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 cloudflare_named: None,
                 oauth_owner: None,
                 openai_tunnel: None,
-            });
-            commit_connector(
-                &config,
-                &paths,
+            };
+            commit_new_connector(
+                connector,
+                &config_path,
                 secrets.as_ref(),
                 &[(
                     format!("connector.{id}.path_secret"),
@@ -280,12 +276,12 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             let id = Uuid::new_v4().to_string();
             let public_base_url = Url::parse(&format!("https://{hostname}/"))
                 .context("public Cloudflare hostname is invalid")?;
-            config.connectors.push(ConnectorConfig {
+            let connector = ConnectorConfig {
                 id: id.clone(),
                 name: "Cloudflare Named Tunnel with OAuth".to_owned(),
                 kind: ConnectorKind::CloudflareOauth,
                 enabled: true,
-                policy_preset: config.default_preset,
+                policy_preset: PolicyPreset::Safe,
                 pack_overrides: BTreeMap::default(),
                 tool_overrides: BTreeMap::default(),
                 policy_rules: Vec::new(),
@@ -303,10 +299,10 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     github_id: owner_id,
                 }),
                 openai_tunnel: None,
-            });
-            commit_connector(
-                &config,
-                &paths,
+            };
+            commit_new_connector(
+                connector,
+                &config_path,
                 secrets.as_ref(),
                 &[
                     (
@@ -377,12 +373,12 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             if !doctor.success {
                 bail!("tunnel-client doctor failed; verify tunnel permissions and the runtime key");
             }
-            config.connectors.push(ConnectorConfig {
+            let connector = ConnectorConfig {
                 id: id.clone(),
                 name: "OpenAI Secure MCP Tunnel".to_owned(),
                 kind: ConnectorKind::OpenAiTunnel,
                 enabled: true,
-                policy_preset: config.default_preset,
+                policy_preset: PolicyPreset::Safe,
                 pack_overrides: BTreeMap::default(),
                 tool_overrides: BTreeMap::default(),
                 policy_rules: Vec::new(),
@@ -396,10 +392,10 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     tunnel_client_path: Some(binary.path),
                     health_port: 47_823,
                 }),
-            });
-            commit_connector(
-                &config,
-                &paths,
+            };
+            commit_new_connector(
+                connector,
+                &config_path,
                 secrets.as_ref(),
                 &[(
                     format!("connector.{id}.runtime_api_key"),
@@ -408,78 +404,6 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             )?;
             println!("Created OpenAI Secure MCP Tunnel connector {id}.");
         }
-    }
-    Ok(())
-}
-
-pub(super) fn save_config_after_secret_deletion(
-    config: &AppConfig,
-    config_path: &Path,
-    secrets: &dyn runonmine_core::secrets::SecretStore,
-    names: &[String],
-) -> Result<()> {
-    let backups = names
-        .iter()
-        .map(|name| Ok((name.clone(), secrets.get(name)?)))
-        .collect::<Result<Vec<_>>>()?;
-    for name in names {
-        if let Err(error) = secrets.delete(name) {
-            restore_secret_backups(secrets, &backups)?;
-            return Err(error).context("failed to delete connector credential");
-        }
-    }
-    if let Err(error) = config.save(config_path) {
-        restore_secret_backups(secrets, &backups)?;
-        return Err(error).context("failed to save configuration after credential deletion");
-    }
-    Ok(())
-}
-
-pub(super) fn restore_secret_backups(
-    secrets: &dyn runonmine_core::secrets::SecretStore,
-    backups: &[(String, Option<SecretString>)],
-) -> Result<()> {
-    for (name, value) in backups {
-        match value {
-            Some(value) => secrets.set(name, value)?,
-            None => secrets.delete(name)?,
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn connector_secret_suffixes(kind: ConnectorKind) -> &'static [&'static str] {
-    match kind {
-        ConnectorKind::LocalStdio => &[],
-        ConnectorKind::LocalHttp => &["local_http_token"],
-        ConnectorKind::CloudflareQuick => &["path_secret"],
-        ConnectorKind::CloudflareOauth => {
-            &["github_client_id", "github_client_secret", "oauth_hash_key"]
-        }
-        ConnectorKind::OpenAiTunnel => &["runtime_api_key"],
-    }
-}
-
-pub(super) fn ensure_connector_credentials(
-    connector: &ConnectorConfig,
-    secrets: &dyn runonmine_core::secrets::SecretStore,
-) -> Result<()> {
-    for suffix in connector_secret_suffixes(connector.kind) {
-        if secrets
-            .get(&format!("connector.{}.{suffix}", connector.id))?
-            .is_none()
-        {
-            bail!("connector credential {suffix} is missing");
-        }
-    }
-    if connector.kind == ConnectorKind::CloudflareOauth
-        && connector
-            .oauth_owner
-            .as_ref()
-            .map(|owner| owner.github_id)
-            .is_none_or(|id| id == 0)
-    {
-        bail!("OAuth connector must pin the machine owner's immutable GitHub numeric ID");
     }
     Ok(())
 }
@@ -525,10 +449,6 @@ pub(super) fn remove_real_directory_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn local_http_secret_name(connector_id: &str) -> String {
-    format!("connector.{connector_id}.local_http_token")
-}
-
 pub(super) fn print_local_http_credentials(port: u16, connector_id: &str, token: &str) {
     println!("Local HTTP connector {connector_id} is enabled.");
     println!("Endpoint: http://127.0.0.1:{port}/mcp");
@@ -553,32 +473,6 @@ pub(super) fn read_secret(from_stdin: bool, prompt: &str) -> Result<String> {
 
 pub(super) fn value_or_prompt(value: Option<String>, prompt: &str) -> Result<String> {
     value.map_or_else(|| prompt_required(prompt), Ok)
-}
-
-pub(super) fn commit_connector(
-    config: &AppConfig,
-    paths: &AppPaths,
-    secrets: &dyn runonmine_core::secrets::SecretStore,
-    values: &[(String, SecretString)],
-) -> Result<()> {
-    config.validate()?;
-    let mut stored: Vec<String> = Vec::new();
-    for (name, value) in values {
-        if let Err(error) = secrets.set(name, value) {
-            for stored_name in &stored {
-                let _ignored = secrets.delete(stored_name);
-            }
-            return Err(error);
-        }
-        stored.push(name.to_owned());
-    }
-    if let Err(error) = config.save(&paths.config_file()) {
-        for name in &stored {
-            let _ignored = secrets.delete(name);
-        }
-        return Err(error);
-    }
-    Ok(())
 }
 
 pub(super) async fn ensure_binary(

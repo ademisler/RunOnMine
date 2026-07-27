@@ -4444,6 +4444,7 @@ dependencies = [
  "runonmine-oauth",
  "secrecy",
  "serde_json",
+ "tempfile",
  "tray-icon",
  "url",
  "uuid",

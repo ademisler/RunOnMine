@@ -299,6 +299,19 @@ fn config_lock_path(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(lock_name))
 }
 
+fn rollback_before_unlock<T, S>(
+    state: &mut S,
+    rollback: impl FnOnce(&mut S) -> Result<()>,
+    error: anyhow::Error,
+) -> Result<T> {
+    if let Err(rollback_error) = rollback(state) {
+        return Err(error.context(format!(
+            "transaction rollback also failed: {rollback_error:#}"
+        )));
+    }
+    Err(error)
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)
@@ -336,14 +349,34 @@ impl AppConfig {
     }
 
     pub fn update<T>(path: &Path, update: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        Self::update_with_rollback(path, &mut (), |config, ()| update(config), |()| Ok(()))
+    }
+
+    /// Updates the latest configuration under the sidecar lock and runs the
+    /// supplied rollback before releasing that lock when the mutation or
+    /// validated atomic save returns an error. This coordinates handled error
+    /// paths; it is not a crash-proof transaction across external stores.
+    pub fn update_with_rollback<T, S>(
+        path: &Path,
+        state: &mut S,
+        update: impl FnOnce(&mut Self, &mut S) -> Result<T>,
+        rollback: impl FnOnce(&mut S) -> Result<()>,
+    ) -> Result<T> {
         let _lock = ConfigFileLock::acquire(path)?;
         let mut config = if path.exists() {
             Self::load(path)?
         } else {
             Self::default()
         };
-        let output = update(&mut config)?;
-        config.save_unlocked(path)?;
+        let output = match update(&mut config, state) {
+            Ok(output) => output,
+            Err(error) => {
+                return rollback_before_unlock(state, rollback, error);
+            }
+        };
+        if let Err(error) = config.save_unlocked(path) {
+            return rollback_before_unlock(state, rollback, error);
+        }
         Ok(output)
     }
 
@@ -850,6 +883,70 @@ mod tests {
         fs::write(&target, b"target")?;
         symlink(&target, &lock_path)?;
         assert!(AppConfig::update(&path, |_| Ok(())).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_completes_before_a_competing_update_acquires_the_lock() -> Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        AppConfig::default().save(&path)?;
+        let (rollback_started_tx, rollback_started_rx) = mpsc::channel();
+        let (release_rollback_tx, release_rollback_rx) = mpsc::channel();
+        let failing_path = path.clone();
+        let failing = std::thread::spawn(move || -> Result<()> {
+            let mut state = (rollback_started_tx, release_rollback_rx);
+            let result: Result<()> = AppConfig::update_with_rollback(
+                &failing_path,
+                &mut state,
+                |config, _state| {
+                    config.port = 0;
+                    Ok(())
+                },
+                |(started, release)| {
+                    started.send(())?;
+                    release.recv()?;
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            Ok(())
+        });
+        rollback_started_rx.recv()?;
+
+        let (update_started_tx, update_started_rx) = mpsc::channel();
+        let (update_done_tx, update_done_rx) = mpsc::channel();
+        let competing_path = path.clone();
+        let competing = std::thread::spawn(move || -> Result<()> {
+            update_started_tx.send(())?;
+            AppConfig::update(&competing_path, |config| {
+                config.default_preset = PolicyPreset::Developer;
+                Ok(())
+            })?;
+            update_done_tx.send(())?;
+            Ok(())
+        });
+        update_started_rx.recv()?;
+        assert!(
+            update_done_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        release_rollback_tx.send(())?;
+        update_done_rx.recv_timeout(Duration::from_secs(5))?;
+
+        failing
+            .join()
+            .map_err(|_| anyhow::anyhow!("failing transaction thread panicked"))??;
+        competing
+            .join()
+            .map_err(|_| anyhow::anyhow!("competing transaction thread panicked"))??;
+        let loaded = AppConfig::load(&path)?;
+        assert_eq!(loaded.port, AppConfig::default().port);
+        assert_eq!(loaded.default_preset, PolicyPreset::Developer);
         Ok(())
     }
 
