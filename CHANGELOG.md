@@ -43,6 +43,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Extract Cloudflare/OpenAI connector process supervision, Quick Tunnel URL persistence, and private connector artifact handling into a dedicated module with permission and symlink regression tests.
 - Extract loopback HTTP transport, connector authentication, OAuth host routing, and MCP session bindings from the MCP tool implementation into a dedicated module with direct boundary tests.
 - Pin and verify the isolated self-hosted runner account, HOME, Cargo homes, captured environment files, and cross-user PATH boundaries in every self-hosted workflow.
 - Consolidate pull-request Linux quality gates into one ephemeral self-hosted job while retaining scheduled security/coverage sweeps and the opt-in hosted platform matrix.

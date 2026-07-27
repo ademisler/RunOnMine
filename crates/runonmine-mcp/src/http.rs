@@ -33,8 +33,8 @@ use url::Url;
 
 use super::{
     IdleSessionManager, REQUEST_ACCESS, REQUEST_RUNTIME, RequestAccess, RequestPrincipal,
-    RunOnMineServer, Runtime, TOOL_CAPABILITIES, oauth_scope_for_capability, required_secret,
-    start_external_connectors,
+    RunOnMineServer, Runtime, TOOL_CAPABILITIES, managed_connectors::start_external_connectors,
+    oauth_scope_for_capability, required_secret,
 };
 
 const MCP_BODY_LIMIT: usize = 2 * 1_024 * 1_024;

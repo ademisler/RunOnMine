@@ -12,9 +12,10 @@ user's chosen AI service; tool calls execute on a machine the user owns.
 
 Shared crates isolate configuration and persistence, MCP routing, OAuth,
 connectors, Chromium automation, and operating-system adapters. Within
-`runonmine-mcp`, tool dispatch remains in the crate root while `http.rs` owns the
+`runonmine-mcp`, tool dispatch remains in the crate root, `http.rs` owns the
 loopback transport, connector authentication, public Host routing, and HTTP MCP
-session bindings. The `desktop-control` feature contains capture and input
+session bindings, and `managed_connectors.rs` owns Cloudflare/OpenAI process
+supervision plus private connector artifacts. The `desktop-control` feature contains capture and input
 dependencies. Linux/VPS builds with `--no-default-features` do not include those
 dependencies.
 
