@@ -4380,6 +4380,7 @@ dependencies = [
  "chrono",
  "clap",
  "nix 0.31.3",
+ "proptest",
  "rand 0.9.5",
  "rpassword",
  "runonmine-connectors",

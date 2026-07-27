@@ -48,6 +48,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Add property-based regression coverage for support-bundle redaction of known values, labeled credentials, URLs, email addresses, filesystem paths, IP addresses, and hostnames, including ANSI and NUL obfuscation.
 - Add property-based regression tests for policy precedence, equal-specificity deny behavior, remote safety ceilings, and lexical filesystem traversal rejection.
 - Extract Cloudflare/OpenAI connector process supervision, Quick Tunnel URL persistence, and private connector artifact handling into a dedicated module with permission and symlink regression tests.
 - Extract loopback HTTP transport, connector authentication, OAuth host routing, and MCP session bindings from the MCP tool implementation into a dedicated module with direct boundary tests.

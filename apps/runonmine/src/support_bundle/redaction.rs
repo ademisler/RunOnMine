@@ -389,6 +389,19 @@ fn looks_like_secret(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn labeled_secret_marker_strategy() -> impl Strategy<Value = &'static str> {
+        prop::sample::select(vec![
+            "authorization: ",
+            "AUTHORIZATION=",
+            "client_secret: ",
+            "Api_Key = ",
+            "PASSWORD=",
+            "refresh_token: ",
+            "Token = ",
+        ])
+    }
 
     #[test]
     fn redaction_covers_labeled_urls_emails_and_high_entropy_values() {
@@ -432,5 +445,84 @@ mod tests {
         let tail = read_tail(&path, MAX_LOG_TAIL_BYTES)?;
         assert_eq!(tail.len(), MAX_LOG_TAIL_BYTES);
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn known_values_do_not_survive_ansi_or_nul_obfuscation(
+            secret in "[A-Za-z][A-Za-z0-9_-]{7,31}",
+            split_seed in any::<u8>(),
+            prefix in "[a-z ]{0,20}",
+            suffix in "[a-z ]{0,20}",
+        ) {
+            let split = 1 + usize::from(split_seed) % (secret.len() - 1);
+            let obfuscated = format!("{}\0{}", &secret[..split], &secret[split..]);
+            let input = format!(
+                "{prefix}\x1b[31m{obfuscated}\x1b[0m{suffix}\nrepeated={secret}"
+            );
+            let redacted = redact_text(&input, std::slice::from_ref(&secret));
+            prop_assert!(!redacted.contains(&secret));
+            prop_assert!(!redacted.contains('\0'));
+            prop_assert!(!redacted.contains("\x1b["));
+            prop_assert!(redacted.matches("[REDACTED]").count() >= 2);
+        }
+
+        #[test]
+        fn labeled_secret_values_are_removed_case_insensitively(
+            marker in labeled_secret_marker_strategy(),
+            value in "[A-Za-z][A-Za-z0-9_-]{5,18}",
+            prefix in "[a-z ]{0,20}",
+        ) {
+            let input = format!("{prefix}{marker}{value}");
+            let redacted = redact_text(&input, &[]);
+            prop_assert!(!redacted.contains(&value));
+            prop_assert!(redacted.contains("[REDACTED]"));
+        }
+
+        #[test]
+        fn generated_urls_emails_and_paths_are_redacted(
+            label in "[a-z]{1,10}",
+            first in "[a-z][a-z0-9-]{0,10}",
+            second in "[a-z][a-z0-9-]{0,10}",
+            variant in 0_u8..4,
+        ) {
+            let (value, marker) = match variant {
+                0 => (
+                    format!("https://{first}.{second}.example/private?token=value"),
+                    "[URL]",
+                ),
+                1 => (format!("{first}@{second}.example"), "[EMAIL]"),
+                2 => (format!("/Users/{first}/{second}/private"), "[PATH]"),
+                _ => (format!(r"C:\Users\{first}\{second}\private"), "[PATH]"),
+            };
+            let input = format!("{label}={value}");
+            let redacted = redact_text(&input, &[]);
+            prop_assert!(!redacted.contains(&value), "leaked {value} as {redacted}");
+            prop_assert!(redacted.contains(marker));
+        }
+
+        #[test]
+        fn generated_network_tokens_are_redacted(
+            first in 1_u8..=254,
+            second in any::<u8>(),
+            third in any::<u8>(),
+            fourth in any::<u8>(),
+            port in 1_u16..=u16::MAX,
+            host_label in "[a-z][a-z0-9-]{0,8}[a-z0-9]",
+            variant in 0_u8..4,
+        ) {
+            let (value, marker) = match variant {
+                0 => (format!("{first}.{second}.{third}.{fourth}"), "[IP]"),
+                1 => (format!("[{first:x}{second:x}::{third:x}{fourth:x}]"), "[IP]"),
+                2 => (format!("{host_label}.example"), "[HOST]"),
+                _ => (format!("{host_label}.example:{port}"), "[HOST]"),
+            };
+            let input = format!("endpoint={value}");
+            let redacted = redact_text(&input, &[]);
+            prop_assert!(!redacted.contains(&value), "leaked {value} as {redacted}");
+            prop_assert!(redacted.contains(marker));
+        }
     }
 }
