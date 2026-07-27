@@ -25,7 +25,27 @@ pub(super) struct ManagedConnectors {
     observers: Vec<tokio::task::JoinHandle<()>>,
 }
 
+#[derive(Debug)]
+struct PendingQuickObserver {
+    events: tokio::sync::broadcast::Receiver<ProcessEvent>,
+    connector_id: String,
+}
+
 impl ManagedConnectors {
+    fn activate_quick_observers(
+        &mut self,
+        config_path: &std::path::Path,
+        pending: Vec<PendingQuickObserver>,
+    ) {
+        self.observers.extend(pending.into_iter().map(|observer| {
+            spawn_quick_url_observer(
+                observer.events,
+                config_path.to_path_buf(),
+                observer.connector_id,
+            )
+        }));
+    }
+
     pub(super) async fn stop(mut self) {
         for observer in self.observers.drain(..) {
             observer.abort();
@@ -37,16 +57,33 @@ impl ManagedConnectors {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 pub(super) async fn start_external_connectors(
     paths: &AppPaths,
     config: &AppConfig,
 ) -> Result<ManagedConnectors> {
+    let mut managed = ManagedConnectors::default();
+    let mut pending_observers = Vec::new();
+    if let Err(error) =
+        start_external_connectors_inner(paths, config, &mut managed, &mut pending_observers).await
+    {
+        managed.stop().await;
+        return Err(error);
+    }
+    managed.activate_quick_observers(&paths.config_file(), pending_observers);
+    Ok(managed)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn start_external_connectors_inner(
+    paths: &AppPaths,
+    config: &AppConfig,
+    managed: &mut ManagedConnectors,
+    pending_observers: &mut Vec<PendingQuickObserver>,
+) -> Result<()> {
     let discovery = BinaryDiscovery::new(vec![paths.data_dir.join("bin")]);
     let supervisor = ProcessSupervisor;
     let secrets = default_secret_store(paths)?;
     let origin = Url::parse(&format!("http://127.0.0.1:{}", config.port))?;
-    let mut managed = ManagedConnectors::default();
     for connector in config
         .connectors
         .iter()
@@ -73,11 +110,10 @@ pub(super) async fn start_external_connectors(
                     RestartPolicy::default(),
                 )?;
                 if let Some(events) = handle.take_initial_events() {
-                    managed.observers.push(spawn_quick_url_observer(
+                    pending_observers.push(PendingQuickObserver {
                         events,
-                        paths.config_file(),
-                        connector.id.clone(),
-                    ));
+                        connector_id: connector.id.clone(),
+                    });
                 }
                 managed.handles.push(handle);
             }
@@ -175,7 +211,7 @@ pub(super) async fn start_external_connectors(
             ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => {}
         }
     }
-    Ok(managed)
+    Ok(())
 }
 
 fn spawn_quick_url_observer(
@@ -184,7 +220,19 @@ fn spawn_quick_url_observer(
     connector_id: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Ok(event) = events.recv().await {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        connector_id = %connector_id,
+                        skipped,
+                        "Quick Tunnel observer skipped buffered process events"
+                    );
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
             let (ProcessEvent::StandardOutput { line } | ProcessEvent::StandardError { line }) =
                 event
             else {
@@ -320,6 +368,70 @@ mod tests {
         assert!(
             persist_quick_public_url(&paths.config_file(), "quick-connector", public_url).is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quick_url_side_effects_wait_for_successful_activation() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "quick-connector".to_owned();
+        quick.name = "Quick connector".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings::default());
+        let config = AppConfig {
+            connectors: vec![quick],
+            ..AppConfig::default()
+        };
+        config.save(&paths.config_file())?;
+
+        let (sender, _) = tokio::sync::broadcast::channel(4);
+        let receiver = sender.subscribe();
+        for index in 0..12 {
+            sender.send(ProcessEvent::StandardOutput {
+                line: format!("buffered-noise-{index}"),
+            })?;
+        }
+        sender.send(ProcessEvent::StandardOutput {
+            line: "https://deferred-observer.trycloudflare.com".to_owned(),
+        })?;
+        let pending = vec![PendingQuickObserver {
+            events: receiver,
+            connector_id: "quick-connector".to_owned(),
+        }];
+
+        let before = AppConfig::load(&paths.config_file())?;
+        assert!(
+            before
+                .connector("quick-connector")
+                .and_then(|connector| connector.public_base_url.as_ref())
+                .is_none()
+        );
+
+        let mut managed = ManagedConnectors::default();
+        managed.activate_quick_observers(&paths.config_file(), pending);
+        let persisted = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = AppConfig::load(&paths.config_file())?;
+                if let Some(url) = current
+                    .connector("quick-connector")
+                    .and_then(|connector| connector.public_base_url.clone())
+                {
+                    return Ok::<Url, anyhow::Error>(url);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("Quick URL observer did not persist the deferred event")??;
+        assert_eq!(
+            persisted,
+            Url::parse("https://deferred-observer.trycloudflare.com")?
+        );
+        managed.stop().await;
         Ok(())
     }
 

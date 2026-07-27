@@ -35,6 +35,7 @@ compromised.
 | Output or errors reveal credentials | generic remote errors, bounded output, desktop child-output redaction, approval redaction, cleared shell environment, no raw environment or stdin audit data |
 | Support material reveals credentials or private machine data | generated summaries instead of raw config/state files, allowlisted text-log extensions, bounded file count and tails, known-value plus generic redaction, omission of audit arguments and connector identity, no-overwrite owner-only ZIP, per-entry checksum manifest, explicit user review warning |
 | A timed-out command or dropped connector supervisor leaves descendants running | Unix process groups and Windows Job Objects terminate the process tree; dropped handles signal shutdown and detach the cleanup task instead of aborting it |
+| External connector startup fails after another connector has started | transactional startup explicitly stops and joins partial supervisors; Quick Tunnel observers activate only after all connector initialization succeeds and continue after buffered-event lag |
 | Concurrent local processes overwrite encrypted fallback secrets | owner-only inter-process file locking around every read-modify-write transaction |
 | OAuth registration floods survive behind a public tunnel | SQLite-backed atomic registration windows, registered-client cap, restart-persistent pruning |
 | SQLite sidecars expose state | private parent directories and owner-only database, WAL, and shared-memory files |
