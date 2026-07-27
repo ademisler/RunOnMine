@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Require Cloudflare OAuth requests and OAuth metadata routes to use the configured public hostname with no explicit port or HTTPS port 443, rejecting Host-header port confusion.
 - Correctly distinguish 64-character hexadecimal master keys from Base64 and exercise the encrypted fallback through isolated real-binary acceptance tests.
 - Make explicit deny rules override exact-action grants and authorize every filesystem resource in multi-path operations.
 - Require immutable GitHub numeric owner IDs for OAuth connectors and persist dynamic registration rate limits across restarts.
@@ -42,6 +43,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Extract loopback HTTP transport, connector authentication, OAuth host routing, and MCP session bindings from the MCP tool implementation into a dedicated module with direct boundary tests.
 - Pin and verify the isolated self-hosted runner account, HOME, Cargo homes, captured environment files, and cross-user PATH boundaries in every self-hosted workflow.
 - Consolidate pull-request Linux quality gates into one ephemeral self-hosted job while retaining scheduled security/coverage sweeps and the opt-in hosted platform matrix.
 - Extract per-principal MCP rate limiting into a dedicated module with deterministic limit, isolation, expiry, and fail-closed regression tests.

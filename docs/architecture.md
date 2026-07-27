@@ -11,9 +11,12 @@ user's chosen AI service; tool calls execute on a machine the user owns.
 - `runonmine-helper` is an optional, separately installed privileged process.
 
 Shared crates isolate configuration and persistence, MCP routing, OAuth,
-connectors, Chromium automation, and operating-system adapters. The
-`desktop-control` feature contains capture and input dependencies. Linux/VPS
-builds with `--no-default-features` do not include those dependencies.
+connectors, Chromium automation, and operating-system adapters. Within
+`runonmine-mcp`, tool dispatch remains in the crate root while `http.rs` owns the
+loopback transport, connector authentication, public Host routing, and HTTP MCP
+session bindings. The `desktop-control` feature contains capture and input
+dependencies. Linux/VPS builds with `--no-default-features` do not include those
+dependencies.
 
 The normal agent always runs as the signed-in user. The Linux headless system
 unit is installed by root but runs as an explicitly selected non-root account.
