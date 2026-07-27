@@ -14,7 +14,7 @@ mod theme;
 #[cfg(feature = "desktop-ui")]
 mod desktop {
     use std::collections::HashSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
@@ -288,15 +288,18 @@ mod desktop {
             Ok(())
         }
 
-        fn save_config(&mut self, config: AppConfig) -> Result<()> {
-            let paths = self
+        fn update_config<T>(
+            &mut self,
+            update: impl FnOnce(&mut AppConfig) -> Result<T>,
+        ) -> Result<T> {
+            let config_path = self
                 .paths
                 .as_ref()
-                .context("RunOnMine paths are unavailable")?;
-            config.validate()?;
-            config.save(&paths.config_file())?;
-            self.config = Some(config);
-            self.refresh()
+                .context("RunOnMine paths are unavailable")?
+                .config_file();
+            let output = AppConfig::update(&config_path, update)?;
+            self.refresh()?;
+            Ok(output)
         }
 
         fn add_root(&mut self) -> Result<()> {
@@ -310,39 +313,34 @@ mod desktop {
             if !root.is_dir() {
                 bail!("Selected root is not a directory");
             }
-            let mut config = self
-                .config
-                .clone()
-                .context("Configuration is unavailable")?;
-            if !config.allowed_roots.contains(&root) {
-                config.allowed_roots.push(root);
-                config.allowed_roots.sort();
-            }
             self.root_input.clear();
-            self.save_config(config)
+            self.update_config(move |config| {
+                if !config.allowed_roots.contains(&root) {
+                    config.allowed_roots.push(root);
+                    config.allowed_roots.sort();
+                }
+                Ok(())
+            })
         }
 
-        fn remove_root(&mut self, root: &PathBuf) -> Result<()> {
-            let mut config = self
-                .config
-                .clone()
-                .context("Configuration is unavailable")?;
-            config.allowed_roots.retain(|candidate| candidate != root);
-            self.save_config(config)
+        fn remove_root(&mut self, root: &Path) -> Result<()> {
+            let root = root.to_path_buf();
+            self.update_config(move |config| {
+                config.allowed_roots.retain(|candidate| candidate != &root);
+                Ok(())
+            })
         }
 
         fn set_preset(&mut self, connector_id: &str, preset: PolicyPreset) -> Result<()> {
-            let mut config = self
-                .config
-                .clone()
-                .context("Configuration is unavailable")?;
-            let connector = config
-                .connector_mut(connector_id)
-                .context("Connector no longer exists")?;
-            connector.policy_preset = preset;
-            connector.pack_overrides.clear();
-            connector.tool_overrides.clear();
-            self.save_config(config)
+            self.update_config(|config| {
+                let connector = config
+                    .connector_mut(connector_id)
+                    .context("Connector no longer exists")?;
+                connector.policy_preset = preset;
+                connector.pack_overrides.clear();
+                connector.tool_overrides.clear();
+                Ok(())
+            })
         }
 
         fn toggle_connector(&mut self, connector_id: &str, enable: bool) -> Result<()> {
@@ -403,33 +401,31 @@ mod desktop {
         }
 
         fn apply_policy_action(&mut self, action: PolicyEditorAction) -> Result<()> {
-            let mut config = self
-                .config
-                .clone()
-                .context("Configuration is unavailable")?;
-            match action {
-                PolicyEditorAction::Add { connector_id, rule } => {
-                    config
-                        .connector_mut(&connector_id)
-                        .context("Connector no longer exists")?
-                        .policy_rules
-                        .push(rule);
-                }
-                PolicyEditorAction::Remove {
-                    connector_id,
-                    index,
-                } => {
-                    let rules = &mut config
-                        .connector_mut(&connector_id)
-                        .context("Connector no longer exists")?
-                        .policy_rules;
-                    if index >= rules.len() {
-                        bail!("Policy rule no longer exists");
+            self.update_config(move |config| {
+                match action {
+                    PolicyEditorAction::Add { connector_id, rule } => {
+                        config
+                            .connector_mut(&connector_id)
+                            .context("Connector no longer exists")?
+                            .policy_rules
+                            .push(rule);
                     }
-                    rules.remove(index);
+                    PolicyEditorAction::Remove {
+                        connector_id,
+                        index,
+                    } => {
+                        let rules = &mut config
+                            .connector_mut(&connector_id)
+                            .context("Connector no longer exists")?
+                            .policy_rules;
+                        if index >= rules.len() {
+                            bail!("Policy rule no longer exists");
+                        }
+                        rules.remove(index);
+                    }
                 }
-            }
-            self.save_config(config)
+                Ok(())
+            })
         }
 
         fn start_connector_command(&mut self, command: ConnectorCommand) -> Result<()> {

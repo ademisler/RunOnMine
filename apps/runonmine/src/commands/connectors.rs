@@ -5,24 +5,29 @@ use std::io::Read as _;
 pub(crate) fn setup(roots: &[PathBuf]) -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
-    let mut config = AppConfig::load_or_create(&paths.config_file())?;
+    let mut canonical_roots = Vec::with_capacity(roots.len());
     for root in roots {
         let canonical = std::fs::canonicalize(root)
             .with_context(|| format!("allowed root does not exist: {}", root.display()))?;
         if !canonical.is_dir() {
             bail!("allowed root is not a directory: {}", canonical.display());
         }
-        if !config.allowed_roots.contains(&canonical) {
-            config.allowed_roots.push(canonical);
-        }
+        canonical_roots.push(canonical);
     }
-    config.allowed_roots.sort();
-    config.save(&paths.config_file())?;
+    let allowed_root_count = AppConfig::update(&paths.config_file(), move |config| {
+        for canonical in canonical_roots {
+            if !config.allowed_roots.contains(&canonical) {
+                config.allowed_roots.push(canonical);
+            }
+        }
+        config.allowed_roots.sort();
+        Ok(config.allowed_roots.len())
+    })?;
     let _state = StateStore::open(&paths.state_db())?;
     println!("RunOnMine is initialized.");
     println!("Config: {}", paths.config_file().display());
-    println!("Allowed roots: {}", config.allowed_roots.len());
-    if config.allowed_roots.is_empty() {
+    println!("Allowed roots: {allowed_root_count}");
+    if allowed_root_count == 0 {
         println!("File tools remain unavailable until at least one --root is added.");
     }
     Ok(())

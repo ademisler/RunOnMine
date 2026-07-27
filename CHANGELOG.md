@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Serialize high-frequency configuration read-modify-write operations across the agent, desktop, and CLI with an owner-only sidecar lock so Quick Tunnel URL discovery, setup, browser, and policy updates cannot silently overwrite one another.
 - Roll back partially started external connectors on startup failure, delay Quick Tunnel public-URL persistence until every connector has initialized successfully, and recover from buffered event lag after activation.
 - Let dropped connector supervisor handles complete process-group termination, output draining, and terminal-state publication instead of aborting cleanup immediately.
 - Require Cloudflare OAuth requests and OAuth metadata routes to use the configured public hostname with no explicit port or HTTPS port 443, rejecting Host-header port confusion.
