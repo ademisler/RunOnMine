@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Reject port zero in loopback connector origins, MCP targets, and health URLs; reject health URL fragments and exercise URL boundary invariants with generated cases.
 - Commit connector creation, enablement, removal, desktop credential replacement, emergency rotation, and purge enumeration against the latest locked configuration; restore every previous credential value before unlocking after handled secret-store, validation, or save failures.
 - Serialize high-frequency configuration read-modify-write operations across the agent, desktop, and CLI with an owner-only sidecar lock so Quick Tunnel URL discovery, setup, browser, and policy updates cannot silently overwrite one another.
 - Roll back partially started external connectors on startup failure, delay Quick Tunnel public-URL persistence until every connector has initialized successfully, and recover from buffered event lag after activation.

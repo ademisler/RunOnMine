@@ -121,8 +121,12 @@ pub(crate) fn validate_loopback_url(url: &Url) -> Result<()> {
     if url.scheme() != "http" {
         bail!("local health URL must use plain HTTP over loopback");
     }
-    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
-        bail!("local health URL must not contain credentials or query parameters");
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("local health URL must not contain credentials, query parameters, or fragments");
     }
     let is_loopback = match url.host() {
         Some(Host::Ipv4(address)) => IpAddr::V4(address).is_loopback(),
@@ -132,8 +136,8 @@ pub(crate) fn validate_loopback_url(url: &Url) -> Result<()> {
     if !is_loopback {
         bail!("local health URL must use an explicit loopback IP address");
     }
-    if url.port().is_none() {
-        bail!("local health URL must include an explicit port");
+    if url.port().is_none_or(|port| port == 0) {
+        bail!("local health URL must include an explicit non-zero port");
     }
     Ok(())
 }
@@ -141,6 +145,11 @@ pub(crate) fn validate_loopback_url(url: &Url) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn nonzero_port_strategy() -> impl Strategy<Value = u16> {
+        1_u16..=u16::MAX
+    }
 
     #[test]
     fn accepts_only_explicit_loopback_health_urls() -> Result<()> {
@@ -149,6 +158,10 @@ mod tests {
         assert!(validate_loopback_url(&Url::parse("http://localhost:44123/readyz")?).is_err());
         assert!(validate_loopback_url(&Url::parse("https://127.0.0.1:44123/readyz")?).is_err());
         assert!(validate_loopback_url(&Url::parse("http://10.0.0.1:44123/readyz")?).is_err());
+        assert!(validate_loopback_url(&Url::parse("http://127.0.0.1:0/readyz")?).is_err());
+        assert!(
+            validate_loopback_url(&Url::parse("http://127.0.0.1:44123/readyz#fragment")?).is_err()
+        );
         Ok(())
     }
 
@@ -166,5 +179,43 @@ mod tests {
             _ => unreachable!(),
         }
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn generated_explicit_loopback_health_urls_are_accepted(
+            second in any::<u8>(),
+            third in any::<u8>(),
+            fourth in any::<u8>(),
+            port in nonzero_port_strategy(),
+            path in "[a-z][a-z0-9_-]{0,20}",
+        ) {
+            let url = Url::parse(&format!(
+                "http://127.{second}.{third}.{fourth}:{port}/{path}"
+            ))?;
+            prop_assert!(validate_loopback_url(&url).is_ok());
+        }
+
+        #[test]
+        fn malformed_health_url_surfaces_are_rejected(
+            port in nonzero_port_strategy(),
+            variant in 0_u8..9,
+        ) {
+            let value = match variant {
+                0 => format!("https://127.0.0.1:{port}/readyz"),
+                1 => format!("http://localhost:{port}/readyz"),
+                2 => format!("http://10.0.0.1:{port}/readyz"),
+                3 => format!("http://user@127.0.0.1:{port}/readyz"),
+                4 => format!("http://user:secret@127.0.0.1:{port}/readyz"),
+                5 => format!("http://127.0.0.1:{port}/readyz?token=value"),
+                6 => format!("http://127.0.0.1:{port}/readyz#fragment"),
+                7 => "http://127.0.0.1/readyz".to_owned(),
+                _ => "http://127.0.0.1:0/readyz".to_owned(),
+            };
+            let url = Url::parse(&value)?;
+            prop_assert!(validate_loopback_url(&url).is_err(), "accepted {value}");
+        }
     }
 }
