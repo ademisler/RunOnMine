@@ -513,6 +513,20 @@ fn set_private_permissions(_file: &cap_std::fs::File) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn normal_component_strategy() -> impl Strategy<Value = String> {
+        "[A-Za-z0-9_-]{1,16}"
+    }
+
+    fn path_from_components(components: &[String]) -> PathBuf {
+        components
+            .iter()
+            .fold(PathBuf::new(), |mut path, component| {
+                path.push(component);
+                path
+            })
+    }
 
     #[test]
     fn rejects_paths_outside_root() -> Result<()> {
@@ -701,5 +715,32 @@ mod tests {
             1
         );
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn normal_relative_components_are_accepted(
+            components in prop::collection::vec(normal_component_strategy(), 1..8),
+        ) {
+            let path = path_from_components(&components);
+            prop_assert!(validate_lexical_path(&path).is_ok());
+            prop_assert!(validate_relative_path(&path).is_ok());
+        }
+
+        #[test]
+        fn parent_components_are_rejected_at_every_position(
+            before in prop::collection::vec(normal_component_strategy(), 0..6),
+            after in prop::collection::vec(normal_component_strategy(), 0..6),
+        ) {
+            let mut path = path_from_components(&before);
+            path.push("..");
+            for component in after {
+                path.push(component);
+            }
+            prop_assert!(validate_lexical_path(&path).is_err());
+            prop_assert!(validate_relative_path(&path).is_err());
+        }
     }
 }

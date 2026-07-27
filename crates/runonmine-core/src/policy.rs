@@ -370,6 +370,47 @@ fn apply_remote_safety_ceiling(
 mod tests {
     use super::*;
     use crate::config::{ConnectorConfig, ConnectorKind};
+    use proptest::prelude::*;
+
+    fn policy_mode_strategy() -> impl Strategy<Value = PolicyMode> {
+        prop_oneof![
+            Just(PolicyMode::Deny),
+            Just(PolicyMode::Ask),
+            Just(PolicyMode::Allow),
+        ]
+    }
+
+    fn policy_preset_strategy() -> impl Strategy<Value = PolicyPreset> {
+        prop::sample::select(vec![
+            PolicyPreset::Safe,
+            PolicyPreset::Developer,
+            PolicyPreset::Full,
+            PolicyPreset::Custom,
+        ])
+    }
+
+    fn capability_strategy() -> impl Strategy<Value = Capability> {
+        prop::sample::select(Capability::ALL.to_vec())
+    }
+
+    fn remote_connector_kind_strategy() -> impl Strategy<Value = ConnectorKind> {
+        prop::sample::select(vec![
+            ConnectorKind::CloudflareQuick,
+            ConnectorKind::CloudflareOauth,
+            ConnectorKind::OpenAiTunnel,
+        ])
+    }
+
+    fn dangerous_remote_capability_strategy() -> impl Strategy<Value = Capability> {
+        prop::sample::select(vec![
+            Capability::FilesWrite,
+            Capability::ShellExec,
+            Capability::BrowserAct,
+            Capability::DesktopControl,
+            Capability::PlatformNative,
+            Capability::AdminExec,
+        ])
+    }
 
     #[test]
     fn precedence_is_tool_then_pack_then_preset() {
@@ -497,5 +538,104 @@ mod tests {
             PolicyPreset::Safe.modes().get(&Capability::AdminExec),
             Some(&PolicyMode::Deny)
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn tool_override_always_precedes_pack_and_preset(
+            capability in capability_strategy(),
+            preset in policy_preset_strategy(),
+            pack_mode in policy_mode_strategy(),
+            tool_mode in policy_mode_strategy(),
+        ) {
+            let mut connector = ConnectorConfig::local_default();
+            connector.policy_preset = preset;
+            connector.pack_overrides.insert(capability, pack_mode);
+            connector
+                .tool_overrides
+                .insert("property_tool".to_owned(), tool_mode);
+
+            let decision = PolicyEngine.evaluate(&connector, "property_tool", capability);
+            prop_assert_eq!(decision.mode, tool_mode);
+            prop_assert_eq!(decision.source, DecisionSource::ToolOverride);
+        }
+
+        #[test]
+        fn pack_override_always_precedes_preset_when_tool_override_is_absent(
+            capability in capability_strategy(),
+            preset in policy_preset_strategy(),
+            pack_mode in policy_mode_strategy(),
+        ) {
+            let mut connector = ConnectorConfig::local_default();
+            connector.policy_preset = preset;
+            connector.pack_overrides.insert(capability, pack_mode);
+            connector
+                .tool_overrides
+                .insert("different_tool".to_owned(), PolicyMode::Deny);
+
+            let decision = PolicyEngine.evaluate(&connector, "property_tool", capability);
+            prop_assert_eq!(decision.mode, pack_mode);
+            prop_assert_eq!(decision.source, DecisionSource::PackOverride);
+        }
+
+        #[test]
+        fn equal_specificity_deny_wins_regardless_of_rule_order(
+            command in "[a-z][a-z0-9_-]{0,11}",
+            argument in "[a-z0-9][a-z0-9_-]{0,15}",
+            deny_first in any::<bool>(),
+        ) {
+            let mut connector = ConnectorConfig::local_default();
+            let modes = if deny_first {
+                [PolicyMode::Deny, PolicyMode::Allow]
+            } else {
+                [PolicyMode::Allow, PolicyMode::Deny]
+            };
+            for mode in modes {
+                connector.policy_rules.push(PolicyRule {
+                    mode,
+                    principal: PrincipalMatcher::Any,
+                    resource: ResourceMatcher::CommandPrefix {
+                        prefix: command.clone(),
+                    },
+                    tool: Some("shell_exec".to_owned()),
+                    capability: Some(Capability::ShellExec),
+                });
+            }
+            let actual = format!("{command} {argument}");
+            let context = PolicyContext {
+                principal: PrincipalContext::Local,
+                resource: ResourceContext::Command(&actual),
+            };
+
+            let decision = PolicyEngine.evaluate_context(
+                &connector,
+                "shell_exec",
+                Capability::ShellExec,
+                &context,
+            );
+            prop_assert_eq!(decision.mode, PolicyMode::Deny);
+            prop_assert_eq!(decision.source, DecisionSource::ResourceRule);
+        }
+
+        #[test]
+        fn remote_safety_ceiling_never_auto_allows_dangerous_capabilities(
+            kind in remote_connector_kind_strategy(),
+            capability in dangerous_remote_capability_strategy(),
+            requested_mode in policy_mode_strategy(),
+        ) {
+            let mut connector = ConnectorConfig::local_default();
+            connector.kind = kind;
+            connector
+                .tool_overrides
+                .insert("property_tool".to_owned(), requested_mode);
+
+            let decision = PolicyEngine.evaluate(&connector, "property_tool", capability);
+            prop_assert_ne!(decision.mode, PolicyMode::Allow);
+            if capability == Capability::AdminExec {
+                prop_assert_eq!(decision.mode, PolicyMode::Deny);
+            }
+        }
     }
 }
