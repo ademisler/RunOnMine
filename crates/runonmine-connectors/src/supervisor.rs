@@ -185,9 +185,10 @@ impl SupervisorHandle {
 impl Drop for SupervisorHandle {
     fn drop(&mut self) {
         let _ignored = self.stop.send(true);
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        // Dropping a Tokio JoinHandle detaches the task. Keep the supervisor
+        // alive long enough to terminate the process group, drain output, and
+        // publish its terminal state instead of aborting that cleanup path.
+        drop(self.task.take());
     }
 }
 
@@ -561,5 +562,56 @@ mod tests {
             ..RestartPolicy::default()
         };
         assert!(policy.validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_handle_allows_supervisor_cleanup_to_finish() -> Result<()> {
+        use std::path::PathBuf;
+
+        let command = CommandSpec::new("drop-cleanup-test", PathBuf::from("/bin/sh"))?
+            .arg("-c")?
+            .arg("while :; do /bin/sleep 1; done")?;
+        let policy = RestartPolicy {
+            startup_grace: Duration::from_millis(10),
+            health_interval: Duration::from_millis(20),
+            shutdown_timeout: Duration::from_secs(2),
+            ..RestartPolicy::default()
+        };
+        let mut handle = ProcessSupervisor.start(command, HealthCheck::Disabled, policy)?;
+        let mut events = handle
+            .take_initial_events()
+            .context("initial supervisor event receiver is unavailable")?;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Ok(ProcessEvent::StateChanged {
+                        state: ProcessState::Running { .. },
+                    }) => return Ok(()),
+                    Ok(_) => {}
+                    Err(error) => return Err(anyhow::Error::new(error)),
+                }
+            }
+        })
+        .await
+        .context("supervised process did not start")??;
+
+        drop(handle);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Ok(ProcessEvent::StateChanged {
+                        state: ProcessState::Stopped,
+                    }) => return Ok(()),
+                    Ok(_) => {}
+                    Err(error) => return Err(anyhow::Error::new(error)),
+                }
+            }
+        })
+        .await
+        .context("dropped supervisor did not complete cleanup")??;
+        Ok(())
     }
 }
