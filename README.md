@@ -162,6 +162,7 @@ be committed.
 - [Windows](docs/platforms/windows.md)
 - [Release process](docs/releasing.md)
 - [Release acceptance](docs/acceptance.md)
+- [Self-hosted CI runner](docs/ci-runner.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 ## License

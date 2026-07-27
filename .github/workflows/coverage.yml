@@ -13,6 +13,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  HOME: /home/runonmine-ci
+  USER: runonmine-ci
+  LOGNAME: runonmine-ci
+  CARGO_HOME: /home/runonmine-ci/.cargo
+  RUSTUP_HOME: /home/runonmine-ci/.rustup
+  PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
@@ -24,6 +30,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
+      - name: Verify isolated runner environment
+        run: ./scripts/ci/verify-runner-environment.sh
       - name: Configure ephemeral Cargo target
         run: |
           target="${RUNNER_TEMP}/runonmine-coverage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
