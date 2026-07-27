@@ -12,7 +12,7 @@ use runonmine_connectors::{
     BinaryInstaller, BinaryKind, BinaryProbe, GitHubReleaseResolver, InstallReceipt,
     InstalledBinary, ReleaseChannel, ReleaseProvider, SecretValue, run_once,
 };
-use runonmine_core::secrets::default_secret_store;
+use runonmine_core::secrets::{SecretTransaction, default_secret_store};
 use runonmine_core::{
     AppConfig, AppPaths, ApprovalDecision, BrowserProfileMode, Capability, CloudflareNamedSettings,
     CloudflareQuickSettings, ConnectorConfig, ConnectorKind, OAuthOwnerSettings,

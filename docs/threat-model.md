@@ -37,6 +37,7 @@ compromised.
 | A timed-out command or dropped connector supervisor leaves descendants running | Unix process groups and Windows Job Objects terminate the process tree; dropped handles signal shutdown and detach the cleanup task instead of aborting it |
 | External connector startup fails after another connector has started | transactional startup explicitly stops and joins partial supervisors; Quick Tunnel observers activate only after all connector initialization succeeds and continue after buffered-event lag |
 | Concurrent Quick URL, desktop, setup, browser, or policy writers lose unrelated configuration changes | owner-only configuration sidecar lock, reload-under-lock transaction API, validated atomic replacement |
+| A connector credential write/delete fails after another credential or config field changed | all connector credential writers use the config sidecar lock, snapshot each prior value, and restore snapshots before unlocking after handled mutation, validation, or save errors |
 | Concurrent local processes overwrite encrypted fallback secrets | owner-only inter-process file locking around every read-modify-write transaction |
 | OAuth registration floods survive behind a public tunnel | SQLite-backed atomic registration windows, registered-client cap, restart-persistent pruning |
 | SQLite sidecars expose state | private parent directories and owner-only database, WAL, and shared-memory files |

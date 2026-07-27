@@ -27,7 +27,7 @@ mod desktop {
     use secrecy::SecretString;
 
     use crate::connector_wizard::{ConnectorCommand, ConnectorWizardState, rotation_label};
-    use crate::credential_update::replace_secrets_transactionally;
+    use crate::credential_update::replace_connector_secrets_transactionally;
     use crate::desktop_process::{BackgroundCliTask, run_cli};
     use crate::layout;
     use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
@@ -508,8 +508,11 @@ mod desktop {
                     if client_id.is_empty() || secret.is_empty() {
                         bail!("GitHub client ID and client secret are required");
                     }
-                    let revoked = replace_secrets_transactionally(
+                    let revoked = replace_connector_secrets_transactionally(
+                        &paths.config_file(),
                         secrets.as_ref(),
+                        connector_id,
+                        kind,
                         &[
                             (
                                 format!("connector.{connector_id}.github_client_id"),
@@ -531,8 +534,11 @@ mod desktop {
                     if secret.is_empty() {
                         bail!("OpenAI runtime API key is required");
                     }
-                    replace_secrets_transactionally(
+                    replace_connector_secrets_transactionally(
+                        &paths.config_file(),
                         secrets.as_ref(),
+                        connector_id,
+                        kind,
                         &[(
                             format!("connector.{connector_id}.runtime_api_key"),
                             SecretString::from(secret.to_owned()),
