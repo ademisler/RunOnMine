@@ -48,6 +48,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Add committed beta-v0 core-state and beta-v1 OAuth SQLite fixtures that verify safe schema upgrades, preservation of approvals, exact grants, clients, and sessions, and removal of legacy broad temporary grants.
 - Add property-based regression coverage for support-bundle redaction of known values, labeled credentials, URLs, email addresses, filesystem paths, IP addresses, and hostnames, including ANSI and NUL obfuscation.
 - Add property-based regression tests for policy precedence, equal-specificity deny behavior, remote safety ceilings, and lexical filesystem traversal rejection.
 - Extract Cloudflare/OpenAI connector process supervision, Quick Tunnel URL persistence, and private connector artifact handling into a dedicated module with permission and symlink regression tests.

@@ -921,34 +921,50 @@ mod tests {
     }
 
     #[test]
-    fn oauth_schema_v1_migrates_to_v2_without_losing_clients() -> Result<(), StoreError> {
+    fn oauth_beta_v1_fixture_migrates_without_losing_clients_or_sessions() -> Result<(), StoreError>
+    {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("state").join("state.db");
-        {
-            let store = SqliteOAuthStore::open(&database)?;
-            let issued_at = Utc::now().timestamp();
-            store.test_call(move |connection| {
-                connection.execute(
-                    r#"INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('existing-client', 'Existing Client', '["https://client.example/callback"]', 'machine:read', ?1)"#,
-                    [issued_at],
-                )?;
-                Ok(())
-            })?;
-        }
+        std::fs::create_dir_all(database.parent().ok_or_else(|| {
+            StoreError::Io(std::io::Error::other("fixture database has no parent"))
+        })?)?;
         {
             let connection = Connection::open(&database)?;
-            connection.execute(
-                "UPDATE schema_versions SET version = 1 WHERE component = 'oauth'",
-                [],
-            )?;
-            connection.execute("DROP TABLE oauth_registration_attempts", [])?;
+            connection.execute_batch(include_str!("../tests/fixtures/oauth_beta_v1.sql"))?;
         }
 
         let migrated = SqliteOAuthStore::open(&database)?;
         let clients = migrated.registered_clients()?;
         assert_eq!(clients.len(), 1);
-        assert_eq!(clients[0].client_id, "existing-client");
-        let (version, registration_table_count): (i64, i64) =
+        assert_eq!(clients[0].client_id, "beta-client");
+        assert_eq!(clients[0].client_name, "Beta Client");
+        assert_eq!(
+            clients[0].scopes.to_space_delimited(),
+            "machine:read files:write"
+        );
+        assert_eq!(
+            clients[0].redirect_uris,
+            vec![
+                Url::parse("https://client.example/callback")
+                    .map_err(|_| { StoreError::Corrupt("test fixture redirect URL is invalid") })?
+            ]
+        );
+
+        let sessions = migrated.sessions(Some("beta-client"))?;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].family_id,
+            Uuid::parse_str("22222222-2222-4222-8222-222222222222")
+                .map_err(|_| StoreError::Corrupt("test fixture family ID is invalid"))?
+        );
+        assert_eq!(sessions[0].subject, "github:42");
+        assert_eq!(
+            sessions[0].scopes.to_space_delimited(),
+            "machine:read files:write"
+        );
+        assert!(sessions[0].active);
+
+        let (version, registration_table_count, token_count): (i64, i64, i64) =
             migrated.test_call(|connection| {
                 let version = connection.query_row(
                     "SELECT version FROM schema_versions WHERE component = 'oauth'",
@@ -960,10 +976,16 @@ mod tests {
                     [],
                     |row| row.get(0),
                 )?;
-                Ok((version, table_count))
+                let token_count = connection.query_row(
+                    "SELECT COUNT(*) FROM oauth_tokens WHERE client_id = 'beta-client'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((version, table_count, token_count))
             })?;
         assert_eq!(version, OAUTH_SCHEMA_VERSION);
         assert_eq!(registration_table_count, 1);
+        assert_eq!(token_count, 2);
         Ok(())
     }
 
