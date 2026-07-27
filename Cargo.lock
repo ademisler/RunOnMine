@@ -4437,6 +4437,7 @@ dependencies = [
  "command-group",
  "flate2",
  "hex",
+ "proptest",
  "reqwest",
  "serde",
  "serde_json",

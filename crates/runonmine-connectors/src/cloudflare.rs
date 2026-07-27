@@ -340,8 +340,8 @@ fn validate_loopback_origin(url: &Url) -> Result<()> {
         Some(Host::Ipv6(address)) => address.is_loopback(),
         Some(Host::Domain(_)) | None => false,
     };
-    if !loopback || url.port().is_none() {
-        bail!("Cloudflare origin must use an explicit loopback IP and port");
+    if !loopback || url.port().is_none_or(|port| port == 0) {
+        bail!("Cloudflare origin must use an explicit loopback IP and non-zero port");
     }
     if url.port() == Some(LEGACY_MACMCP_PORT) {
         bail!("port 45799 is reserved for the existing MacMCP installation");
@@ -434,8 +434,13 @@ fn yaml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::fs;
     use tempfile::tempdir;
+
+    fn connector_port_strategy() -> impl Strategy<Value = u16> {
+        (1_u16..=u16::MAX).prop_filter("reserved MacMCP port", |port| *port != LEGACY_MACMCP_PORT)
+    }
 
     #[test]
     fn quick_url_parser_rejects_lookalikes() -> Result<()> {
@@ -448,6 +453,12 @@ mod tests {
         assert!(parse_quick_tunnel_url("https://a.b.trycloudflare.com").is_none());
         assert!(parse_quick_tunnel_url("http://quiet-bird.trycloudflare.com").is_none());
         assert!(parse_quick_tunnel_url("https://quiet-bird.trycloudflare.com/mcp").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn loopback_origin_rejects_zero_port() -> Result<()> {
+        assert!(validate_loopback_origin(&Url::parse("http://127.0.0.1:0/mcp")?).is_err());
         Ok(())
     }
 
@@ -483,5 +494,44 @@ mod tests {
         assert!(yaml.contains("service: http_status:404"));
         assert!(yaml.contains("127.0.0.1:47821/mcp"));
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn generated_cloudflare_loopback_origins_are_accepted(
+            second in any::<u8>(),
+            third in any::<u8>(),
+            fourth in any::<u8>(),
+            port in connector_port_strategy(),
+            path in "[a-z][a-z0-9_-]{0,20}",
+        ) {
+            let url = Url::parse(&format!(
+                "http://127.{second}.{third}.{fourth}:{port}/{path}"
+            ))?;
+            prop_assert!(validate_loopback_origin(&url).is_ok());
+        }
+
+        #[test]
+        fn malformed_cloudflare_origins_are_rejected(
+            port in connector_port_strategy(),
+            variant in 0_u8..10,
+        ) {
+            let value = match variant {
+                0 => format!("https://127.0.0.1:{port}/mcp"),
+                1 => format!("http://localhost:{port}/mcp"),
+                2 => format!("http://192.168.1.10:{port}/mcp"),
+                3 => format!("http://user@127.0.0.1:{port}/mcp"),
+                4 => format!("http://user:secret@127.0.0.1:{port}/mcp"),
+                5 => format!("http://127.0.0.1:{port}/mcp?token=value"),
+                6 => format!("http://127.0.0.1:{port}/mcp#fragment"),
+                7 => "http://127.0.0.1/mcp".to_owned(),
+                8 => "http://127.0.0.1:0/mcp".to_owned(),
+                _ => format!("http://127.0.0.1:{LEGACY_MACMCP_PORT}/mcp"),
+            };
+            let url = Url::parse(&value)?;
+            prop_assert!(validate_loopback_origin(&url).is_err(), "accepted {value}");
+        }
     }
 }

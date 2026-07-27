@@ -301,8 +301,11 @@ fn validate_loopback_mcp_url(url: &Url) -> Result<()> {
         Some(Host::Ipv6(address)) => address.is_loopback(),
         Some(Host::Domain(_)) | None => false,
     };
-    if !loopback || url.port().is_none() || url.port() == Some(LEGACY_MACMCP_PORT) {
-        bail!("RunOnMine MCP URL must use a non-reserved explicit loopback port");
+    if !loopback
+        || url.port().is_none_or(|port| port == 0)
+        || url.port() == Some(LEGACY_MACMCP_PORT)
+    {
+        bail!("RunOnMine MCP URL must use a non-reserved explicit non-zero loopback port");
     }
     Ok(())
 }
@@ -400,7 +403,12 @@ fn quote_command_argument(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use tempfile::tempdir;
+
+    fn connector_port_strategy() -> impl Strategy<Value = u16> {
+        (1_u16..=u16::MAX).prop_filter("reserved MacMCP port", |port| *port != LEGACY_MACMCP_PORT)
+    }
 
     #[cfg(unix)]
     fn restrict_test_directory(path: &Path) -> Result<()> {
@@ -438,6 +446,12 @@ mod tests {
         );
         #[cfg(windows)]
         assert!(rendered.contains("\"/Applications/Run On Mine/runonmine\""));
+    }
+
+    #[test]
+    fn loopback_mcp_url_rejects_zero_port() -> Result<()> {
+        assert!(validate_loopback_mcp_url(&Url::parse("http://127.0.0.1:0/mcp")?).is_err());
+        Ok(())
     }
 
     #[test]
@@ -481,5 +495,44 @@ mod tests {
         .build();
         assert!(result.is_err());
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn generated_openai_loopback_mcp_urls_are_accepted(
+            second in any::<u8>(),
+            third in any::<u8>(),
+            fourth in any::<u8>(),
+            port in connector_port_strategy(),
+            path in "[a-z][a-z0-9_-]{0,20}",
+        ) {
+            let url = Url::parse(&format!(
+                "http://127.{second}.{third}.{fourth}:{port}/{path}"
+            ))?;
+            prop_assert!(validate_loopback_mcp_url(&url).is_ok());
+        }
+
+        #[test]
+        fn malformed_openai_mcp_urls_are_rejected(
+            port in connector_port_strategy(),
+            variant in 0_u8..10,
+        ) {
+            let value = match variant {
+                0 => format!("https://127.0.0.1:{port}/mcp"),
+                1 => format!("http://localhost:{port}/mcp"),
+                2 => format!("http://172.16.0.10:{port}/mcp"),
+                3 => format!("http://user@127.0.0.1:{port}/mcp"),
+                4 => format!("http://user:secret@127.0.0.1:{port}/mcp"),
+                5 => format!("http://127.0.0.1:{port}/mcp?token=value"),
+                6 => format!("http://127.0.0.1:{port}/mcp#fragment"),
+                7 => "http://127.0.0.1/mcp".to_owned(),
+                8 => "http://127.0.0.1:0/mcp".to_owned(),
+                _ => format!("http://127.0.0.1:{LEGACY_MACMCP_PORT}/mcp"),
+            };
+            let url = Url::parse(&value)?;
+            prop_assert!(validate_loopback_mcp_url(&url).is_err(), "accepted {value}");
+        }
     }
 }
