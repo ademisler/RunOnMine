@@ -1034,6 +1034,73 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn core_state_beta_v0_fixture_migrates_without_preserving_broad_grants() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state").join("state.db");
+        std::fs::create_dir_all(
+            database
+                .parent()
+                .context("fixture database has no parent")?,
+        )?;
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute_batch(include_str!("../tests/fixtures/core_state_beta_v0.sql"))?;
+        }
+
+        let store = StateStore::open(&database)?;
+        let approvals = store.pending_approvals()?;
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(
+            approvals[0].id,
+            Uuid::parse_str("11111111-1111-4111-8111-111111111111")?
+        );
+        assert_eq!(approvals[0].connector_id, "beta-local");
+        assert_eq!(approvals[0].tool_name, "fs_write");
+        assert_eq!(approvals[0].argument_hash, "approval-hash-v0");
+        assert_eq!(approvals[0].status, ApprovalStatus::Pending);
+
+        let grants = store.persistent_grants(Some("beta-local"))?;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].tool_name, "fs_write");
+        assert_eq!(grants[0].argument_hash, "persistent-hash-v0");
+        assert!(store.grant_allows("beta-local", "fs_write", "persistent-hash-v0")?);
+        assert!(!store.grant_allows("beta-local", "shell_exec", "any-argument")?);
+
+        let (version, temporary_count, temporary_columns, anchor): (i64, i64, Vec<String>, String) =
+            store.test_call(|connection| {
+                let version = connection.query_row(
+                    "SELECT version FROM schema_versions WHERE component = 'core_state'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let temporary_count =
+                    connection.query_row("SELECT COUNT(*) FROM temporary_grants", [], |row| {
+                        row.get(0)
+                    })?;
+                let temporary_columns = connection
+                    .prepare("PRAGMA table_info(temporary_grants)")?
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let anchor = connection.query_row(
+                    "SELECT anchor_hash FROM audit_chain_state WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((version, temporary_count, temporary_columns, anchor))
+            })?;
+        assert_eq!(version, STATE_SCHEMA_VERSION);
+        assert_eq!(temporary_count, 0);
+        assert!(
+            temporary_columns
+                .iter()
+                .any(|column| column == "argument_hash")
+        );
+        assert_eq!(anchor, "GENESIS");
+        assert!(store.verify_audit_chain()?);
+        Ok(())
+    }
+
+    #[test]
     fn state_schema_version_is_recorded_and_future_versions_are_rejected() -> Result<()> {
         let connection = Connection::open_in_memory()?;
         configure_connection(&connection)?;
