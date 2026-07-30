@@ -474,20 +474,30 @@ pub(super) fn admin(command: AdminCommand) -> Result<()> {
             allowed_programs,
             profile_file,
         } => {
-            for path in &allowed_programs {
-                if !path.is_absolute() {
-                    bail!("admin allowlist entries must be absolute paths");
-                }
-            }
-            if let Some(path) = profile_file.as_deref() {
-                ProgramProfileDocument::load(path)
-                    .context("admin program profile validation failed")?;
-            }
+            validate_admin_install_inputs(&allowed_programs, profile_file.as_deref())?;
             install_admin_helper(&helper, &allowed_programs, profile_file.as_deref())
         }
         AdminCommand::Uninstall => run_elevated_helper(&helper, &["uninstall".into()]),
         AdminCommand::Status => run_process(ProcessCommand::new(helper).arg("status")),
     }
+}
+
+fn validate_admin_install_inputs(
+    allowed_programs: &[PathBuf],
+    profile_file: Option<&Path>,
+) -> Result<()> {
+    if allowed_programs.is_empty() && profile_file.is_none() {
+        bail!("admin install requires --allow-program or --profile-file");
+    }
+    for path in allowed_programs {
+        if !path.is_absolute() {
+            bail!("admin allowlist entries must be absolute paths");
+        }
+    }
+    if let Some(path) = profile_file {
+        ProgramProfileDocument::load(path).context("admin program profile validation failed")?;
+    }
+    Ok(())
 }
 
 pub(super) fn service(command: ServiceCommand) -> Result<()> {
@@ -1185,6 +1195,15 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use runonmine_core::secrets::SecretStore;
+
+    #[test]
+    fn admin_install_inputs_fail_before_elevation_when_missing_or_relative() {
+        assert!(validate_admin_install_inputs(&[], None).is_err());
+        assert!(validate_admin_install_inputs(&[PathBuf::from("relative-program")], None).is_err());
+        assert!(
+            validate_admin_install_inputs(&[], Some(Path::new("relative-profile.json"))).is_err()
+        );
+    }
 
     #[cfg(unix)]
     #[test]

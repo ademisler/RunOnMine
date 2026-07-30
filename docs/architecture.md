@@ -71,7 +71,12 @@ Privileged executable resources use the helper's shared canonical program
 identity resolver before local policy evaluation. The resolver requires an
 absolute root/SYSTEM-owned regular non-symlink file, enforces platform ACL/mode
 rules, and returns the canonical path used by the installed allowlist. The helper
-still verifies the pinned SHA-256 immediately before execution.
+still verifies the pinned SHA-256 immediately before execution. Executable
+identity is only the first gate: the complete argument vector must also match one
+installed version-2 command profile covering the exact subcommand, declared and
+forbidden flags, exact positional schemas, and canonical path roots. A local MCP
+approval can narrow or confirm an invocation but cannot widen that root-owned
+profile.
 
 The loopback HTTP server supports at most 32 simultaneous MCP sessions, expires
 sessions after 30 idle minutes, and permits 120 calls per connector per minute

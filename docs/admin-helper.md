@@ -80,6 +80,7 @@ Each command may define:
 
 A path schema has one or more absolute roots and one mode:
 
+- `existing`;
 - `existing_file`;
 - `existing_directory`;
 - `create_or_existing`.

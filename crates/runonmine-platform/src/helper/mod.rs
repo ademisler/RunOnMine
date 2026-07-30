@@ -216,6 +216,9 @@ pub struct AdminPolicy {
 impl AdminPolicy {
     pub fn build(owner: OwnerIdentity, programs: &[AdminProgramRule]) -> Result<Self> {
         owner.validate()?;
+        if programs.is_empty() {
+            bail!("the privileged helper requires at least one program profile");
+        }
         if programs.len() > MAX_PROGRAM_PROFILES {
             bail!("too many admin program profiles");
         }
@@ -836,6 +839,18 @@ mod tests {
         assert_eq!(allowed.canonical_path, canonical);
         assert!(canonical_program_identity(Path::new("relative/id")).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn empty_admin_policy_is_rejected() {
+        let owner = if cfg!(windows) {
+            OwnerIdentity::WindowsSid {
+                sid: "S-1-5-21-1-2-3-1001".to_owned(),
+            }
+        } else {
+            OwnerIdentity::UnixUid { uid: 1000 }
+        };
+        assert!(AdminPolicy::build(owner, &[]).is_err());
     }
 
     #[cfg(unix)]

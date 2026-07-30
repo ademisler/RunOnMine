@@ -1029,7 +1029,7 @@ impl RunOnMineServer {
     }
 
     #[tool(
-        description = "Run one explicitly installed root/SYSTEM-owned executable through the optional local privileged helper",
+        description = "Run one root/SYSTEM-owned, SHA-256-pinned executable only when its complete argument vector matches an installed privileged command profile",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
