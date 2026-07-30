@@ -284,6 +284,10 @@ impl ManagedConnectors {
             .iter()
             .filter(|status| status.phase == ConnectorRuntimePhase::Degraded)
             .count();
+        let backoff = statuses
+            .iter()
+            .filter(|status| status.phase == ConnectorRuntimePhase::Backoff)
+            .count();
         let starting = statuses
             .iter()
             .filter(|status| status.phase == ConnectorRuntimePhase::Starting)
@@ -292,11 +296,12 @@ impl ManagedConnectors {
             .iter()
             .filter(|status| status.phase == ConnectorRuntimePhase::Ready)
             .count();
-        if degraded == 0 && starting == 0 {
+        if degraded == 0 && backoff == 0 && starting == 0 {
             return;
         }
         tracing::warn!(
             degraded,
+            backoff,
             starting,
             ready,
             "RunOnMine started while managed connectors were still activating or degraded"
@@ -1109,6 +1114,72 @@ while :; do /bin/sleep 1; done
             "connector runtime state did not reach the expected phase",
         )
         .await
+    }
+
+    #[test]
+    fn openai_runtime_events_cover_ready_backoff_recovery_and_stop() -> Result<()> {
+        let runtime = ConnectorRuntimeRegistry::default();
+        let connector_id = "runtime-openai";
+        let kind = ConnectorKind::OpenAiTunnel;
+        runtime.set_starting(connector_id, kind, ConnectorStartupStage::Readiness);
+
+        assert!(!apply_openai_runtime_event(
+            &runtime,
+            connector_id,
+            kind,
+            &Ok(ProcessEvent::HealthChanged {
+                healthy: true,
+                detail: "ready".to_owned(),
+            }),
+        ));
+        assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Ready)?;
+
+        assert!(!apply_openai_runtime_event(
+            &runtime,
+            connector_id,
+            kind,
+            &Ok(ProcessEvent::RestartScheduled {
+                attempt: 2,
+                delay_ms: 1_000,
+            }),
+        ));
+        assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Backoff)?;
+
+        assert!(!apply_openai_runtime_event(
+            &runtime,
+            connector_id,
+            kind,
+            &Ok(ProcessEvent::HealthChanged {
+                healthy: true,
+                detail: "recovered".to_owned(),
+            }),
+        ));
+        assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Ready)?;
+
+        assert!(apply_openai_runtime_event(
+            &runtime,
+            connector_id,
+            kind,
+            &Ok(ProcessEvent::StateChanged {
+                state: ProcessState::Stopped,
+            }),
+        ));
+        assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Stopped)?;
+        Ok(())
+    }
+
+    fn assert_runtime_phase(
+        runtime: &ConnectorRuntimeRegistry,
+        connector_id: &str,
+        expected: ConnectorRuntimePhase,
+    ) -> Result<()> {
+        let status = runtime
+            .snapshot()
+            .into_iter()
+            .find(|status| status.connector_id == connector_id)
+            .context("connector runtime status is missing")?;
+        assert_eq!(status.phase, expected);
+        Ok(())
     }
 
     #[tokio::test]

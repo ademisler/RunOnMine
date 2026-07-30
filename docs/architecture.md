@@ -123,16 +123,6 @@ backend cannot prevent Cloudflare or local connectors from starting. Quick
 Tunnel URL observers are attached only to Quick supervisors that started
 successfully.
 
-OpenAI profile initialization and `doctor` run in a cancellable background
-activation task after the loopback agent is ready to serve. Preparation and
-readiness have explicit deadlines; shutdown cancels pending activation and
-stops any acquired supervisor before joining the task. An in-memory runtime
-registry tracks `starting`, `backoff`, `ready`, `degraded`, and `stopped` states.
-A sanitized snapshot is available at `/healthz/connectors` only for a direct
-loopback request whose Host includes the configured agent port; forwarded or
-public-host requests receive `404` so tunnel clients cannot enumerate local
-connector lifecycle details.
-
 ## Asynchronous OpenAI activation and runtime health
 
 The loopback listener and local MCP router do not wait for OpenAI tunnel-client
