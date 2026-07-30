@@ -12,7 +12,7 @@ use archive::{BundleEntry, write_zip_atomically};
 use redaction::{collect_redacted_logs, known_sensitive_values};
 use report::{audit_report, build_support_summary, config_report, state_report};
 
-const BUNDLE_SCHEMA_VERSION: u32 = 2;
+const BUNDLE_SCHEMA_VERSION: u32 = 3;
 const README: &str = "RunOnMine redacted support bundle\n\n\
 This archive is generated from bounded summaries. It does not include the raw\n\
 configuration file, state database, browser profiles, credential store, audit\n\
@@ -47,7 +47,7 @@ fn create_support_bundle_for_paths(
 ) -> Result<()> {
     let (config_report, config) = config_report(paths);
     let known_values = known_sensitive_values(paths, config.as_ref());
-    let log_entries = collect_redacted_logs(&paths.log_dir, &known_values)?;
+    let collected_logs = collect_redacted_logs(&paths.log_dir, &known_values)?;
     let audit_report = audit_report(paths);
     let state_report = state_report(&audit_report);
     let summary = build_support_summary(
@@ -55,7 +55,7 @@ fn create_support_bundle_for_paths(
         generated_at,
         config_report,
         state_report,
-        log_entries.len(),
+        collected_logs.entries.len(),
     );
 
     let mut entries = vec![
@@ -72,8 +72,13 @@ fn create_support_bundle_for_paths(
             bytes: serde_json::to_vec_pretty(&audit_report)?,
         },
     ];
-    entries.extend(log_entries);
-    write_zip_atomically(output, generated_at, &entries)
+    entries.extend(collected_logs.entries);
+    write_zip_atomically(
+        output,
+        generated_at,
+        &entries,
+        &[collected_logs.manifest_input],
+    )
 }
 
 #[cfg(test)]
@@ -173,12 +178,21 @@ mod tests {
         #[derive(serde::Deserialize)]
         struct TestManifest {
             entries: Vec<TestManifestEntry>,
+            inputs: Vec<TestManifestInput>,
         }
         #[derive(serde::Deserialize)]
         struct TestManifestEntry {
             path: String,
             size_bytes: usize,
             sha256: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct TestManifestInput {
+            name: String,
+            status: String,
+            included_entries: usize,
+            skipped_entries: usize,
+            truncated_entries: usize,
         }
 
         let file = File::open(path)?;
@@ -189,6 +203,20 @@ mod tests {
             entry.read_to_end(&mut bytes)?;
             serde_json::from_slice(&bytes)?
         };
+        let logs = manifest
+            .inputs
+            .iter()
+            .find(|input| input.name == "redacted_logs")
+            .ok_or_else(|| anyhow::anyhow!("redacted log manifest input is missing"))?;
+        assert!(matches!(
+            logs.status.as_str(),
+            "complete" | "partial" | "missing"
+        ));
+        assert!(logs.included_entries <= super::redaction::MAX_LOG_FILES);
+        if logs.status == "complete" {
+            assert_eq!(logs.skipped_entries, 0);
+            assert_eq!(logs.truncated_entries, 0);
+        }
         for expected in manifest.entries {
             let mut entry = archive.by_name(&expected.path)?;
             let mut bytes = Vec::new();

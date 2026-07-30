@@ -48,10 +48,7 @@ pub struct OAuthServiceConfig {
 
 impl OAuthServiceConfig {
     pub fn validate(&self) -> Result<(), OAuthError> {
-        if self.connector_id.trim().is_empty()
-            || self.connector_id.len() > 128
-            || self.connector_id.chars().any(char::is_control)
-        {
+        if !crate::store::connector_id_is_valid(&self.connector_id) {
             return Err(OAuthError::configuration());
         }
         validate_public_url(&self.issuer, false)?;

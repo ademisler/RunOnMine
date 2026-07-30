@@ -142,7 +142,11 @@ impl HelperManager {
             Err(error) => (false, Some(service_query_error_state(&error))),
         };
         let (running, detail, status_query_state) = match platform_service_status() {
-            Ok(output) => (output.status.success(), sanitized_output(&output), None),
+            Ok(output) => (
+                output.status.success(),
+                bounded_command_output(&output),
+                None,
+            ),
             Err(error) => (
                 false,
                 String::new(),
@@ -725,7 +729,7 @@ fn macos_bootout_allow_absent() -> Result<()> {
     } else {
         bail!(
             "failed to stop the RunOnMine LaunchDaemon: {}",
-            sanitized_output(&output)
+            bounded_command_output(&output)
         )
     }
 }
@@ -736,7 +740,7 @@ fn linux_service_command_allow_absent(args: &[&str], context: &str) -> Result<()
         .args(args)
         .output()
         .with_context(|| context.to_owned())?;
-    let detail = sanitized_output(&output).to_ascii_lowercase();
+    let detail = bounded_command_output(&output).to_ascii_lowercase();
     if output.status.success()
         || detail.contains("not loaded")
         || detail.contains("not found")
@@ -744,7 +748,7 @@ fn linux_service_command_allow_absent(args: &[&str], context: &str) -> Result<()
     {
         Ok(())
     } else {
-        bail!("{context}: {}", sanitized_output(&output))
+        bail!("{context}: {}", bounded_command_output(&output))
     }
 }
 
@@ -801,7 +805,7 @@ fn windows_stop_allow_absent() -> Result<()> {
         .args(["stop", WINDOWS_SERVICE_NAME])
         .output()
         .context("failed to request RunOnMine helper service shutdown")?;
-    let detail = sanitized_output(&output);
+    let detail = bounded_command_output(&output);
     if detail.contains("1060") {
         return Ok(());
     }
@@ -813,7 +817,7 @@ fn windows_stop_allow_absent() -> Result<()> {
             .args(["query", WINDOWS_SERVICE_NAME])
             .output()
             .context("failed to wait for RunOnMine helper service shutdown")?;
-        let query_detail = sanitized_output(&query);
+        let query_detail = bounded_command_output(&query);
         if query_detail.contains("1060")
             || query_detail.contains("STOPPED")
             || query_detail.contains("STATE              : 1")
@@ -831,7 +835,7 @@ fn windows_delete_allow_absent() -> Result<()> {
         .args(["delete", WINDOWS_SERVICE_NAME])
         .output()
         .context("failed to request RunOnMine helper service removal")?;
-    let detail = sanitized_output(&output);
+    let detail = bounded_command_output(&output);
     if output.status.success() || detail.contains("1060") {
         Ok(())
     } else {
@@ -850,7 +854,7 @@ fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
     } else {
         bail!(
             "failed to stop the RunOnMine LaunchDaemon: {}",
-            sanitized_output(&output)
+            bounded_command_output(&output)
         )
     }
 }
@@ -866,7 +870,7 @@ fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
     {
         bail!(
             "failed to stop the RunOnMine helper service: {}",
-            sanitized_output(&output)
+            bounded_command_output(&output)
         );
     }
     command_success(
@@ -892,7 +896,7 @@ fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
     } else {
         bail!(
             "failed to delete the RunOnMine helper service: {}",
-            sanitized_output(&output)
+            bounded_command_output(&output)
         )
     }
 }
@@ -964,11 +968,11 @@ fn command_success(command: &mut Command, context: &str) -> Result<()> {
     if output.status.success() {
         Ok(())
     } else {
-        bail!("{context}: {}", sanitized_output(&output))
+        bail!("{context}: {}", bounded_command_output(&output))
     }
 }
 
-fn sanitized_output(output: &Output) -> String {
+fn bounded_command_output(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!("{} {}", stdout.trim(), stderr.trim())

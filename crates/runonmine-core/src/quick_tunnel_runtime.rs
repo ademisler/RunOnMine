@@ -50,7 +50,7 @@ impl QuickTunnelRuntimeRecord {
         if self.version != STATE_VERSION {
             bail!("unsupported Quick Tunnel runtime-state version");
         }
-        validate_connector_id(&self.connector_id)?;
+        crate::validate_connector_id(&self.connector_id)?;
         if let Some(url) = &self.public_url {
             validate_quick_tunnel_url(url)?;
             if self.observed_at.is_none() {
@@ -76,7 +76,7 @@ impl QuickTunnelRuntimeStore {
     }
 
     pub fn begin(&self, connector_id: &str) -> Result<QuickTunnelGeneration> {
-        validate_connector_id(connector_id)?;
+        crate::validate_connector_id(connector_id)?;
         let _lock = self.lock()?;
         let generation = QuickTunnelGeneration {
             connector_id: connector_id.to_owned(),
@@ -135,7 +135,7 @@ impl QuickTunnelRuntimeStore {
     }
 
     pub fn clear_connector(&self, connector_id: &str) -> Result<bool> {
-        validate_connector_id(connector_id)?;
+        crate::validate_connector_id(connector_id)?;
         let _lock = self.lock()?;
         let path = self.record_path(connector_id);
         match fs::symlink_metadata(&path) {
@@ -153,7 +153,7 @@ impl QuickTunnelRuntimeStore {
     }
 
     pub fn get(&self, connector_id: &str) -> Result<Option<QuickTunnelRuntimeRecord>> {
-        validate_connector_id(connector_id)?;
+        crate::validate_connector_id(connector_id)?;
         let _lock = self.lock()?;
         self.read(connector_id)
     }
@@ -258,18 +258,6 @@ pub fn validate_quick_tunnel_url(url: &Url) -> Result<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
         bail!("Quick Tunnel runtime URL must be an HTTPS trycloudflare.com origin root");
-    }
-    Ok(())
-}
-
-fn validate_connector_id(connector_id: &str) -> Result<()> {
-    if connector_id.is_empty()
-        || connector_id.len() > 128
-        || !connector_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        bail!("invalid Quick Tunnel connector id");
     }
     Ok(())
 }

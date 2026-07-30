@@ -250,6 +250,15 @@ OAuth issuers are intentionally root-only. A configured issuer such as `https://
 
 A GitHub callback first claims pending authorization state with a short lease bound to a domain-separated hash of the provider code. Only one callback can hold the claim. A different code can never replace the bound code. Temporary provider failures release the claim so the same state and code can be retried; terminal denial consumes it. The one-time code exchange itself is not blindly replayed, while the authenticated `/user` lookup has a bounded retry for transport, rate-limit, and server failures. On success, consent insertion and authorization-state deletion occur in one SQLite transaction.
 
+## Connector identity format
+
+RunOnMine-generated connector IDs are UUIDs. Every connector ID used by config,
+runtime artifacts, removal journals, OAuth namespaces, and secret names must be
+8-64 lowercase ASCII letters, digits, `-`, or `_`, beginning and ending with an
+alphanumeric character. Pre-release configurations with shorter, uppercase, or
+otherwise ambiguous IDs are rejected fail-closed; recreate the connector so its
+credentials and authorization state receive a new unambiguous namespace.
+
 ## OAuth connector isolation
 
 OAuth state is connector-scoped. A client registered through one named-tunnel issuer cannot be looked up, authorized, refreshed, revoked, or reused through another connector that shares the same local state database. Administrative client and session listings show the owning connector, and revoke/delete operations require that connector identity. The schema-v4 migration intentionally removes namespace-free beta OAuth clients and sessions because they cannot be assigned safely to an issuer; affected clients must register and complete owner consent again.

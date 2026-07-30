@@ -60,11 +60,13 @@ runonmine doctor
 runonmine support-bundle --output runonmine-support.zip
 ```
 
-The schema-v2 archive is written without overwriting an existing file and is
+The schema-v3 archive is written without overwriting an existing file and is
 owner-only on Unix. It contains generated structural configuration and typed
 service/input states, a bounded audit outcome sample without connector IDs,
 argument hashes, or event summaries, a checksum manifest, and up to five recent
-bounded log tails from `.log`, `.txt`, `.jsonl`, or `.ndjson` files. State values
+bounded log tails from `.log`, `.txt`, `.jsonl`, or `.ndjson` files. The manifest
+records complete/partial/missing input state plus included, skipped, and truncated
+counts without recording source paths or filenames. State values
 separate missing, disabled, corrupt, temporarily unavailable, and
 permission-denied conditions instead of representing all of them as false or
 empty.
@@ -73,11 +75,18 @@ RunOnMine does not copy the raw config file, state database, credential store,
 browser profiles, audit arguments, connector identifiers, hostnames, URLs, or
 filesystem roots into the archive. Known local values plus generic credentials,
 URLs, email addresses, absolute paths, IP addresses, hostnames, and high-entropy
-tokens are redacted from included log fragments. Redaction cannot prove that
-arbitrary application text contains no personal data, so inspect the ZIP before
-sharing it.
+tokens are redacted from included log fragments. Configured connector IDs are
+matched at exact token boundaries, avoiding accidental substring replacement in
+unrelated text. Redaction cannot prove that arbitrary application text contains
+no personal data, so inspect the ZIP before sharing it.
 
 ## Service diagnostics
+
+Service-manager stdout/stderr shown by status and installation failures is
+bounded command output, not a secret-sanitized transcript. It is control-filtered
+and limited to 1,000 characters; do not place credentials in service-manager
+messages or attach the raw output without review.
+
 
 ```console
 runonmine service status

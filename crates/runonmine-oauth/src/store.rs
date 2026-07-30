@@ -667,12 +667,19 @@ fn table_has_column(
     Ok(columns.iter().any(|candidate| candidate == column))
 }
 
+pub(crate) fn connector_id_is_valid(connector_id: &str) -> bool {
+    let bytes = connector_id.as_bytes();
+    (8..=64).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
 fn validate_connector_id(connector_id: &str) -> Result<(), StoreError> {
-    if connector_id.trim().is_empty()
-        || connector_id.len() > 128
-        || connector_id.chars().any(char::is_control)
-    {
-        return Err(StoreError::Corrupt("invalid OAuth connector namespace"));
+    if !connector_id_is_valid(connector_id) {
+        return Err(StoreError::Corrupt("connector id is invalid"));
     }
     Ok(())
 }

@@ -537,7 +537,7 @@ impl StateStore {
         &self,
         connector_id: &str,
     ) -> Result<ConnectorAuthorizationCleanup> {
-        crate::connector_removal::validate_connector_id(connector_id)?;
+        crate::validate_connector_id(connector_id)?;
         let connector_id = connector_id.to_owned();
         let cleanup = self.call(move |connection| {
             let transaction = connection.transaction()?;

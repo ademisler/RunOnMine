@@ -737,17 +737,12 @@ fn validate_policy_rules(rules: &[PolicyRule]) -> Result<()> {
 }
 
 fn validate_connector_identity(connector: &ConnectorConfig) -> Result<()> {
-    if connector.id.is_empty()
-        || connector.id.len() > 128
-        || !connector
-            .id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        || connector.name.trim().is_empty()
+    crate::validate_connector_id(&connector.id)?;
+    if connector.name.trim().is_empty()
         || connector.name.len() > 100
         || connector.name.chars().any(char::is_control)
     {
-        bail!("connector id or name is invalid");
+        bail!("connector name is invalid");
     }
     Ok(())
 }
@@ -1017,17 +1012,17 @@ mod tests {
         let mut config = AppConfig::default();
         config
             .connectors
-            .push(test_openai_connector("first", true, 47_823));
+            .push(test_openai_connector("first-id", true, 47_823));
         let first_validation = config.validate();
         assert!(first_validation.is_ok(), "{first_validation:?}");
         config
             .connectors
-            .push(test_openai_connector("second", false, 47_825));
+            .push(test_openai_connector("second-id", false, 47_825));
         assert!(config.validate().is_err());
         let Some(first) = config
             .connectors
             .iter_mut()
-            .find(|connector| connector.id == "first")
+            .find(|connector| connector.id == "first-id")
         else {
             bail!("test OpenAI connector must exist");
         };
@@ -1035,7 +1030,7 @@ mod tests {
         assert!(config.validate().is_err());
         config
             .connectors
-            .retain(|connector| connector.id != "first");
+            .retain(|connector| connector.id != "first-id");
         assert!(config.validate().is_ok());
         Ok(())
     }

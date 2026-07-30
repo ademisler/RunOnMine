@@ -6,6 +6,7 @@ mod atomic;
 pub mod audit;
 mod audit_mac;
 pub mod config;
+pub mod connector_id;
 pub mod connector_removal;
 pub mod filesystem;
 pub mod paths;
@@ -26,6 +27,9 @@ pub use audit::{AuditEvent, AuditOutcome};
 pub use config::{
     AppConfig, BrowserProfileMode, CloudflareNamedSettings, CloudflareQuickSettings,
     ConnectorConfig, ConnectorKind, OAuthOwnerSettings, OpenAiTunnelSettings,
+};
+pub use connector_id::{
+    CONNECTOR_ID_MAX_LEN, CONNECTOR_ID_MIN_LEN, connector_id_is_valid, validate_connector_id,
 };
 pub use connector_removal::{
     ConnectorRemovalJournal, ConnectorRemovalLock, ConnectorRemovalPhase, ConnectorRemovalRecord,

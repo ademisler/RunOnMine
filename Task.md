@@ -75,9 +75,9 @@ Status markers:
 - [x] **P2-16 — Improve transient OAuth provider failure recovery.** GitHub callbacks use short-lived state+code-bound claims: transient provider failures release only the same code for retry, terminal results consume state, concurrent/different-code callbacks fail closed, and successful consent insertion plus state deletion is atomic.
 - [x] **P2-17 — Decide and document OAuth issuer subpath support.** OAuth issuers are explicitly root-only; configuration rejects non-root issuer paths and all advertised endpoints are derived from that root origin.
 - [x] **P2-18 — Generate the GitHub User-Agent from package version.** Remove hard-coded version drift.
-- [ ] **P2-19 — Use real redaction for service-manager output or rename it accurately.** Do not imply truncation is sanitization.
-- [ ] **P2-20 — Record skipped/truncated support-bundle inputs in the manifest.** Make incomplete diagnostics visible.
-- [ ] **P2-21 — Enforce robust connector IDs.** Raise minimum length/use UUIDs and apply exact identity redaction.
+- [x] **P2-19 — Use real redaction for service-manager output or rename it accurately.** Service-manager capture is named `bounded_command_output`; it strips control characters and limits size without claiming secret sanitization.
+- [x] **P2-20 — Record skipped/truncated support-bundle inputs in the manifest.** Schema-v3 manifests report each input as complete, partial or missing with included/skipped/truncated counts and no source paths.
+- [x] **P2-21 — Enforce robust connector IDs.** New connectors use UUIDs; all layers require 8-64 lowercase token IDs with safe boundaries, and support logs redact configured connector IDs only as exact identity tokens.
 - [ ] **P2-22 — Reconcile orphan connector artifacts.** Doctor/startup must report and repair config-less directories and runtime state.
 - [ ] **P2-23 — Inventory orphan secrets outside purge.** Doctor should report credentials with no configured owner.
 - [ ] **P2-24 — Make doctor checks typed and modular.** Standardize ID, severity, status, evidence and remediation.

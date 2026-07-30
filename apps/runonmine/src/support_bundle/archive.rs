@@ -16,7 +16,18 @@ struct BundleManifest {
     schema_version: u32,
     generated_at: DateTime<Utc>,
     entries: Vec<ManifestEntry>,
+    inputs: Vec<ManifestInput>,
     privacy_note: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct ManifestInput {
+    pub(super) name: String,
+    pub(super) status: &'static str,
+    pub(super) included_entries: usize,
+    pub(super) skipped_entries: usize,
+    pub(super) truncated_entries: usize,
+    pub(super) note: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +73,7 @@ pub(super) fn write_zip_atomically(
     output: &Path,
     generated_at: DateTime<Utc>,
     entries: &[BundleEntry],
+    inputs: &[ManifestInput],
 ) -> Result<()> {
     reject_unsafe_output(output)?;
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
@@ -86,6 +98,7 @@ pub(super) fn write_zip_atomically(
             schema_version: BUNDLE_SCHEMA_VERSION,
             generated_at,
             entries: manifest_entries,
+            inputs: inputs.to_vec(),
             privacy_note: "Generated entries only; raw config, state, credentials, and audit arguments are excluded.",
         };
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;

@@ -560,15 +560,7 @@ fn rollback_openai_commit(state: &mut OpenAiCommitState<'_>) -> Result<()> {
 }
 
 fn validate_connector_id(connector_id: &str) -> Result<()> {
-    if connector_id.is_empty()
-        || connector_id.len() > 128
-        || !connector_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        bail!("OpenAI connector ID contains unsupported characters");
-    }
-    Ok(())
+    runonmine_core::validate_connector_id(connector_id).context("OpenAI connector ID is invalid")
 }
 
 fn ensure_real_private_directory(path: &Path) -> Result<()> {

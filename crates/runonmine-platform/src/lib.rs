@@ -202,7 +202,7 @@ impl LinuxSystemService {
             Ok(ServiceStatus {
                 installed: Path::new(LINUX_SYSTEM_UNIT_PATH).is_file(),
                 running: output.status.success(),
-                detail: sanitized_output(&output),
+                detail: bounded_command_output(&output),
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -624,7 +624,7 @@ impl UserService {
         Ok(ServiceStatus {
             installed,
             running,
-            detail: sanitized_output(&output),
+            detail: bounded_command_output(&output),
         })
     }
 
@@ -827,7 +827,7 @@ fn windows_scheduled_task_running() -> Result<bool> {
     if !output.status.success() {
         bail!(
             "failed to query the RunOnMine scheduled task state: {}",
-            sanitized_output(&output)
+            bounded_command_output(&output)
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "4")
@@ -838,10 +838,10 @@ fn command_success(command: &mut Command, context: &str) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    bail!("{context}: {}", sanitized_output(&output))
+    bail!("{context}: {}", bounded_command_output(&output))
 }
 
-fn sanitized_output(output: &Output) -> String {
+fn bounded_command_output(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let text = format!("{} {}", stdout.trim(), stderr.trim());

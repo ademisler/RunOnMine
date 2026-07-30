@@ -41,7 +41,7 @@ pub struct ConnectorRemovalRecord {
 
 impl ConnectorRemovalRecord {
     fn new(connector: &ConnectorConfig) -> Result<Self> {
-        validate_connector_id(&connector.id)?;
+        crate::validate_connector_id(&connector.id)?;
         let now = Utc::now();
         Ok(Self {
             version: JOURNAL_VERSION,
@@ -58,7 +58,7 @@ impl ConnectorRemovalRecord {
         if self.version != JOURNAL_VERSION {
             bail!("unsupported connector-removal journal version");
         }
-        validate_connector_id(&self.connector_id)?;
+        crate::validate_connector_id(&self.connector_id)?;
         if self.connector_fingerprint.len() != 64
             || !self
                 .connector_fingerprint
@@ -160,7 +160,7 @@ impl ConnectorRemovalJournal {
     }
 
     pub fn get(&self, connector_id: &str) -> Result<Option<ConnectorRemovalRecord>> {
-        validate_connector_id(connector_id)?;
+        crate::validate_connector_id(connector_id)?;
         let path = self.record_path(connector_id)?;
         match Self::read_path(&path) {
             Ok(record) => Ok(Some(record)),
@@ -303,7 +303,7 @@ impl ConnectorRemovalJournal {
     }
 
     fn record_path(&self, connector_id: &str) -> Result<PathBuf> {
-        validate_connector_id(connector_id)?;
+        crate::validate_connector_id(connector_id)?;
         Ok(self.directory.join(format!("{connector_id}.json")))
     }
 }
@@ -362,7 +362,7 @@ pub fn remove_connector_authorization(paths: &AppPaths, connector_id: &str) -> R
 }
 
 pub fn remove_connector_directories(paths: &AppPaths, connector_id: &str) -> Result<()> {
-    validate_connector_id(connector_id)?;
+    crate::validate_connector_id(connector_id)?;
     for parent in [
         paths.data_dir.join("connectors"),
         paths.state_dir.join("connectors"),
@@ -440,18 +440,6 @@ fn remove_real_directory_if_exists(path: &Path) -> Result<()> {
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_connector_id(connector_id: &str) -> Result<()> {
-    if connector_id.is_empty()
-        || connector_id.len() > 128
-        || !connector_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        bail!("connector id is invalid");
     }
     Ok(())
 }
