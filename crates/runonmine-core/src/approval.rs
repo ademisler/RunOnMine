@@ -12,6 +12,12 @@ pub enum ApprovalStatus {
     Expired,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalTimeoutResult {
+    ExpiredNow,
+    Existing(ApprovalStatus),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {

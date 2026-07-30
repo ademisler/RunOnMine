@@ -9,9 +9,10 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::approval::{
-    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, PersistentGrant,
+    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, ApprovalTimeoutResult,
+    PersistentGrant,
 };
-use crate::audit::AuditEvent;
+use crate::audit::{AuditEvent, AuditOutcome};
 
 pub const AUDIT_RETENTION_DAYS: i64 = 30;
 pub const AUDIT_MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -191,6 +192,26 @@ impl StateStore {
     ) -> Result<bool> {
         self.call_async(move |connection| resolve_approval_connection(connection, id, decision))
             .await
+    }
+
+    pub fn complete_approval_timeout(
+        &self,
+        id: Uuid,
+        event: &AuditEvent,
+    ) -> Result<Option<ApprovalTimeoutResult>> {
+        let event = event.clone();
+        self.call(move |connection| complete_approval_timeout_connection(connection, id, &event))
+    }
+
+    pub async fn complete_approval_timeout_async(
+        &self,
+        id: Uuid,
+        event: AuditEvent,
+    ) -> Result<Option<ApprovalTimeoutResult>> {
+        self.call_async(move |connection| {
+            complete_approval_timeout_connection(connection, id, &event)
+        })
+        .await
     }
 
     pub fn grant_allows(
@@ -431,6 +452,66 @@ fn resolve_approval_connection(
     Ok(changed == 1)
 }
 
+fn complete_approval_timeout_connection(
+    connection: &mut Connection,
+    id: Uuid,
+    event: &AuditEvent,
+) -> Result<Option<ApprovalTimeoutResult>> {
+    if event.outcome != AuditOutcome::TimedOut {
+        bail!("approval timeout audit event must use the timed_out outcome");
+    }
+    let transaction = connection.transaction()?;
+    let stored = transaction
+        .query_row(
+            "SELECT connector_id, tool_name, argument_hash, status
+             FROM approvals WHERE id = ?1",
+            [id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((connector_id, tool_name, argument_hash, status)) = stored else {
+        return Ok(None);
+    };
+    if event.connector_id != connector_id
+        || event.tool_name != tool_name
+        || event.argument_hash != argument_hash
+    {
+        bail!("approval timeout audit identity does not match the approval row");
+    }
+    let status = parse_status(&status)?;
+    if status != ApprovalStatus::Pending {
+        transaction.commit()?;
+        return Ok(Some(ApprovalTimeoutResult::Existing(status)));
+    }
+
+    let changed = transaction.execute(
+        "UPDATE approvals
+         SET status = 'expired', resolved_at = ?1, decision = NULL
+         WHERE id = ?2 AND status = 'pending'",
+        params![event.timestamp.to_rfc3339(), id.to_string()],
+    )?;
+    if changed != 1 {
+        bail!("pending approval timeout transition did not update exactly one row");
+    }
+    let (_, sequence) = append_audit_row(&transaction, event)?;
+    transaction.commit()?;
+    if sequence % 128 == 0 {
+        let _ignored = prune_audit_connection(
+            connection,
+            chrono::Duration::days(AUDIT_RETENTION_DAYS),
+            AUDIT_MAX_BYTES,
+        );
+    }
+    Ok(Some(ApprovalTimeoutResult::ExpiredNow))
+}
+
 fn grant_allows_connection(
     connection: &mut Connection,
     connector_id: &str,
@@ -515,7 +596,6 @@ fn approval_status_connection(
     connection: &mut Connection,
     id: Uuid,
 ) -> Result<Option<ApprovalRequest>> {
-    expire_approvals(connection)?;
     connection
         .query_row(
             "SELECT id, connector_id, principal_kind, oauth_client_id, oauth_subject,
@@ -530,19 +610,33 @@ fn approval_status_connection(
 }
 
 fn pending_approvals_connection(connection: &mut Connection) -> Result<Vec<ApprovalRequest>> {
-    expire_approvals(connection)?;
+    let now = Utc::now().to_rfc3339();
     let mut statement = connection.prepare(
         "SELECT id, connector_id, principal_kind, oauth_client_id, oauth_subject,
                 principal_fingerprint, tool_name, argument_summary, argument_hash,
                 status, created_at, expires_at, resolved_at, decision
-         FROM approvals WHERE status = 'pending' ORDER BY created_at",
+         FROM approvals
+         WHERE status = 'pending' AND expires_at > ?1
+         ORDER BY created_at",
     )?;
-    let rows = statement.query_map([], map_approval)?;
+    let rows = statement.query_map([now], map_approval)?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
 }
 
 fn append_audit_connection(connection: &mut Connection, event: &AuditEvent) -> Result<String> {
+    let (record_hash, sequence) = append_audit_row(connection, event)?;
+    if sequence % 128 == 0 {
+        prune_audit_connection(
+            connection,
+            chrono::Duration::days(AUDIT_RETENTION_DAYS),
+            AUDIT_MAX_BYTES,
+        )?;
+    }
+    Ok(record_hash)
+}
+
+fn append_audit_row(connection: &Connection, event: &AuditEvent) -> Result<(String, i64)> {
     let previous: String = connection
         .query_row(
             "SELECT record_hash FROM audit_events ORDER BY sequence DESC LIMIT 1",
@@ -557,14 +651,7 @@ fn append_audit_connection(connection: &mut Connection, event: &AuditEvent) -> R
     hasher.update(&payload);
     let record_hash = hasher.finalize().to_hex().to_string();
     connection.execute("INSERT INTO audit_events (id, timestamp, connector_id, tool_name, capability, outcome, argument_hash, summary, duration_ms, output_bytes, previous_hash, record_hash, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",params![event.id.to_string(),event.timestamp.to_rfc3339(),event.connector_id,event.tool_name,event.capability,serde_json::to_string(&event.outcome)?,event.argument_hash,event.summary,event.duration_ms.and_then(|v|i64::try_from(v).ok()),event.output_bytes.and_then(|v|i64::try_from(v).ok()),previous,record_hash,payload])?;
-    if connection.last_insert_rowid() % 128 == 0 {
-        prune_audit_connection(
-            connection,
-            chrono::Duration::days(AUDIT_RETENTION_DAYS),
-            AUDIT_MAX_BYTES,
-        )?;
-    }
-    Ok(record_hash)
+    Ok((record_hash, connection.last_insert_rowid()))
 }
 
 fn verify_audit_chain_connection(connection: &mut Connection) -> Result<bool> {
@@ -883,15 +970,6 @@ fn prune_audit_connection(
     Ok(delete_count)
 }
 
-fn expire_approvals(connection: &Connection) -> Result<()> {
-    connection.execute(
-        "UPDATE approvals SET status = 'expired'
-         WHERE status = 'pending' AND expires_at <= ?1",
-        [Utc::now().to_rfc3339()],
-    )?;
-    Ok(())
-}
-
 fn map_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest> {
     let parse_error = |index: usize, error: anyhow::Error| {
         rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, error.into())
@@ -1146,6 +1224,95 @@ mod tests {
             "fs_write",
             "hash",
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_state_and_audit_commit_atomically_and_block_late_grants() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let principal = ApprovalPrincipal::LocalStdio;
+        let approval = ApprovalRequest::new(
+            "local",
+            principal.clone(),
+            "shell_exec",
+            "run a command",
+            "timeout-hash",
+            Utc::now() + Duration::seconds(90),
+        );
+        store.insert_approval(&approval)?;
+        let event = AuditEvent::new(
+            "local",
+            "shell_exec",
+            "shell_exec",
+            AuditOutcome::TimedOut,
+            "timeout-hash",
+            "local approval timed out",
+        );
+
+        assert_eq!(
+            store.complete_approval_timeout(approval.id, &event)?,
+            Some(ApprovalTimeoutResult::ExpiredNow)
+        );
+        assert_eq!(
+            store.complete_approval_timeout(approval.id, &event)?,
+            Some(ApprovalTimeoutResult::Existing(ApprovalStatus::Expired))
+        );
+        let expired = store
+            .approval_status(approval.id)?
+            .context("expired approval disappeared")?;
+        assert_eq!(expired.status, ApprovalStatus::Expired);
+        assert_eq!(expired.resolved_at, Some(event.timestamp));
+        assert_eq!(expired.decision, None);
+        let records = store.audit_tail(10)?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event.id, event.id);
+        assert_eq!(records[0].event.outcome, AuditOutcome::TimedOut);
+        assert!(store.verify_audit_chain()?);
+
+        assert!(!store.resolve_approval(approval.id, ApprovalDecision::ForTenMinutes)?);
+        assert!(!store.temporary_grant_allows(
+            "local",
+            &principal,
+            "shell_exec",
+            "timeout-hash"
+        )?);
+        assert!(store.persistent_grants(Some("local"))?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_audit_failure_rolls_back_the_state_transition() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let approval = ApprovalRequest::new(
+            "local",
+            ApprovalPrincipal::LocalStdio,
+            "shell_exec",
+            "run a command",
+            "rollback-hash",
+            Utc::now() + Duration::seconds(90),
+        );
+        store.insert_approval(&approval)?;
+        let event = AuditEvent::new(
+            "local",
+            "shell_exec",
+            "shell_exec",
+            AuditOutcome::TimedOut,
+            "rollback-hash",
+            "local approval timed out",
+        );
+        store.append_audit(&event)?;
+
+        assert!(
+            store
+                .complete_approval_timeout(approval.id, &event)
+                .is_err()
+        );
+        let unchanged = store
+            .approval_status(approval.id)?
+            .context("approval disappeared after transaction rollback")?;
+        assert_eq!(unchanged.status, ApprovalStatus::Pending);
+        assert_eq!(unchanged.resolved_at, None);
+        assert_eq!(store.audit_tail(10)?.len(), 1);
         Ok(())
     }
 

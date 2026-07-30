@@ -12,7 +12,8 @@ pub mod secrets;
 pub mod storage;
 
 pub use approval::{
-    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, PersistentGrant,
+    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, ApprovalTimeoutResult,
+    PersistentGrant,
 };
 pub use audit::{AuditEvent, AuditOutcome};
 pub use config::{

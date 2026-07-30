@@ -73,6 +73,8 @@ impersonates the client to compare its exact SID to the owner.
 
 ## Explicit limitations
 
+Approval timeout state and its `timed_out` audit event are committed in one SQLite transaction. If audit insertion fails, the state transition rolls back and the row remains pending. A late approval cannot create a temporary or persistent grant after the timeout commits. If the machine owner's decision commits first, the timeout transition returns that existing decision and the owner action is honored and audited instead.
+
 `shell_exec` is not a sandbox. Once allowed, it can perform any operation the
 agent account can perform. Platform-native scripts, browser actions, and desktop
 input can create external side effects.
