@@ -22,6 +22,7 @@ chrono.workspace = true
 command-group.workspace = true
 directories.workspace = true
 fs2.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 keyring.workspace = true
 rand.workspace = true
@@ -38,6 +39,9 @@ url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
