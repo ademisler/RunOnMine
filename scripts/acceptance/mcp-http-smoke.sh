@@ -2,8 +2,9 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-cli=${RUNONMINE_BIN:-"$repo_root/target/debug/runonmine"}
-agent=${RUNONMINE_AGENT_BIN:-"$repo_root/target/debug/runonmine-agent"}
+target_root=${CARGO_TARGET_DIR:-"$repo_root/target"}
+cli=${RUNONMINE_BIN:-"$target_root/debug/runonmine"}
+agent=${RUNONMINE_AGENT_BIN:-"$target_root/debug/runonmine-agent"}
 client="$repo_root/scripts/acceptance/mcp-http-smoke.py"
 
 if [ -z "${RUNONMINE_BIN:-}" ] || [ -z "${RUNONMINE_AGENT_BIN:-}" ]; then
