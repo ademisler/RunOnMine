@@ -20,6 +20,7 @@ eframe = { workspace = true, optional = true }
 egui = { workspace = true, optional = true }
 runonmine-core.workspace = true
 runonmine-oauth.workspace = true
+runonmine-platform.workspace = true
 serde_json.workspace = true
 tray-icon = { workspace = true, optional = true }
 uuid.workspace = true

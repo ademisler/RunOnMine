@@ -139,16 +139,25 @@ enum ConnectCommand {
 
 #[derive(Debug, Subcommand)]
 enum LocalHttpCommand {
-    /// Enable authenticated loopback MCP access and print a new bearer token once.
-    Enable,
+    /// Enable authenticated loopback MCP access without printing its bearer token.
+    Enable {
+        /// Write credentials once to a new owner-only JSON file. The path must be absolute.
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        token_output: Option<PathBuf>,
+    },
     /// Disable loopback MCP access and delete its bearer token.
     Disable,
-    /// Replace the bearer token for the enabled loopback connector.
-    Rotate,
-    /// Show local HTTP status. The token is hidden unless explicitly requested.
+    /// Replace the bearer token for the enabled loopback connector without printing it.
+    Rotate {
+        /// Write credentials once to a new owner-only JSON file. The path must be absolute.
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        token_output: Option<PathBuf>,
+    },
+    /// Show non-secret local HTTP status and optionally export credentials securely.
     Status {
-        #[arg(long)]
-        show_token: bool,
+        /// Write current credentials to a new owner-only JSON file. The path must be absolute.
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        token_output: Option<PathBuf>,
     },
 }
 
@@ -238,6 +247,8 @@ enum GrantCommand {
     },
     Revoke {
         connector: String,
+        #[arg(long)]
+        principal_fingerprint: String,
         tool: String,
         argument_hash: String,
     },

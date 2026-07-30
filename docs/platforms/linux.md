@@ -17,7 +17,15 @@ runonmine service install
 runonmine service status
 ```
 
-The unit is stored below `~/.config/systemd/user` and runs with the current account's normal authority. It uses `ProtectHome=read-only` and opens only RunOnMine's private configuration, state, and local-data directories through explicit `ReadWritePaths` entries.
+The unit is stored below `~/.config/systemd/user` and runs with the current
+account's normal authority. It uses `ProtectSystem=strict` and
+`ProtectHome=read-only`, then opens RunOnMine's private configuration, state,
+local-data directories, and every canonical selected filesystem root through
+explicit `ReadWritePaths` entries. `runonmine service install` reads the current
+validated configuration. Later `runonmine setup --root ...` operations and root
+changes from the desktop application re-render the installed unit; a running
+service is restarted immediately so write policy and the systemd sandbox cannot
+disagree.
 
 ## Headless system service
 

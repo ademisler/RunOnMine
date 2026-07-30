@@ -23,8 +23,9 @@ use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::process::{ProcessRequest, execute_shell};
 use runonmine_core::secrets::SecretStore;
 use runonmine_core::{
-    AppConfig, AppPaths, AuditOutcome, BrowserProfileMode, Capability, ConnectorConfig,
-    ConnectorKind, PolicyContext, PolicyEngine, PolicyMode, PrincipalContext, StateStore,
+    AppConfig, AppPaths, ApprovalPrincipal, AuditOutcome, BrowserProfileMode, Capability,
+    ConnectorConfig, ConnectorKind, PolicyContext, PolicyEngine, PolicyMode, PrincipalContext,
+    StateStore,
 };
 use runonmine_oauth::{Scope, ScopeSet};
 use runonmine_platform::desktop::{self, ScreenshotTarget};
@@ -103,6 +104,19 @@ impl RequestAccess {
             RequestPrincipal::LocalHttp => "local_http".to_owned(),
             RequestPrincipal::QuickTunnel => "quick_tunnel".to_owned(),
             RequestPrincipal::OAuth { client_id, .. } => format!("oauth:{client_id}"),
+        }
+    }
+
+    fn approval_principal(&self) -> ApprovalPrincipal {
+        match &self.principal {
+            RequestPrincipal::LocalHttp => ApprovalPrincipal::LocalHttp,
+            RequestPrincipal::QuickTunnel => ApprovalPrincipal::QuickTunnel,
+            RequestPrincipal::OAuth {
+                client_id, subject, ..
+            } => ApprovalPrincipal::OAuth {
+                client_id: client_id.clone(),
+                subject: subject.clone(),
+            },
         }
     }
 }
@@ -327,16 +341,21 @@ impl RunOnMineServer {
             McpError::internal_error("Tool arguments could not be safely authorized", None)
         })?;
         let access = REQUEST_ACCESS.try_with(Clone::clone).ok();
+        let approval_principal = access.as_ref().map_or(
+            ApprovalPrincipal::LocalStdio,
+            RequestAccess::approval_principal,
+        );
         let principal = match access.as_ref().map(|item| &item.principal) {
             Some(RequestPrincipal::OAuth {
                 client_id, subject, ..
             }) => PrincipalContext::OAuth { client_id, subject },
             _ => PrincipalContext::Local,
         };
-        let resources = policy_resources(tool_name, arguments).map_err(|error| {
-            tracing::error!(%error, "failed to derive policy resources");
-            McpError::internal_error("Tool resources could not be safely authorized", None)
-        })?;
+        let resources = policy_resources(tool_name, arguments, &self.runtime.0.filesystem)
+            .map_err(|error| {
+                tracing::error!(%error, "failed to derive policy resources");
+                McpError::internal_error("Tool resources could not be safely authorized", None)
+            })?;
         let modes = resources
             .contexts()
             .map(|resource| {
@@ -359,6 +378,7 @@ impl RunOnMineServer {
             .store
             .grant_allows_async(
                 connector.id.clone(),
+                approval_principal.clone(),
                 tool_name.to_owned(),
                 argument_hash.clone(),
             )
@@ -399,7 +419,14 @@ impl RunOnMineServer {
 
         self.runtime
             .approvals()
-            .request(tool_name, capability, summary, &argument_hash, arguments)
+            .request(
+                &approval_principal,
+                tool_name,
+                capability,
+                summary,
+                &argument_hash,
+                arguments,
+            )
             .await
     }
 

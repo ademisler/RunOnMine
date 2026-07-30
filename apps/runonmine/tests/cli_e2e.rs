@@ -165,3 +165,85 @@ fn destructive_commands_fail_closed_without_exact_confirmation() -> Result<()> {
     assert!(config_path.is_file());
     Ok(())
 }
+
+#[test]
+fn local_http_credentials_never_reach_standard_output() -> Result<()> {
+    let cli = IsolatedCli::new()?;
+    let project = cli.project.to_string_lossy().into_owned();
+    cli.run_ok(&["setup", "--root", &project])?;
+
+    let first_output = cli.root.path().join("local-http-first.json");
+    let first_output_text = first_output.to_string_lossy().into_owned();
+    let enabled = cli.run_ok(&[
+        "connect",
+        "local-http",
+        "enable",
+        "--token-output",
+        &first_output_text,
+    ])?;
+    let first: serde_json::Value = serde_json::from_slice(&fs::read(&first_output)?)?;
+    let first_token = first["bearer_token"]
+        .as_str()
+        .context("credential export omitted bearer_token")?;
+    assert_eq!(first["authorization_scheme"], "Bearer");
+    assert!(enabled.contains("Bearer token stored"));
+    assert!(!enabled.contains(first_token));
+    assert!(!enabled.contains("Bearer token:"));
+
+    let status = cli.run_ok(&["connect", "local-http", "status"])?;
+    assert!(status.contains("Token configured: true"));
+    assert!(!status.contains(first_token));
+    assert!(!status.contains("Bearer token:"));
+
+    let legacy_reveal = cli.run(&["connect", "local-http", "status", "--show-token"])?;
+    assert!(!legacy_reveal.status.success());
+    assert!(String::from_utf8_lossy(&legacy_reveal.stderr).contains("unexpected argument"));
+
+    let rotated = cli.run_ok(&["connect", "local-http", "rotate"])?;
+    assert!(!rotated.contains(first_token));
+    assert!(!rotated.contains("Bearer token:"));
+
+    let second_output = cli.root.path().join("local-http-second.json");
+    let second_output_text = second_output.to_string_lossy().into_owned();
+    let exported = cli.run_ok(&[
+        "connect",
+        "local-http",
+        "status",
+        "--token-output",
+        &second_output_text,
+    ])?;
+    let second: serde_json::Value = serde_json::from_slice(&fs::read(&second_output)?)?;
+    let second_token = second["bearer_token"]
+        .as_str()
+        .context("rotated credential export omitted bearer_token")?;
+    assert_ne!(first_token, second_token);
+    assert!(!exported.contains(second_token));
+    assert!(!exported.contains("Bearer token:"));
+
+    let overwrite = cli.run(&[
+        "connect",
+        "local-http",
+        "status",
+        "--token-output",
+        &second_output_text,
+    ])?;
+    assert!(!overwrite.status.success());
+    assert!(String::from_utf8_lossy(&overwrite.stderr).contains("refusing to overwrite"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            fs::metadata(&first_output)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&second_output)?.permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let disabled = cli.run_ok(&["connect", "local-http", "disable"])?;
+    assert!(disabled.contains("token was deleted"));
+    Ok(())
+}

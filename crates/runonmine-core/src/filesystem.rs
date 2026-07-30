@@ -91,6 +91,13 @@ impl ScopedFilesystem {
         self.roots.iter().map(|root| root.path.clone()).collect()
     }
 
+    /// Resolve a requested path to the selected-root identity used by
+    /// filesystem execution without requiring the final entry to exist.
+    pub fn resolve_policy_path(&self, path: &Path) -> Result<PathBuf> {
+        let (root, relative) = self.select_root(path)?;
+        Ok(root.path.join(relative))
+    }
+
     pub fn resolve_existing(&self, path: &Path) -> Result<PathBuf> {
         let (root, relative) = self.select_root(path)?;
         let metadata = root.dir.symlink_metadata(&relative).with_context(|| {
@@ -526,6 +533,25 @@ mod tests {
                 path.push(component);
                 path
             })
+    }
+
+    #[test]
+    fn policy_paths_use_the_same_selected_root_identity_as_execution() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("private"))?;
+        std::fs::write(root.path().join("private/report.txt"), b"report")?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+
+        assert_eq!(
+            scoped.resolve_policy_path(Path::new("private/report.txt"))?,
+            root.path().join("private/report.txt")
+        );
+        assert_eq!(
+            scoped.resolve_policy_path(&root.path().join("private/report.txt"))?,
+            scoped.resolve_existing(Path::new("private/report.txt"))?
+        );
+        assert!(scoped.resolve_policy_path(Path::new("../outside")).is_err());
+        Ok(())
     }
 
     #[test]

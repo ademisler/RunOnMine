@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::{PolicyMode, ResourceContext};
 use serde::Serialize;
 use url::Url;
@@ -64,6 +65,7 @@ pub(super) fn pre_approval_decision(
 pub(super) fn policy_resources<T: Serialize>(
     tool_name: &str,
     arguments: &T,
+    filesystem: &ScopedFilesystem,
 ) -> Result<OwnedPolicyResources> {
     let value = serde_json::to_value(arguments)?;
     let string = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
@@ -71,13 +73,22 @@ pub(super) fn policy_resources<T: Serialize>(
         [string("from"), string("to")]
             .into_iter()
             .flatten()
-            .map(|path| OwnedPolicyResource::Filesystem(PathBuf::from(path)))
-            .collect::<Vec<_>>()
+            .map(|path| {
+                filesystem
+                    .resolve_policy_path(Path::new(path))
+                    .map(OwnedPolicyResource::Filesystem)
+            })
+            .collect::<Result<Vec<_>>>()?
     } else if tool_name.starts_with("fs_") {
         string("path")
             .or_else(|| string("root"))
             .or_else(|| string("from"))
-            .map(|path| vec![OwnedPolicyResource::Filesystem(PathBuf::from(path))])
+            .map(|path| {
+                filesystem
+                    .resolve_policy_path(Path::new(path))
+                    .map(|path| vec![OwnedPolicyResource::Filesystem(path)])
+            })
+            .transpose()?
             .unwrap_or_default()
     } else if tool_name.starts_with("browser_") {
         string("url")
@@ -130,9 +141,12 @@ mod tests {
 
     #[test]
     fn filesystem_move_authorizes_both_source_and_destination() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let filesystem = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
         let resources = policy_resources(
             "fs_move",
-            &json!({"from": "/allowed/source", "to": "/restricted/target"}),
+            &json!({"from": "source", "to": "restricted/target"}),
+            &filesystem,
         )?;
         let paths = resources
             .contexts()
@@ -144,10 +158,27 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                PathBuf::from("/allowed/source"),
-                PathBuf::from("/restricted/target")
+                root.path().join("source"),
+                root.path().join("restricted/target")
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn relative_filesystem_resource_uses_selected_root_identity() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let filesystem = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let resources =
+            policy_resources("fs_read", &json!({"path": "private/file.txt"}), &filesystem)?;
+        let paths = resources
+            .contexts()
+            .filter_map(|resource| match resource {
+                ResourceContext::Filesystem(path) => Some(path.to_path_buf()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec![root.path().join("private/file.txt")]);
         Ok(())
     }
 }

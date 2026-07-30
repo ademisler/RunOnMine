@@ -44,16 +44,28 @@ when the separate helper is installed, allowlisted administrator execution.
 
 ## Local approvals
 
-An approval may apply once, to the exact connector, tool, and argument hash for
-ten minutes, or persistently to that same exact action. Persistent approval no
-longer creates a broad tool-wide policy override. The approval screen displays a
+An approval may apply once, to the exact connector, requester principal, tool,
+and argument hash for ten minutes, or persistently to that same exact action.
+Local stdio, local HTTP, Quick Tunnel, and each OAuth client/subject pair have
+distinct grant identities. A grant approved for one OAuth client or subject is
+never reused by another. Persistent approval no longer creates a broad tool-wide
+policy override. The approval screen displays the requester identity plus a
 bounded local preview of the concrete command, path, URL, selector, or script.
 Common token, password, authorization-header, and API-key forms are redacted
 before storage and display. Persistent exact-action grants can be listed and
 revoked with `runonmine approvals grants ...`. MCP clients cannot list, grant,
 or deny approvals.
 
-For an internet-facing connector, a connector policy still cannot bypass the remote safety ceiling. Exact grants authorize only the reviewed argument hash. Explicit `deny` rules are checked before grants, so a grant created earlier cannot override a later policy revocation. Tools with multiple security-relevant resources authorize all of them; for example, `fs_move` evaluates both its source and destination paths.
+For an internet-facing connector, a connector policy still cannot bypass the
+remote safety ceiling. Exact grants authorize only the reviewed requester and
+argument hash. Explicit `deny` rules are checked before grants, so a grant created
+earlier cannot override a later policy revocation. Tools with multiple
+security-relevant resources authorize all of them; for example, `fs_move`
+evaluates both its source and destination paths. Filesystem policy matching uses
+the same selected-root path identity as execution, so relative paths cannot avoid
+an absolute prefix rule. Upgrading from a pre-principal state schema expires old
+pending approvals and removes old connector-wide temporary or persistent grants
+rather than guessing who owned them.
 
 ```console
 runonmine approvals list
@@ -62,7 +74,7 @@ runonmine approvals approve <id> --for 10m
 runonmine approvals approve <id> --always
 runonmine approvals deny <id>
 runonmine approvals grants list
-runonmine approvals grants revoke <connector> <tool> <argument-hash>
+runonmine approvals grants revoke <connector> --principal-fingerprint <fingerprint> <tool> <argument-hash>
 ```
 
 ## OAuth scopes
@@ -83,7 +95,10 @@ window. `fs_delete` moves entries into a private `.runonmine-trash` directory
 inside the same selected root so the move remains descriptor-relative.
 
 `shell_exec` is not a sandbox. When approved, it can run any command available
-to the agent's user account. `admin_exec` is not a root shell: the helper accepts
+to the agent's user account. A `CommandPrefix` policy rule matches only a simple
+single shell command. Shell composition, pipelines, redirection, command
+substitution, backticks, and multiline input are rejected from prefix matching;
+use `ask` for complex shell text. `admin_exec` is not a root shell: the helper accepts
 only explicitly installed, hash-pinned absolute program paths. Program
 arguments can still be security-sensitive and must be reviewed before approval.
 

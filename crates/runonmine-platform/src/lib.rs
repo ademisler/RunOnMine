@@ -6,9 +6,7 @@ pub mod native;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::fs;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
@@ -32,6 +30,46 @@ pub fn current() -> PlatformInfo {
         architecture: std::env::consts::ARCH,
         desktop_session: desktop_session_available(),
         supports_admin_helper: matches!(std::env::consts::OS, "macos" | "linux" | "windows"),
+    }
+}
+
+/// Restrict a newly created regular file to the current operating-system user.
+///
+/// Callers should create the file with no-overwrite semantics before invoking
+/// this function. Symlinks and non-regular files are rejected.
+pub fn restrict_current_user_file(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect private file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("private output must be a regular non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let helper::OwnerIdentity::WindowsSid { sid } = helper::resolve_install_owner(None, None)?
+        else {
+            bail!("failed to resolve the current Windows user SID");
+        };
+        let grant = format!("*{sid}:F");
+        command_success(
+            Command::new("icacls.exe").args([
+                path.to_string_lossy().as_ref(),
+                "/inheritance:r",
+                "/grant:r",
+                &grant,
+            ]),
+            "failed to restrict private output to the current Windows user",
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        bail!("private file permissions are unsupported on this operating system")
     }
 }
 
@@ -338,7 +376,7 @@ impl UserService {
         Self { agent_executable }
     }
 
-    pub fn install(&self) -> Result<()> {
+    pub fn install(&self, allowed_roots: &[PathBuf]) -> Result<()> {
         if !self.agent_executable.is_file() {
             bail!(
                 "runonmine-agent was not found beside the CLI at {}",
@@ -347,19 +385,37 @@ impl UserService {
         }
         #[cfg(target_os = "macos")]
         {
+            let _ = allowed_roots;
             self.install_macos()
         }
         #[cfg(target_os = "linux")]
         {
-            self.install_linux()
+            self.install_linux(allowed_roots)
         }
         #[cfg(windows)]
         {
+            let _ = allowed_roots;
             self.install_windows()
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
+            let _ = allowed_roots;
             bail!("service installation is unsupported on this operating system")
+        }
+    }
+
+    /// Re-render the installed user service with the current selected roots.
+    /// A running Linux service is restarted so the new systemd sandbox takes
+    /// effect immediately. Other platforms do not need root path directives.
+    pub fn reconcile_allowed_roots(&self, allowed_roots: &[PathBuf]) -> Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            self.reconcile_linux_allowed_roots(allowed_roots)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = allowed_roots;
+            Ok(false)
         }
     }
 
@@ -520,41 +576,64 @@ impl UserService {
     }
 
     #[cfg(target_os = "linux")]
-    fn install_linux(&self) -> Result<()> {
+    fn install_linux(&self, allowed_roots: &[PathBuf]) -> Result<()> {
         let path = service_definition_path()?.context("systemd user path is unavailable")?;
         ensure_parent(&path)?;
-        let writable_paths = linux_user_writable_paths()?;
-        for writable_path in &writable_paths {
-            ensure_private_directory(writable_path)?;
-        }
-        let executable = systemd_escape(&self.agent_executable.to_string_lossy());
-        let mut writable_directives = String::new();
-        for item in &writable_paths {
-            writable_directives.push_str("ReadWritePaths=");
-            writable_directives.push_str(&systemd_escape(&item.to_string_lossy()));
-            writable_directives.push('\n');
-        }
-        let unit = format!(
-            "[Unit]\nDescription=RunOnMine MCP Agent\nAfter=network-online.target\n\n\
-             [Service]\nType=simple\nExecStart={executable} run\nRestart=on-failure\nRestartSec=3\n\
-             NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\
-             {writable_directives}\
-             [Install]\nWantedBy=default.target\n"
-        );
-        write_private(&path, unit.as_bytes())?;
+        self.write_linux_user_unit(&path, allowed_roots)?;
         command_success(
             Command::new("systemctl").args(["--user", "daemon-reload"]),
             "failed to reload the systemd user manager",
         )?;
         command_success(
-            Command::new("systemctl").args([
-                "--user",
-                "enable",
-                "--now",
-                "runonmine-agent.service",
-            ]),
+            Command::new("systemctl").args(["--user", "enable", "runonmine-agent.service"]),
             "failed to enable the systemd user service",
+        )?;
+        command_success(
+            Command::new("systemctl").args(["--user", "restart", "runonmine-agent.service"]),
+            "failed to start the systemd user service with the current sandbox",
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reconcile_linux_allowed_roots(&self, allowed_roots: &[PathBuf]) -> Result<bool> {
+        let path = service_definition_path()?.context("systemd user path is unavailable")?;
+        if !path.is_file() {
+            return Ok(false);
+        }
+        if !self.agent_executable.is_file() {
+            bail!(
+                "runonmine-agent was not found beside the current application at {}",
+                self.agent_executable.display()
+            );
+        }
+        self.write_linux_user_unit(&path, allowed_roots)?;
+        command_success(
+            Command::new("systemctl").args(["--user", "daemon-reload"]),
+            "failed to reload the systemd user manager",
+        )?;
+        let running = Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", "runonmine-agent.service"])
+            .status()
+            .context("failed to inspect the systemd user service")?
+            .success();
+        if running {
+            command_success(
+                Command::new("systemctl").args(["--user", "restart", "runonmine-agent.service"]),
+                "failed to restart the systemd user service with updated roots",
+            )?;
+        }
+        Ok(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_linux_user_unit(&self, path: &Path, allowed_roots: &[PathBuf]) -> Result<()> {
+        let internal_paths = linux_user_internal_writable_paths()?;
+        for internal_path in &internal_paths {
+            ensure_private_directory(internal_path)?;
+        }
+        let writable_paths = linux_user_writable_paths(internal_paths, allowed_roots)?;
+        let unit = render_linux_user_unit(&self.agent_executable, &writable_paths);
+        write_private(path, unit.as_bytes())
     }
 
     #[cfg(target_os = "linux")]
@@ -682,7 +761,7 @@ fn xml_escape(value: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_user_writable_paths() -> Result<Vec<PathBuf>> {
+fn linux_user_internal_writable_paths() -> Result<Vec<PathBuf>> {
     let directories = ProjectDirs::from("dev", "RunOnMine", "RunOnMine")
         .context("the operating system did not provide RunOnMine user directories")?;
     let state = directories
@@ -697,6 +776,48 @@ fn linux_user_writable_paths() -> Result<Vec<PathBuf>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_writable_paths(
+    mut internal_paths: Vec<PathBuf>,
+    allowed_roots: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    for root in allowed_roots {
+        if !root.is_absolute() {
+            bail!("selected service roots must be absolute paths");
+        }
+        let canonical = fs::canonicalize(root)
+            .with_context(|| format!("selected service root does not exist: {}", root.display()))?;
+        if !canonical.is_dir() {
+            bail!(
+                "selected service root is not a directory: {}",
+                canonical.display()
+            );
+        }
+        internal_paths.push(canonical);
+    }
+    internal_paths.sort();
+    internal_paths.dedup();
+    Ok(internal_paths)
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_user_unit(agent_executable: &Path, writable_paths: &[PathBuf]) -> String {
+    let executable = systemd_escape(&agent_executable.to_string_lossy());
+    let mut writable_directives = String::new();
+    for item in writable_paths {
+        writable_directives.push_str("ReadWritePaths=");
+        writable_directives.push_str(&systemd_escape(&item.to_string_lossy()));
+        writable_directives.push('\n');
+    }
+    format!(
+        "[Unit]\nDescription=RunOnMine MCP Agent\nAfter=network-online.target\n\n\
+         [Service]\nType=simple\nExecStart={executable} run\nRestart=on-failure\nRestartSec=3\n\
+         UMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\
+         {writable_directives}\
+         [Install]\nWantedBy=default.target\n"
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -717,4 +838,87 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn systemd_escape(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(all(test, unix))]
+mod private_file_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    #[test]
+    fn private_file_permissions_are_owner_only_and_symlinks_are_rejected() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let file = temporary.path().join("secret.json");
+        fs::write(&file, b"secret")?;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666))?;
+        restrict_current_user_file(&file)?;
+        assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
+
+        let link = temporary.path().join("secret-link.json");
+        symlink(&file, &link)?;
+        assert!(restrict_current_user_file(&link).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_user_service_tests {
+    use super::*;
+
+    #[test]
+    fn selected_roots_are_rendered_as_systemd_write_exceptions() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root_with_space = temporary.path().join("project files");
+        let nested = root_with_space.join("nested");
+        fs::create_dir_all(&nested)?;
+        let internal = vec![temporary.path().join("state")];
+        fs::create_dir_all(&internal[0])?;
+        let paths = linux_user_writable_paths(
+            internal,
+            &[
+                root_with_space.clone(),
+                nested.clone(),
+                root_with_space.clone(),
+            ],
+        )?;
+        let canonical_root = root_with_space.canonicalize()?;
+        let canonical_nested = nested.canonicalize()?;
+        assert!(paths.contains(&canonical_root));
+        assert!(paths.contains(&canonical_nested));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|candidate| *candidate == &canonical_root)
+                .count(),
+            1
+        );
+
+        let unit = render_linux_user_unit(Path::new("/opt/RunOnMine/runonmine-agent"), &paths);
+        assert!(unit.contains("ProtectSystem=strict"));
+        assert!(unit.contains("ProtectHome=read-only"));
+        assert!(unit.contains("UMask=0077"));
+        assert!(unit.contains(&format!(
+            "ReadWritePaths={}",
+            systemd_escape(&canonical_root.to_string_lossy())
+        )));
+        assert!(unit.contains(&format!(
+            "ReadWritePaths={}",
+            systemd_escape(&canonical_nested.to_string_lossy())
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn service_roots_must_exist_and_be_absolute_directories() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let relative = PathBuf::from("relative-root");
+        assert!(linux_user_writable_paths(Vec::new(), &[relative]).is_err());
+        assert!(
+            linux_user_writable_paths(Vec::new(), &[temporary.path().join("missing")]).is_err()
+        );
+        let file = temporary.path().join("file");
+        fs::write(&file, b"not a directory")?;
+        assert!(linux_user_writable_paths(Vec::new(), &[file]).is_err());
+        Ok(())
+    }
 }

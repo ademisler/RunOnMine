@@ -7,6 +7,11 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Stop printing local HTTP bearer tokens; add an explicit absolute, no-overwrite, current-user-only JSON export channel for enable, rotate, and status, and remove the legacy `--show-token` path.
+- Reconcile the Linux per-user systemd sandbox with canonical selected roots, include them as explicit write exceptions, and restart an active service after root changes.
+- Bind pending approvals plus temporary and persistent exact-action grants to a transport-aware requester principal fingerprint, isolate OAuth clients and subjects, show requester identity locally, and remove pre-principal grants fail-closed during state migration.
+- Resolve filesystem policy resources through the same selected-root identity used by execution so relative paths cannot bypass absolute prefix rules.
+- Reject shell composition, pipelines, redirection, command substitution, backticks, and multiline input from command-prefix authorization.
 - Reject port zero in loopback connector origins, MCP targets, and health URLs; reject health URL fragments and exercise URL boundary invariants with generated cases.
 - Commit connector creation, enablement, removal, desktop credential replacement, emergency rotation, and purge enumeration against the latest locked configuration; restore every previous credential value before unlocking after handled secret-store, validation, or save failures.
 - Serialize high-frequency configuration read-modify-write operations across the agent, desktop, and CLI with an owner-only sidecar lock so Quick Tunnel URL discovery, setup, browser, and policy updates cannot silently overwrite one another.

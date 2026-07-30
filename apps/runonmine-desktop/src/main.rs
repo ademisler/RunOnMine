@@ -33,6 +33,7 @@ mod desktop {
     use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
     use crate::theme::{self, Icon as UiIcon, StatusTone};
     use runonmine_oauth::{OAuthSession, RegisteredClient, SqliteOAuthStore};
+    use runonmine_platform::UserService;
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
     use uuid::Uuid;
@@ -302,6 +303,16 @@ mod desktop {
             Ok(output)
         }
 
+        fn reconcile_user_service_roots(&self) -> Result<()> {
+            let config = self
+                .config
+                .as_ref()
+                .context("RunOnMine configuration is unavailable")?;
+            let _reconciled =
+                UserService::discover()?.reconcile_allowed_roots(&config.allowed_roots)?;
+            Ok(())
+        }
+
         fn add_root(&mut self) -> Result<()> {
             let value = self.root_input.trim();
             if value.is_empty() {
@@ -320,7 +331,8 @@ mod desktop {
                     config.allowed_roots.sort();
                 }
                 Ok(())
-            })
+            })?;
+            self.reconcile_user_service_roots()
         }
 
         fn remove_root(&mut self, root: &Path) -> Result<()> {
@@ -328,7 +340,8 @@ mod desktop {
             self.update_config(move |config| {
                 config.allowed_roots.retain(|candidate| candidate != &root);
                 Ok(())
-            })
+            })?;
+            self.reconcile_user_service_roots()
         }
 
         fn set_preset(&mut self, connector_id: &str, preset: PolicyPreset) -> Result<()> {
@@ -360,6 +373,7 @@ mod desktop {
                 .context("RunOnMine state is unavailable")?;
             if !store.delete_persistent_grant(
                 &grant.connector_id,
+                &grant.principal_fingerprint,
                 &grant.tool_name,
                 &grant.argument_hash,
             )? {
@@ -1050,6 +1064,23 @@ mod desktop {
                                     .size(11.0)
                                     .color(theme::MUTED),
                             );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Requester: {}",
+                                    request.principal.display_label()
+                                ))
+                                .size(11.0)
+                                .color(theme::MUTED),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Principal fingerprint: {}",
+                                    request.principal_fingerprint
+                                ))
+                                .size(10.0)
+                                .monospace()
+                                .color(theme::MUTED),
+                            );
                         });
                         ui.add_space(10.0);
                         ui.horizontal_wrapped(|ui| {
@@ -1079,7 +1110,7 @@ mod desktop {
             theme::section_header(
                 ui,
                 "Persistent exact-action grants",
-                "These grants match one connector, tool, and argument hash only.",
+                "These grants match one connector, requester principal, tool, and argument hash only.",
             );
             let mut revoke = None;
             if self.persistent_grants.is_empty() {
@@ -1106,6 +1137,23 @@ mod desktop {
                                     egui::RichText::new(&grant.argument_summary)
                                         .size(12.0)
                                         .color(theme::MUTED),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Requester {}",
+                                        grant.principal.display_label()
+                                    ))
+                                    .size(11.0)
+                                    .color(theme::MUTED),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Principal {}",
+                                        grant.principal_fingerprint
+                                    ))
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(theme::MUTED),
                                 );
                                 ui.label(
                                     egui::RichText::new(format!("Hash {}", grant.argument_hash))

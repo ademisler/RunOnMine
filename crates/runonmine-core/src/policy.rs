@@ -318,7 +318,10 @@ fn same_origin(left: &Url, right: &Url) -> bool {
 }
 
 fn command_prefix_matches(prefix: &str, actual: &str) -> bool {
-    if prefix.is_empty() {
+    if prefix.is_empty()
+        || contains_shell_control_syntax(prefix)
+        || contains_shell_control_syntax(actual)
+    {
         return false;
     }
     if prefix.chars().last().is_some_and(char::is_whitespace) {
@@ -329,6 +332,13 @@ fn command_prefix_matches(prefix: &str, actual: &str) -> bool {
             .strip_prefix(prefix)
             .and_then(|remainder| remainder.chars().next())
             .is_some_and(char::is_whitespace)
+}
+
+fn contains_shell_control_syntax(command: &str) -> bool {
+    command
+        .chars()
+        .any(|character| matches!(character, ';' | '|' | '&' | '<' | '>' | '`' | '\n' | '\r'))
+        || command.contains("$(")
 }
 
 fn apply_remote_safety_ceiling(
@@ -517,6 +527,31 @@ mod tests {
         assert!(!command_prefix_matches("cargo test", "cargo testing"));
         assert!(command_prefix_matches("rm ", "rm -rf tmp"));
         assert!(!command_prefix_matches("", "anything"));
+    }
+
+    #[test]
+    fn command_prefix_rejects_shell_composition_and_substitution() {
+        for command in [
+            "cargo test && rm -rf tmp",
+            "cargo test || printf failed",
+            "cargo test; rm -rf tmp",
+            "cargo test | tee output",
+            "cargo test > output",
+            "cargo test < input",
+            "cargo test `printf injected`",
+            "cargo test $(printf injected)",
+            "cargo test\nprintf injected",
+            "cargo test\rprintf injected",
+        ] {
+            assert!(
+                !command_prefix_matches("cargo test", command),
+                "accepted unsafe shell command {command:?}"
+            );
+        }
+        assert!(!command_prefix_matches(
+            "cargo test &&",
+            "cargo test && true"
+        ));
     }
 
     #[test]

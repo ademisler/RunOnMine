@@ -31,6 +31,22 @@ printf '%s\n' "$setup_output" | grep -F 'RunOnMine is initialized.' >/dev/null
 printf '%s\n' "$setup_output" | grep -F 'Allowed roots: 1' >/dev/null
 run_cli policy show | grep -F 'AdminExec: Deny' >/dev/null
 run_cli connect list | grep -F 'LocalHttp' >/dev/null
+credential_file="$sandbox/local-http.json"
+local_http_output=$(run_cli connect local-http enable --token-output "$credential_file")
+printf '%s
+' "$local_http_output" | grep -F 'Bearer token stored' >/dev/null
+if printf '%s
+' "$local_http_output" | grep -F 'Bearer token:' >/dev/null; then
+  echo 'local HTTP token leaked to standard output' >&2
+  exit 1
+fi
+grep -F '"bearer_token"' "$credential_file" >/dev/null
+if run_cli connect local-http status --show-token >/dev/null 2>&1; then
+  echo 'legacy local HTTP token reveal option was accepted' >&2
+  exit 1
+fi
+run_cli connect local-http disable | grep -F 'token was deleted' >/dev/null
+rm -f "$credential_file"
 run_cli approvals list | grep -F 'No pending approvals.' >/dev/null
 run_cli audit tail --limit 5 >/dev/null
 run_cli lock | grep -F 'RunOnMine is locked.' >/dev/null

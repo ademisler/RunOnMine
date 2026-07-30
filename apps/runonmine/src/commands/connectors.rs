@@ -19,20 +19,24 @@ pub(crate) fn setup(roots: &[PathBuf]) -> Result<()> {
         }
         canonical_roots.push(canonical);
     }
-    let allowed_root_count = AppConfig::update(&paths.config_file(), move |config| {
+    let allowed_roots = AppConfig::update(&paths.config_file(), move |config| {
         for canonical in canonical_roots {
             if !config.allowed_roots.contains(&canonical) {
                 config.allowed_roots.push(canonical);
             }
         }
         config.allowed_roots.sort();
-        Ok(config.allowed_roots.len())
+        Ok(config.allowed_roots.clone())
     })?;
     let _state = StateStore::open(&paths.state_db())?;
+    let service_reconciled = UserService::discover()?.reconcile_allowed_roots(&allowed_roots)?;
     println!("RunOnMine is initialized.");
     println!("Config: {}", paths.config_file().display());
-    println!("Allowed roots: {allowed_root_count}");
-    if allowed_root_count == 0 {
+    println!("Allowed roots: {}", allowed_roots.len());
+    if service_reconciled {
+        println!("Installed Linux user service sandbox updated for the selected roots.");
+    }
+    if allowed_roots.is_empty() {
         println!("File tools remain unavailable until at least one --root is added.");
     }
     Ok(())
@@ -113,12 +117,18 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             println!("Restart the agent to close any live transport process.");
         }
         ConnectCommand::LocalHttp { command } => match command {
-            LocalHttpCommand::Enable => {
+            LocalHttpCommand::Enable { token_output } => {
+                validate_local_http_output_path(token_output.as_deref())?;
                 let token = generate_path_secret();
                 let secret = SecretString::from(token.clone());
                 let (connector_id, port) =
                     enable_local_http_transactionally(&config_path, secrets.as_ref(), &secret)?;
-                print_local_http_credentials(port, &connector_id, &token);
+                report_local_http_credentials(
+                    port,
+                    &connector_id,
+                    &token,
+                    token_output.as_deref(),
+                )?;
             }
             LocalHttpCommand::Disable => {
                 let connector_id =
@@ -127,7 +137,8 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     "Local HTTP connector {connector_id} is disabled and its token was deleted."
                 );
             }
-            LocalHttpCommand::Rotate => {
+            LocalHttpCommand::Rotate { token_output } => {
+                validate_local_http_output_path(token_output.as_deref())?;
                 let token = generate_path_secret();
                 let secret = SecretString::from(token.clone());
                 let (connector_id, port) = update_config_with_secrets(
@@ -147,9 +158,15 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                         Ok((connector_id, config.port))
                     },
                 )?;
-                print_local_http_credentials(port, &connector_id, &token);
+                report_local_http_credentials(
+                    port,
+                    &connector_id,
+                    &token,
+                    token_output.as_deref(),
+                )?;
             }
-            LocalHttpCommand::Status { show_token } => {
+            LocalHttpCommand::Status { token_output } => {
+                validate_local_http_output_path(token_output.as_deref())?;
                 let connector = config
                     .connectors
                     .iter()
@@ -163,9 +180,19 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 println!("Endpoint: http://127.0.0.1:{}/mcp", config.port);
                 let token = secrets.get(&secret_name)?;
                 println!("Token configured: {}", token.is_some());
-                if show_token {
+                if let Some(output) = token_output.as_deref() {
                     let token = token.context("local HTTP token is not configured")?;
-                    println!("Bearer token: {}", token.expose_secret());
+                    write_local_http_credentials(
+                        output,
+                        config.port,
+                        &connector_id,
+                        token.expose_secret(),
+                    )?;
+                    println!("Credentials written to {}.", output.display());
+                } else {
+                    println!(
+                        "Bearer token is not printed. Use --token-output <absolute-file> to export it securely."
+                    );
                 }
             }
         },
@@ -449,11 +476,111 @@ pub(super) fn remove_real_directory_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn print_local_http_credentials(port: u16, connector_id: &str, token: &str) {
+#[derive(serde::Serialize)]
+struct LocalHttpCredentialExport<'a> {
+    version: u8,
+    connector_id: &'a str,
+    endpoint: String,
+    authorization_scheme: &'static str,
+    bearer_token: &'a str,
+}
+
+fn report_local_http_credentials(
+    port: u16,
+    connector_id: &str,
+    token: &str,
+    token_output: Option<&Path>,
+) -> Result<()> {
     println!("Local HTTP connector {connector_id} is enabled.");
     println!("Endpoint: http://127.0.0.1:{port}/mcp");
-    println!("Bearer token: {token}");
-    println!("Store this token now; it is kept in the operating system credential store.");
+    println!("Bearer token stored in the operating-system credential store.");
+    if let Some(output) = token_output {
+        write_local_http_credentials(output, port, connector_id, token).with_context(|| {
+            format!(
+                "the token was updated and remains in the credential store, but secure export to {} failed; retry with `local-http status --token-output <absolute-file>`",
+                output.display()
+            )
+        })?;
+        println!("Credentials written to {}.", output.display());
+    } else {
+        println!(
+            "The token was not printed. Use `local-http status --token-output <absolute-file>` to export it securely."
+        );
+    }
+    Ok(())
+}
+
+fn validate_local_http_output_path(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if !path.is_absolute() {
+        bail!("local HTTP credential output must be an absolute path");
+    }
+    let parent = path
+        .parent()
+        .context("local HTTP credential output has no parent directory")?;
+    if !parent.is_dir() {
+        bail!("local HTTP credential output parent must already exist");
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => bail!(
+            "refusing to overwrite existing local HTTP credential output: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_local_http_credentials(
+    path: &Path,
+    port: u16,
+    connector_id: &str,
+    token: &str,
+) -> Result<()> {
+    validate_local_http_output_path(Some(path))?;
+    let export = LocalHttpCredentialExport {
+        version: 1,
+        connector_id,
+        endpoint: format!("http://127.0.0.1:{port}/mcp"),
+        authorization_scheme: "Bearer",
+        bearer_token: token,
+    };
+    let mut contents = serde_json::to_vec_pretty(&export)?;
+    contents.push(b'\n');
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).with_context(|| {
+        format!(
+            "failed to create private credential output {}",
+            path.display()
+        )
+    })?;
+    let result = (|| -> Result<()> {
+        file.write_all(&contents)?;
+        file.sync_all()?;
+        runonmine_platform::restrict_current_user_file(path)?;
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .context("credential output has no parent directory")?;
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        drop(file);
+        let _ignored = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(super) fn read_secret(from_stdin: bool, prompt: &str) -> Result<String> {
@@ -635,4 +762,47 @@ pub(super) fn generate_path_secret() -> String {
     let mut raw = [0_u8; 32];
     rand::rng().fill_bytes(&mut raw);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_http_credentials_use_private_no_overwrite_output() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = temporary.path().join("local-http.json");
+        write_local_http_credentials(&output, 47_821, "local-http", "secret-token")?;
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&output)?)?;
+        assert_eq!(value["connector_id"], "local-http");
+        assert_eq!(value["endpoint"], "http://127.0.0.1:47821/mcp");
+        assert_eq!(value["authorization_scheme"], "Bearer");
+        assert_eq!(value["bearer_token"], "secret-token");
+        assert!(
+            write_local_http_credentials(&output, 47_821, "local-http", "other-token").is_err()
+        );
+        let after_failed_overwrite: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output)?)?;
+        assert_eq!(value, after_failed_overwrite);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&output)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_http_credential_output_requires_absolute_new_path() -> Result<()> {
+        assert!(validate_local_http_output_path(Some(Path::new("relative.json"))).is_err());
+        let temporary = tempfile::tempdir()?;
+        assert!(
+            validate_local_http_output_path(Some(&temporary.path().join("missing/secret.json")))
+                .is_err()
+        );
+        Ok(())
+    }
 }

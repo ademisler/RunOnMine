@@ -25,9 +25,12 @@ user interaction in `connectors.rs`. The `desktop-control` feature contains capt
 dependencies. Linux/VPS builds with `--no-default-features` do not include those
 dependencies.
 
-The normal agent always runs as the signed-in user. The Linux headless system
-unit is installed by root but runs as an explicitly selected non-root account.
-Installing either normal service never installs the privileged helper.
+The normal agent always runs as the signed-in user. The Linux per-user unit keeps
+home and the system read-only except for RunOnMine state plus the exact canonical
+roots selected in configuration. Root additions and removals reconcile an
+installed unit and restart it when active. The Linux headless system unit is
+installed by root but runs as an explicitly selected non-root account. Installing
+either normal service never installs the privileged helper.
 
 ## Request path
 
@@ -37,14 +40,18 @@ AI client
   -> connector authentication and token scope
   -> MCP session and rate limits
   -> local connector policy for every relevant resource (deny / ask / allow)
+  -> canonical resource identity and requester-principal binding
   -> explicit deny revocation before exact-action grant evaluation
-  -> local approval when required
+  -> principal-bound local approval when required
   -> capability implementation
   -> operating-system account boundary
 ```
 
 Authentication scopes can reduce access but can never override local policy.
-Approval is deliberately absent from the MCP tool surface.
+Approval is deliberately absent from the MCP tool surface. Approval and grant
+rows carry a domain-separated fingerprint for local stdio, local HTTP, Quick
+Tunnel, or an exact OAuth client/subject pair. State-schema migration does not
+preserve grants that predate that identity boundary.
 
 The loopback HTTP server supports at most 32 simultaneous MCP sessions, expires
 sessions after 30 idle minutes, and permits 120 calls per connector per minute

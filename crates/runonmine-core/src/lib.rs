@@ -11,7 +11,9 @@ pub mod process;
 pub mod secrets;
 pub mod storage;
 
-pub use approval::{ApprovalDecision, ApprovalRequest, ApprovalStatus, PersistentGrant};
+pub use approval::{
+    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, PersistentGrant,
+};
 pub use audit::{AuditEvent, AuditOutcome};
 pub use config::{
     AppConfig, BrowserProfileMode, CloudflareNamedSettings, CloudflareQuickSettings,

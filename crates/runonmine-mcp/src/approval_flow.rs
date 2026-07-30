@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rmcp::ErrorData as McpError;
 use runonmine_core::{
-    ApprovalDecision, ApprovalRequest, ApprovalStatus, AuditOutcome, Capability, StateStore,
+    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, AuditOutcome, Capability,
+    StateStore,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -91,6 +92,7 @@ impl ApprovalFlow {
 
     pub(super) async fn request<T: Serialize>(
         &self,
+        principal: &ApprovalPrincipal,
         tool_name: &str,
         capability: Capability,
         summary: &str,
@@ -101,6 +103,7 @@ impl ApprovalFlow {
             &self.store,
             &self.audit,
             &self.connector_id,
+            principal,
             self.timeout,
             APPROVAL_POLL_INTERVAL,
             tool_name,
@@ -118,6 +121,7 @@ async fn request_with<R, A, T>(
     repository: &R,
     audit: &A,
     connector_id: &str,
+    principal: &ApprovalPrincipal,
     timeout: Duration,
     poll_interval: Duration,
     tool_name: &str,
@@ -135,6 +139,7 @@ where
         .map_err(|_| McpError::internal_error("Invalid local approval timeout", None))?;
     let approval = ApprovalRequest::new(
         connector_id,
+        principal.clone(),
         tool_name,
         approval_preview(tool_name, arguments),
         argument_hash,
@@ -362,6 +367,7 @@ mod tests {
             &repository,
             &audit,
             "connector-a",
+            &ApprovalPrincipal::LocalStdio,
             Duration::from_millis(200),
             Duration::from_millis(1),
             "fs_write",
@@ -375,6 +381,11 @@ mod tests {
         let request = request?;
         assert!(result.is_ok());
         assert_eq!(request.connector_id, "connector-a");
+        assert_eq!(request.principal, ApprovalPrincipal::LocalStdio);
+        assert_eq!(
+            request.principal_fingerprint,
+            ApprovalPrincipal::LocalStdio.fingerprint()
+        );
         assert_eq!(request.tool_name, "fs_write");
         assert_eq!(request.argument_hash, "argument-hash");
         assert!(request.argument_summary.contains("/allowed/file.txt"));
@@ -420,6 +431,7 @@ mod tests {
             &repository,
             &audit,
             "connector-a",
+            &ApprovalPrincipal::LocalStdio,
             Duration::from_millis(200),
             Duration::from_millis(1),
             "shell_exec",
@@ -453,6 +465,7 @@ mod tests {
             &repository,
             &audit,
             "connector-a",
+            &ApprovalPrincipal::LocalStdio,
             Duration::from_millis(200),
             Duration::from_millis(1),
             "fs_write",
@@ -480,6 +493,7 @@ mod tests {
             &repository,
             &audit,
             "connector-a",
+            &ApprovalPrincipal::LocalStdio,
             Duration::from_millis(5),
             Duration::from_millis(1),
             "fs_write",
@@ -510,6 +524,7 @@ mod tests {
             &repository,
             &audit,
             "connector-a",
+            &ApprovalPrincipal::LocalStdio,
             Duration::from_millis(200),
             Duration::from_millis(1),
             "shell_exec",

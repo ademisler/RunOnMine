@@ -8,12 +8,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalStatus, PersistentGrant};
+use crate::approval::{
+    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, PersistentGrant,
+};
 use crate::audit::AuditEvent;
 
 pub const AUDIT_RETENTION_DAYS: i64 = 30;
 pub const AUDIT_MAX_BYTES: u64 = 100 * 1024 * 1024;
-const STATE_SCHEMA_VERSION: i64 = 2;
+const STATE_SCHEMA_VERSION: i64 = 3;
 
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -194,25 +196,41 @@ impl StateStore {
     pub fn grant_allows(
         &self,
         connector_id: &str,
+        principal: &ApprovalPrincipal,
         tool_name: &str,
         argument_hash: &str,
     ) -> Result<bool> {
         let connector_id = connector_id.to_owned();
+        let principal_fingerprint = principal.fingerprint();
         let tool_name = tool_name.to_owned();
         let argument_hash = argument_hash.to_owned();
         self.call(move |connection| {
-            grant_allows_connection(connection, &connector_id, &tool_name, &argument_hash)
+            grant_allows_connection(
+                connection,
+                &connector_id,
+                &principal_fingerprint,
+                &tool_name,
+                &argument_hash,
+            )
         })
     }
 
     pub async fn grant_allows_async(
         &self,
         connector_id: String,
+        principal: ApprovalPrincipal,
         tool_name: String,
         argument_hash: String,
     ) -> Result<bool> {
+        let principal_fingerprint = principal.fingerprint();
         self.call_async(move |connection| {
-            grant_allows_connection(connection, &connector_id, &tool_name, &argument_hash)
+            grant_allows_connection(
+                connection,
+                &connector_id,
+                &principal_fingerprint,
+                &tool_name,
+                &argument_hash,
+            )
         })
         .await
     }
@@ -220,10 +238,11 @@ impl StateStore {
     pub fn temporary_grant_allows(
         &self,
         connector_id: &str,
+        principal: &ApprovalPrincipal,
         tool_name: &str,
         argument_hash: &str,
     ) -> Result<bool> {
-        self.grant_allows(connector_id, tool_name, argument_hash)
+        self.grant_allows(connector_id, principal, tool_name, argument_hash)
     }
 
     pub fn persistent_grants(&self, connector_id: Option<&str>) -> Result<Vec<PersistentGrant>> {
@@ -236,13 +255,20 @@ impl StateStore {
     pub fn delete_persistent_grant(
         &self,
         connector_id: &str,
+        principal_fingerprint: &str,
         tool_name: &str,
         argument_hash: &str,
     ) -> Result<bool> {
         let connector_id = connector_id.to_owned();
+        let principal_fingerprint = principal_fingerprint.to_owned();
         let tool_name = tool_name.to_owned();
         let argument_hash = argument_hash.to_owned();
-        self.call(move |connection| Ok(connection.execute("DELETE FROM persistent_grants WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3", params![connector_id, tool_name, argument_hash])? == 1))
+        self.call(move |connection| {
+            Ok(connection.execute(
+                "DELETE FROM persistent_grants WHERE connector_id = ?1 AND principal_fingerprint = ?2 AND tool_name = ?3 AND argument_hash = ?4",
+                params![connector_id, principal_fingerprint, tool_name, argument_hash],
+            )? == 1)
+        })
     }
 
     pub fn clear_persistent_grants(&self, connector_id: Option<&str>) -> Result<usize> {
@@ -329,7 +355,27 @@ fn insert_approval_connection(
     connection: &mut Connection,
     request: &ApprovalRequest,
 ) -> Result<()> {
-    connection.execute("INSERT INTO approvals (id, connector_id, tool_name, argument_summary, argument_hash, status, created_at, expires_at, resolved_at, decision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)", params![request.id.to_string(), request.connector_id, request.tool_name, request.argument_summary, request.argument_hash, status_name(request.status), request.created_at.to_rfc3339(), request.expires_at.to_rfc3339()])?;
+    connection.execute(
+        "INSERT INTO approvals (
+            id, connector_id, principal_kind, oauth_client_id, oauth_subject,
+            principal_fingerprint, tool_name, argument_summary, argument_hash,
+            status, created_at, expires_at, resolved_at, decision
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, NULL)",
+        params![
+            request.id.to_string(),
+            request.connector_id,
+            request.principal.storage_kind(),
+            request.principal.oauth_client_id(),
+            request.principal.oauth_subject(),
+            request.principal_fingerprint,
+            request.tool_name,
+            request.argument_summary,
+            request.argument_hash,
+            status_name(request.status),
+            request.created_at.to_rfc3339(),
+            request.expires_at.to_rfc3339(),
+        ],
+    )?;
     Ok(())
 }
 
@@ -345,11 +391,41 @@ fn resolve_approval_connection(
     } else {
         "approved"
     };
-    let changed=transaction.execute("UPDATE approvals SET status = ?1, resolved_at = ?2, decision = ?3 WHERE id = ?4 AND status = 'pending' AND expires_at > ?2", params![status, now, decision_name(decision), id.to_string()])?;
+    let changed = transaction.execute(
+        "UPDATE approvals SET status = ?1, resolved_at = ?2, decision = ?3
+         WHERE id = ?4 AND status = 'pending' AND expires_at > ?2",
+        params![status, now, decision_name(decision), id.to_string()],
+    )?;
     if changed == 1 && decision == ApprovalDecision::ForTenMinutes {
-        transaction.execute("INSERT INTO temporary_grants (connector_id, tool_name, argument_hash, expires_at) SELECT connector_id, tool_name, argument_hash, ?1 FROM approvals WHERE id = ?2 ON CONFLICT(connector_id, tool_name, argument_hash) DO UPDATE SET expires_at = excluded.expires_at", params![(Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(), id.to_string()])?;
+        transaction.execute(
+            "INSERT INTO temporary_grants (
+                connector_id, principal_kind, oauth_client_id, oauth_subject,
+                principal_fingerprint, tool_name, argument_hash, expires_at
+             )
+             SELECT connector_id, principal_kind, oauth_client_id, oauth_subject,
+                    principal_fingerprint, tool_name, argument_hash, ?1
+             FROM approvals WHERE id = ?2
+             ON CONFLICT(connector_id, principal_fingerprint, tool_name, argument_hash)
+             DO UPDATE SET expires_at = excluded.expires_at",
+            params![
+                (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                id.to_string()
+            ],
+        )?;
     } else if changed == 1 && decision == ApprovalDecision::Always {
-        transaction.execute("INSERT INTO persistent_grants (connector_id, tool_name, argument_hash, argument_summary, created_at) SELECT connector_id, tool_name, argument_hash, argument_summary, ?1 FROM approvals WHERE id = ?2 ON CONFLICT(connector_id, tool_name, argument_hash) DO UPDATE SET argument_summary = excluded.argument_summary, created_at = excluded.created_at", params![Utc::now().to_rfc3339(), id.to_string()])?;
+        transaction.execute(
+            "INSERT INTO persistent_grants (
+                connector_id, principal_kind, oauth_client_id, oauth_subject,
+                principal_fingerprint, tool_name, argument_hash, argument_summary, created_at
+             )
+             SELECT connector_id, principal_kind, oauth_client_id, oauth_subject,
+                    principal_fingerprint, tool_name, argument_hash, argument_summary, ?1
+             FROM approvals WHERE id = ?2
+             ON CONFLICT(connector_id, principal_fingerprint, tool_name, argument_hash)
+             DO UPDATE SET argument_summary = excluded.argument_summary,
+                           created_at = excluded.created_at",
+            params![Utc::now().to_rfc3339(), id.to_string()],
+        )?;
     }
     transaction.commit()?;
     Ok(changed == 1)
@@ -358,6 +434,7 @@ fn resolve_approval_connection(
 fn grant_allows_connection(
     connection: &mut Connection,
     connector_id: &str,
+    principal_fingerprint: &str,
     tool_name: &str,
     argument_hash: &str,
 ) -> Result<bool> {
@@ -366,30 +443,67 @@ fn grant_allows_connection(
         "DELETE FROM temporary_grants WHERE expires_at <= ?1",
         [&now],
     )?;
-    Ok(connection.query_row("SELECT 1 FROM temporary_grants WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3 AND expires_at > ?4 UNION ALL SELECT 1 FROM persistent_grants WHERE connector_id = ?1 AND tool_name = ?2 AND argument_hash = ?3 LIMIT 1",params![connector_id,tool_name,argument_hash,now], |_|Ok(())).optional()?.is_some())
+    Ok(connection
+        .query_row(
+            "SELECT 1 FROM temporary_grants
+             WHERE connector_id = ?1 AND principal_fingerprint = ?2
+               AND tool_name = ?3 AND argument_hash = ?4 AND expires_at > ?5
+             UNION ALL
+             SELECT 1 FROM persistent_grants
+             WHERE connector_id = ?1 AND principal_fingerprint = ?2
+               AND tool_name = ?3 AND argument_hash = ?4
+             LIMIT 1",
+            params![
+                connector_id,
+                principal_fingerprint,
+                tool_name,
+                argument_hash,
+                now
+            ],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 fn persistent_grants_connection(
     connection: &mut Connection,
     connector_id: Option<&str>,
 ) -> Result<Vec<PersistentGrant>> {
-    let mut statement=connection.prepare("SELECT connector_id, tool_name, argument_summary, argument_hash, created_at FROM persistent_grants WHERE (?1 IS NULL OR connector_id = ?1) ORDER BY created_at DESC, connector_id, tool_name")?;
+    let mut statement = connection.prepare(
+        "SELECT connector_id, principal_kind, oauth_client_id, oauth_subject,
+                principal_fingerprint, tool_name, argument_summary, argument_hash, created_at
+         FROM persistent_grants
+         WHERE (?1 IS NULL OR connector_id = ?1)
+         ORDER BY created_at DESC, connector_id, principal_fingerprint, tool_name",
+    )?;
     let rows = statement.query_map([connector_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
             row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
         ))
     })?;
     rows.map(|row| {
-        let (c, t, s, h, created) = row?;
+        let (connector_id, kind, client_id, subject, fingerprint, tool, summary, hash, created) =
+            row?;
+        let principal = ApprovalPrincipal::from_storage(&kind, client_id, subject)?;
+        if principal.fingerprint() != fingerprint {
+            bail!("persistent grant principal fingerprint does not match its identity");
+        }
         Ok(PersistentGrant {
-            connector_id: c,
-            tool_name: t,
-            argument_summary: s,
-            argument_hash: h,
+            connector_id,
+            principal,
+            principal_fingerprint: fingerprint,
+            tool_name: tool,
+            argument_summary: summary,
+            argument_hash: hash,
             created_at: DateTime::<Utc>::from_str(&created)
                 .context("persistent grant has an invalid timestamp")?,
         })
@@ -402,11 +516,27 @@ fn approval_status_connection(
     id: Uuid,
 ) -> Result<Option<ApprovalRequest>> {
     expire_approvals(connection)?;
-    connection.query_row("SELECT id, connector_id, tool_name, argument_summary, argument_hash, status, created_at, expires_at, resolved_at, decision FROM approvals WHERE id = ?1",[id.to_string()],map_approval).optional().map_err(Into::into)
+    connection
+        .query_row(
+            "SELECT id, connector_id, principal_kind, oauth_client_id, oauth_subject,
+                    principal_fingerprint, tool_name, argument_summary, argument_hash,
+                    status, created_at, expires_at, resolved_at, decision
+             FROM approvals WHERE id = ?1",
+            [id.to_string()],
+            map_approval,
+        )
+        .optional()
+        .map_err(Into::into)
 }
+
 fn pending_approvals_connection(connection: &mut Connection) -> Result<Vec<ApprovalRequest>> {
     expire_approvals(connection)?;
-    let mut statement=connection.prepare("SELECT id, connector_id, tool_name, argument_summary, argument_hash, status, created_at, expires_at, resolved_at, decision FROM approvals WHERE status = 'pending' ORDER BY created_at")?;
+    let mut statement = connection.prepare(
+        "SELECT id, connector_id, principal_kind, oauth_client_id, oauth_subject,
+                principal_fingerprint, tool_name, argument_summary, argument_hash,
+                status, created_at, expires_at, resolved_at, decision
+         FROM approvals WHERE status = 'pending' ORDER BY created_at",
+    )?;
     let rows = statement.query_map([], map_approval)?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
@@ -501,13 +631,14 @@ fn configure_connection(connection: &Connection) -> Result<()> {
 }
 
 fn migrate(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_versions (
             component TEXT PRIMARY KEY,
             version INTEGER NOT NULL CHECK (version >= 0)
         );",
     )?;
-    let current = connection
+    let current = transaction
         .query_row(
             "SELECT version FROM schema_versions WHERE component = 'core_state'",
             [],
@@ -521,51 +652,93 @@ fn migrate(connection: &Connection) -> Result<()> {
         );
     }
 
-    let temporary_grants_has_argument_hash = connection
-        .prepare("PRAGMA table_info(temporary_grants)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .any(|column| column == "argument_hash");
-    if !temporary_grants_has_argument_hash {
-        // Temporary grants are intentionally ephemeral. Dropping the legacy
-        // tool-wide table prevents an old broad grant from surviving upgrade.
-        connection.execute("DROP TABLE IF EXISTS temporary_grants", [])?;
+    migrate_principal_bound_approvals(&transaction)?;
+    remove_legacy_connector_wide_grants(&transaction)?;
+    create_grant_and_audit_tables(&transaction)?;
+    transaction.execute(
+        "INSERT INTO schema_versions(component, version) VALUES ('core_state', ?1)
+         ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+        [STATE_SCHEMA_VERSION],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_principal_bound_approvals(connection: &Connection) -> Result<()> {
+    if !table_exists(connection, "approvals")?
+        || table_has_column(connection, "approvals", "principal_fingerprint")?
+    {
+        return create_approvals_table(connection);
     }
+    connection.execute("DROP INDEX IF EXISTS approvals_pending_idx", [])?;
+    connection.execute(
+        "ALTER TABLE approvals RENAME TO approvals_pre_principal",
+        [],
+    )?;
+    create_approvals_table(connection)?;
+    let legacy_fingerprint = ApprovalPrincipal::Legacy.fingerprint();
+    let migrated_at = Utc::now().to_rfc3339();
+    connection.execute(
+        "INSERT INTO approvals (
+            id, connector_id, principal_kind, oauth_client_id, oauth_subject,
+            principal_fingerprint, tool_name, argument_summary, argument_hash,
+            status, created_at, expires_at, resolved_at, decision
+         )
+         SELECT id, connector_id, 'legacy', NULL, NULL, ?1,
+                tool_name, argument_summary, argument_hash,
+                CASE WHEN status = 'pending' THEN 'expired' ELSE status END,
+                created_at, expires_at,
+                CASE WHEN status = 'pending' THEN ?2 ELSE resolved_at END,
+                CASE WHEN status = 'pending' THEN NULL ELSE decision END
+         FROM approvals_pre_principal",
+        params![legacy_fingerprint, migrated_at],
+    )?;
+    connection.execute("DROP TABLE approvals_pre_principal", [])?;
+    Ok(())
+}
+
+fn remove_legacy_connector_wide_grants(connection: &Connection) -> Result<()> {
+    for table in ["temporary_grants", "persistent_grants"] {
+        if table_exists(connection, table)?
+            && !table_has_column(connection, table, "principal_fingerprint")?
+        {
+            // Grants created before principal binding are connector-wide and
+            // cannot be migrated safely. Drop them fail-closed.
+            connection.execute(&format!("DROP TABLE {table}"), [])?;
+        }
+    }
+    Ok(())
+}
+
+fn create_grant_and_audit_tables(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS approvals (
-            id TEXT PRIMARY KEY,
+        "CREATE TABLE IF NOT EXISTS temporary_grants (
             connector_id TEXT NOT NULL,
-            tool_name TEXT NOT NULL,
-            argument_summary TEXT NOT NULL,
-            argument_hash TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            resolved_at TEXT,
-            decision TEXT
-        );
-        CREATE INDEX IF NOT EXISTS approvals_pending_idx
-            ON approvals(status, expires_at);
-        CREATE TABLE IF NOT EXISTS temporary_grants (
-            connector_id TEXT NOT NULL,
+            principal_kind TEXT NOT NULL,
+            oauth_client_id TEXT,
+            oauth_subject TEXT,
+            principal_fingerprint TEXT NOT NULL,
             tool_name TEXT NOT NULL,
             argument_hash TEXT NOT NULL,
             expires_at TEXT NOT NULL,
-            PRIMARY KEY (connector_id, tool_name, argument_hash)
+            PRIMARY KEY (connector_id, principal_fingerprint, tool_name, argument_hash)
         );
         CREATE INDEX IF NOT EXISTS temporary_grants_expiry_idx
             ON temporary_grants(expires_at);
         CREATE TABLE IF NOT EXISTS persistent_grants (
             connector_id TEXT NOT NULL,
+            principal_kind TEXT NOT NULL,
+            oauth_client_id TEXT,
+            oauth_subject TEXT,
+            principal_fingerprint TEXT NOT NULL,
             tool_name TEXT NOT NULL,
             argument_hash TEXT NOT NULL,
             argument_summary TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            PRIMARY KEY (connector_id, tool_name, argument_hash)
+            PRIMARY KEY (connector_id, principal_fingerprint, tool_name, argument_hash)
         );
         CREATE INDEX IF NOT EXISTS persistent_grants_connector_idx
-            ON persistent_grants(connector_id, tool_name);
+            ON persistent_grants(connector_id, principal_fingerprint, tool_name);
         CREATE TABLE IF NOT EXISTS audit_events (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL UNIQUE,
@@ -589,12 +762,50 @@ fn migrate(connection: &Connection) -> Result<()> {
         INSERT OR IGNORE INTO audit_chain_state (id, anchor_hash)
             VALUES (1, 'GENESIS');",
     )?;
-    connection.execute(
-        "INSERT INTO schema_versions(component, version) VALUES ('core_state', ?1)
-         ON CONFLICT(component) DO UPDATE SET version = excluded.version",
-        [STATE_SCHEMA_VERSION],
+    Ok(())
+}
+
+fn create_approvals_table(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS approvals (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            principal_kind TEXT NOT NULL,
+            oauth_client_id TEXT,
+            oauth_subject TEXT,
+            principal_fingerprint TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            argument_summary TEXT NOT NULL,
+            argument_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            resolved_at TEXT,
+            decision TEXT
+        );
+        CREATE INDEX IF NOT EXISTS approvals_pending_idx
+            ON approvals(status, expires_at);",
     )?;
     Ok(())
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
+    Ok(connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns.iter().any(|candidate| candidate == column))
 }
 
 fn audit_anchor(connection: &Connection) -> Result<String> {
@@ -686,29 +897,44 @@ fn map_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest> {
         rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, error.into())
     };
     let id_text: String = row.get(0)?;
-    let status_text: String = row.get(5)?;
-    let created_text: String = row.get(6)?;
-    let expires_text: String = row.get(7)?;
-    let resolved_text: Option<String> = row.get(8)?;
-    let decision_text: Option<String> = row.get(9)?;
+    let principal_kind: String = row.get(2)?;
+    let oauth_client_id: Option<String> = row.get(3)?;
+    let oauth_subject: Option<String> = row.get(4)?;
+    let principal_fingerprint: String = row.get(5)?;
+    let status_text: String = row.get(9)?;
+    let created_text: String = row.get(10)?;
+    let expires_text: String = row.get(11)?;
+    let resolved_text: Option<String> = row.get(12)?;
+    let decision_text: Option<String> = row.get(13)?;
+    let principal =
+        ApprovalPrincipal::from_storage(&principal_kind, oauth_client_id, oauth_subject)
+            .map_err(|error| parse_error(2, error))?;
+    if principal.fingerprint() != principal_fingerprint {
+        return Err(parse_error(
+            5,
+            anyhow!("approval principal fingerprint does not match its identity"),
+        ));
+    }
     Ok(ApprovalRequest {
         id: Uuid::parse_str(&id_text).map_err(|error| parse_error(0, error.into()))?,
         connector_id: row.get(1)?,
-        tool_name: row.get(2)?,
-        argument_summary: row.get(3)?,
-        argument_hash: row.get(4)?,
-        status: parse_status(&status_text).map_err(|error| parse_error(5, error))?,
+        principal,
+        principal_fingerprint,
+        tool_name: row.get(6)?,
+        argument_summary: row.get(7)?,
+        argument_hash: row.get(8)?,
+        status: parse_status(&status_text).map_err(|error| parse_error(9, error))?,
         created_at: DateTime::<Utc>::from_str(&created_text)
-            .map_err(|error| parse_error(6, error.into()))?,
+            .map_err(|error| parse_error(10, error.into()))?,
         expires_at: DateTime::<Utc>::from_str(&expires_text)
-            .map_err(|error| parse_error(7, error.into()))?,
+            .map_err(|error| parse_error(11, error.into()))?,
         resolved_at: resolved_text
             .map(|value| {
-                DateTime::<Utc>::from_str(&value).map_err(|error| parse_error(8, error.into()))
+                DateTime::<Utc>::from_str(&value).map_err(|error| parse_error(12, error.into()))
             })
             .transpose()?,
         decision: decision_text
-            .map(|value| parse_decision(&value).map_err(|error| parse_error(9, error)))
+            .map(|value| parse_decision(&value).map_err(|error| parse_error(13, error)))
             .transpose()?,
     })
 }
@@ -810,6 +1036,7 @@ mod tests {
         let store = StateStore::in_memory()?;
         let approval = ApprovalRequest::new(
             "local",
+            ApprovalPrincipal::LocalStdio,
             "fs_write",
             "write a file",
             "async-hash",
@@ -825,6 +1052,7 @@ mod tests {
             store
                 .grant_allows_async(
                     "local".to_owned(),
+                    ApprovalPrincipal::LocalStdio,
                     "fs_write".to_owned(),
                     "async-hash".to_owned(),
                 )
@@ -871,6 +1099,7 @@ mod tests {
         let store = StateStore::in_memory()?;
         let approval = ApprovalRequest::new(
             "local",
+            ApprovalPrincipal::LocalStdio,
             "shell_exec",
             "run a command",
             "hash",
@@ -891,6 +1120,7 @@ mod tests {
         let store = StateStore::in_memory()?;
         let approval = ApprovalRequest::new(
             "local",
+            ApprovalPrincipal::LocalStdio,
             "shell_exec",
             "run a command",
             "hash",
@@ -898,9 +1128,24 @@ mod tests {
         );
         store.insert_approval(&approval)?;
         assert!(store.resolve_approval(approval.id, ApprovalDecision::ForTenMinutes)?);
-        assert!(store.temporary_grant_allows("local", "shell_exec", "hash")?);
-        assert!(!store.temporary_grant_allows("local", "shell_exec", "different-hash")?);
-        assert!(!store.temporary_grant_allows("local", "fs_write", "hash")?);
+        assert!(store.temporary_grant_allows(
+            "local",
+            &ApprovalPrincipal::LocalStdio,
+            "shell_exec",
+            "hash",
+        )?);
+        assert!(!store.temporary_grant_allows(
+            "local",
+            &ApprovalPrincipal::LocalStdio,
+            "shell_exec",
+            "different-hash",
+        )?);
+        assert!(!store.temporary_grant_allows(
+            "local",
+            &ApprovalPrincipal::LocalStdio,
+            "fs_write",
+            "hash",
+        )?);
         Ok(())
     }
 
@@ -909,6 +1154,7 @@ mod tests {
         let store = StateStore::in_memory()?;
         let approved = ApprovalRequest::new(
             "local",
+            ApprovalPrincipal::LocalStdio,
             "shell_exec",
             "run a command",
             "approved-hash",
@@ -918,6 +1164,7 @@ mod tests {
         assert!(store.resolve_approval(approved.id, ApprovalDecision::ForTenMinutes)?);
         let pending = ApprovalRequest::new(
             "local",
+            ApprovalPrincipal::LocalStdio,
             "fs_write",
             "write a file",
             "pending-hash",
@@ -932,7 +1179,12 @@ mod tests {
             store.approval_status(pending.id)?.map(|item| item.status),
             Some(ApprovalStatus::Denied)
         );
-        assert!(!store.temporary_grant_allows("local", "shell_exec", "approved-hash")?);
+        assert!(!store.temporary_grant_allows(
+            "local",
+            &ApprovalPrincipal::LocalStdio,
+            "shell_exec",
+            "approved-hash",
+        )?);
         Ok(())
     }
 
@@ -1015,6 +1267,7 @@ mod tests {
         let store = StateStore::in_memory()?;
         let approval = ApprovalRequest::new(
             "connector",
+            ApprovalPrincipal::LocalStdio,
             "fs_write",
             "Path: /tmp/a.txt",
             "exact-hash",
@@ -1022,17 +1275,97 @@ mod tests {
         );
         store.insert_approval(&approval)?;
         assert!(store.resolve_approval(approval.id, ApprovalDecision::Always)?);
-        assert!(store.grant_allows("connector", "fs_write", "exact-hash")?);
-        assert!(!store.grant_allows("connector", "fs_write", "other-hash")?);
-        assert!(!store.grant_allows("connector", "shell_exec", "exact-hash")?);
+        assert!(store.grant_allows(
+            "connector",
+            &ApprovalPrincipal::LocalStdio,
+            "fs_write",
+            "exact-hash",
+        )?);
+        assert!(!store.grant_allows(
+            "connector",
+            &ApprovalPrincipal::LocalStdio,
+            "fs_write",
+            "other-hash",
+        )?);
+        assert!(!store.grant_allows(
+            "connector",
+            &ApprovalPrincipal::LocalStdio,
+            "shell_exec",
+            "exact-hash",
+        )?);
 
         let grants = store.persistent_grants(Some("connector"))?;
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].argument_hash, "exact-hash");
-        assert!(store.delete_persistent_grant("connector", "fs_write", "exact-hash")?);
-        assert!(!store.grant_allows("connector", "fs_write", "exact-hash")?);
+        assert!(store.delete_persistent_grant(
+            "connector",
+            &ApprovalPrincipal::LocalStdio.fingerprint(),
+            "fs_write",
+            "exact-hash",
+        )?);
+        assert!(!store.grant_allows(
+            "connector",
+            &ApprovalPrincipal::LocalStdio,
+            "fs_write",
+            "exact-hash",
+        )?);
         Ok(())
     }
+    #[test]
+    fn exact_grants_are_isolated_by_oauth_client_and_subject() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let approved = ApprovalPrincipal::OAuth {
+            client_id: "client-a".to_owned(),
+            subject: "github:42".to_owned(),
+        };
+        let other_client = ApprovalPrincipal::OAuth {
+            client_id: "client-b".to_owned(),
+            subject: "github:42".to_owned(),
+        };
+        let other_subject = ApprovalPrincipal::OAuth {
+            client_id: "client-a".to_owned(),
+            subject: "github:99".to_owned(),
+        };
+        let approval = ApprovalRequest::new(
+            "oauth-connector",
+            approved.clone(),
+            "fs_write",
+            "Path: /tmp/a.txt",
+            "same-arguments",
+            Utc::now() + Duration::seconds(90),
+        );
+        store.insert_approval(&approval)?;
+        assert!(store.resolve_approval(approval.id, ApprovalDecision::Always)?);
+
+        assert!(store.grant_allows("oauth-connector", &approved, "fs_write", "same-arguments",)?);
+        assert!(!store.grant_allows(
+            "oauth-connector",
+            &other_client,
+            "fs_write",
+            "same-arguments",
+        )?);
+        assert!(!store.grant_allows(
+            "oauth-connector",
+            &other_subject,
+            "fs_write",
+            "same-arguments",
+        )?);
+        assert!(!store.grant_allows(
+            "oauth-connector",
+            &ApprovalPrincipal::LocalStdio,
+            "fs_write",
+            "same-arguments",
+        )?);
+        let grants = store.persistent_grants(Some("oauth-connector"))?;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].principal, approved);
+        assert_eq!(
+            grants[0].principal_fingerprint,
+            grants[0].principal.fingerprint()
+        );
+        Ok(())
+    }
+
     #[test]
     fn core_state_beta_v0_fixture_migrates_without_preserving_broad_grants() -> Result<()> {
         let directory = tempfile::tempdir()?;
@@ -1048,52 +1381,75 @@ mod tests {
         }
 
         let store = StateStore::open(&database)?;
-        let approvals = store.pending_approvals()?;
-        assert_eq!(approvals.len(), 1);
-        assert_eq!(
-            approvals[0].id,
-            Uuid::parse_str("11111111-1111-4111-8111-111111111111")?
-        );
-        assert_eq!(approvals[0].connector_id, "beta-local");
-        assert_eq!(approvals[0].tool_name, "fs_write");
-        assert_eq!(approvals[0].argument_hash, "approval-hash-v0");
-        assert_eq!(approvals[0].status, ApprovalStatus::Pending);
+        assert!(store.pending_approvals()?.is_empty());
+        let migrated_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111")?;
+        let migrated = store
+            .approval_status(migrated_id)?
+            .context("migrated approval is missing")?;
+        assert_eq!(migrated.connector_id, "beta-local");
+        assert_eq!(migrated.tool_name, "fs_write");
+        assert_eq!(migrated.argument_hash, "approval-hash-v0");
+        assert_eq!(migrated.status, ApprovalStatus::Expired);
+        assert_eq!(migrated.principal, ApprovalPrincipal::Legacy);
+        assert!(migrated.resolved_at.is_some());
 
-        let grants = store.persistent_grants(Some("beta-local"))?;
-        assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].tool_name, "fs_write");
-        assert_eq!(grants[0].argument_hash, "persistent-hash-v0");
-        assert!(store.grant_allows("beta-local", "fs_write", "persistent-hash-v0")?);
-        assert!(!store.grant_allows("beta-local", "shell_exec", "any-argument")?);
+        assert!(store.persistent_grants(Some("beta-local"))?.is_empty());
+        assert!(!store.grant_allows(
+            "beta-local",
+            &ApprovalPrincipal::LocalStdio,
+            "fs_write",
+            "persistent-hash-v0",
+        )?);
 
-        let (version, temporary_count, temporary_columns, anchor): (i64, i64, Vec<String>, String) =
-            store.test_call(|connection| {
-                let version = connection.query_row(
-                    "SELECT version FROM schema_versions WHERE component = 'core_state'",
-                    [],
-                    |row| row.get(0),
-                )?;
-                let temporary_count =
-                    connection.query_row("SELECT COUNT(*) FROM temporary_grants", [], |row| {
-                        row.get(0)
-                    })?;
-                let temporary_columns = connection
-                    .prepare("PRAGMA table_info(temporary_grants)")?
-                    .query_map([], |row| row.get::<_, String>(1))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let anchor = connection.query_row(
-                    "SELECT anchor_hash FROM audit_chain_state WHERE id = 1",
-                    [],
-                    |row| row.get(0),
-                )?;
-                Ok((version, temporary_count, temporary_columns, anchor))
-            })?;
+        let (version, temporary_count, persistent_count, temporary_columns, anchor): (
+            i64,
+            i64,
+            i64,
+            Vec<String>,
+            String,
+        ) = store.test_call(|connection| {
+            let version = connection.query_row(
+                "SELECT version FROM schema_versions WHERE component = 'core_state'",
+                [],
+                |row| row.get(0),
+            )?;
+            let temporary_count =
+                connection.query_row("SELECT COUNT(*) FROM temporary_grants", [], |row| {
+                    row.get(0)
+                })?;
+            let persistent_count =
+                connection.query_row("SELECT COUNT(*) FROM persistent_grants", [], |row| {
+                    row.get(0)
+                })?;
+            let temporary_columns = connection
+                .prepare("PRAGMA table_info(temporary_grants)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let anchor = connection.query_row(
+                "SELECT anchor_hash FROM audit_chain_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((
+                version,
+                temporary_count,
+                persistent_count,
+                temporary_columns,
+                anchor,
+            ))
+        })?;
         assert_eq!(version, STATE_SCHEMA_VERSION);
         assert_eq!(temporary_count, 0);
+        assert_eq!(persistent_count, 0);
         assert!(
             temporary_columns
                 .iter()
                 .any(|column| column == "argument_hash")
+        );
+        assert!(
+            temporary_columns
+                .iter()
+                .any(|column| column == "principal_fingerprint")
         );
         assert_eq!(anchor, "GENESIS");
         assert!(store.verify_audit_chain()?);

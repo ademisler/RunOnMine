@@ -18,14 +18,22 @@ Loopback HTTP is disabled by default and is not treated as an identity boundary.
 Enable it explicitly:
 
 ```console
-runonmine connect local-http enable
+runonmine connect local-http enable --token-output /absolute/private/local-http.json
 runonmine agent run
 ```
 
 The enable command creates a 256-bit bearer token in the operating-system
-credential store and prints it once. Every `/mcp` request must send
-`Authorization: Bearer <token>`. Use `local-http rotate`, `local-http status`, or
-`local-http disable` to manage access. The agent listens on `127.0.0.1:47821`;
+credential store and never prints it to standard output. `--token-output` is an
+optional explicit export channel: it requires an absolute path below an existing
+directory, creates a new no-overwrite JSON file, and restricts that file to the
+current operating-system user (`0600` on Unix and a current-user SID DACL on
+Windows). Every `/mcp` request must send `Authorization: Bearer <token>`.
+
+Use `local-http rotate --token-output <new-absolute-file>` to replace and export
+a token, `local-http status --token-output <new-absolute-file>` to recover the
+current credential through the same secure channel, or `local-http disable` to
+remove access. Omitting `--token-output` keeps the token only in the credential
+store. The agent listens on `127.0.0.1:47821`;
 configuration rejects public bind addresses and reserves port `45799` for the
 existing MacMCP installation.
 

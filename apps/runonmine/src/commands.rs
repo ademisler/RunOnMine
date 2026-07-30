@@ -90,11 +90,13 @@ pub(super) fn approvals(command: ApprovalCommand) -> Result<()> {
             }
             for request in pending {
                 println!(
-                    "{}  {}  {}  expires {}\n  {}",
+                    "{}  {}  {}  expires {}\n  requester={} fingerprint={}\n  {}",
                     request.id,
                     request.connector_id,
                     request.tool_name,
                     request.expires_at.to_rfc3339(),
+                    request.principal.display_label(),
+                    request.principal_fingerprint,
                     request.argument_summary
                 );
             }
@@ -130,12 +132,13 @@ pub(super) fn approvals(command: ApprovalCommand) -> Result<()> {
             }
             for grant in grants {
                 println!(
-                    "{}  {}  {}  created={}
-  {}",
+                    "{}  {}  {}  created={}\n  requester={} fingerprint={}\n  {}",
                     grant.connector_id,
                     grant.tool_name,
                     grant.argument_hash,
                     grant.created_at.to_rfc3339(),
+                    grant.principal.display_label(),
+                    grant.principal_fingerprint,
                     grant.argument_summary,
                 );
             }
@@ -144,11 +147,17 @@ pub(super) fn approvals(command: ApprovalCommand) -> Result<()> {
             command:
                 GrantCommand::Revoke {
                     connector,
+                    principal_fingerprint,
                     tool,
                     argument_hash,
                 },
         } => {
-            if !store.delete_persistent_grant(&connector, &tool, &argument_hash)? {
+            if !store.delete_persistent_grant(
+                &connector,
+                &principal_fingerprint,
+                &tool,
+                &argument_hash,
+            )? {
                 bail!("persistent grant was not found");
             }
             println!("Revoked the persistent exact-action grant.");
@@ -356,7 +365,12 @@ pub(super) fn service(command: ServiceCommand) -> Result<()> {
                 .context("--user is required with --system")?;
             LinuxSystemService::discover()?.install(user)?;
         }
-        ServiceCommand::Install(_) => UserService::discover()?.install()?,
+        ServiceCommand::Install(_) => {
+            let paths = AppPaths::discover()?;
+            let config = AppConfig::load(&paths.config_file())
+                .context("run `runonmine setup` before installing the user service")?;
+            UserService::discover()?.install(&config.allowed_roots)?;
+        }
         ServiceCommand::Uninstall(args) if args.system => {
             LinuxSystemService::discover()?.uninstall()?;
         }

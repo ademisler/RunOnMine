@@ -4494,6 +4494,7 @@ dependencies = [
  "egui",
  "runonmine-core",
  "runonmine-oauth",
+ "runonmine-platform",
  "secrecy",
  "serde_json",
  "tempfile",

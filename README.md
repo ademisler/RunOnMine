@@ -55,17 +55,17 @@ In another local MCP client, use stdio:
 runonmine mcp stdio --connector <connector-id>
 ```
 
-Loopback HTTP is disabled by default. Enable it explicitly and store the token
-printed once by the command:
+Loopback HTTP is disabled by default. Enable it explicitly; the token is never
+printed and may be exported only to a new private file:
 
 ```console
-runonmine connect local-http enable
+runonmine connect local-http enable --token-output /absolute/private/local-http.json
 runonmine agent run
 ```
 
 Every request to `http://127.0.0.1:47821/mcp` must include
-`Authorization: Bearer <token>`. Rotate or disable it with
-`runonmine connect local-http rotate` and `runonmine connect local-http disable`.
+`Authorization: Bearer <token>`. Rotate or recover it through a new private file
+with `--token-output`, or disable it with `runonmine connect local-http disable`.
 
 Use `runonmine ui` for approvals, or approve locally from another terminal with
 `runonmine approvals list` and `runonmine approvals approve <id> --once`.
@@ -97,7 +97,7 @@ sharing it.
 
 ## Security model
 
-- Connector policy first evaluates principal/resource rules, then tool override, capability override, preset, and finally deny. Explicit deny decisions are evaluated before exact-action grants, and multi-path operations such as `fs_move` must authorize every source and destination resource.
+- Connector policy first evaluates principal/resource rules, then tool override, capability override, preset, and finally deny. Explicit deny decisions are evaluated before exact-action grants. Grants are bound to the connector, exact requester principal, tool, and argument hash. Multi-path operations such as `fs_move` authorize every canonical selected-root source and destination resource.
 - Internet-facing connectors have a non-bypassable safety ceiling: destructive
   capabilities can require local approval but cannot be configured to auto-run;
   administrator execution remains denied.
@@ -114,7 +114,8 @@ sharing it.
 - Audit records form a tamper-evident chain and retain 30 days or 100 MiB by default.
 - Shell execution is not a sandbox; when allowed, it has the full authority of
   the account running the agent, but starts from a cleared environment so agent
-  secrets are not inherited automatically.
+  secrets are not inherited automatically. Command-prefix rules reject shell
+  composition, pipelines, redirection, substitution, and multiline payloads.
 
 Read [permissions](docs/permissions.md), the [threat model](docs/threat-model.md),
 and [browser security](docs/browser-security.md) before enabling write or
