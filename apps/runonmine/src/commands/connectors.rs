@@ -301,7 +301,8 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             if client_secret.trim().is_empty() {
                 bail!("GitHub OAuth client secret must not be empty");
             }
-            let owner_login = value_or_prompt(args.github_owner, "Machine owner's GitHub login: ")?;
+            let owner_login =
+                value_or_prompt(args.github_owner, "Machine owner's GitHub display login: ")?;
             let owner_id = args.github_owner_id.map_or_else(
                 || {
                     prompt_required("Machine owner's immutable GitHub numeric ID: ")?

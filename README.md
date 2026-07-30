@@ -25,11 +25,14 @@ Implemented connection modes:
 
 - local stdio and opt-in, bearer-authenticated loopback MCP Streamable HTTP;
 - Cloudflare Quick Tunnel with a rotating 256-bit secret path for temporary use;
-- Cloudflare Named Tunnel with an embedded OAuth 2.1 server and GitHub owner login;
+- Cloudflare Named Tunnel with an embedded OAuth 2.1 server pinned to the owner's immutable GitHub numeric ID;
 - OpenAI Secure MCP Tunnel through the official external `tunnel-client`.
 
 RunOnMine never binds its MCP server to a public interface. Tunnel processes
-connect outward to the loopback listener at `127.0.0.1:47821`.
+connect outward to the loopback listener at `127.0.0.1:47821`. For the named
+OAuth connector, the immutable positive GitHub numeric user ID is the sole owner
+authority. The login is display metadata only; after a successful same-ID
+callback, a safe GitHub rename is atomically reflected in local config.
 
 ## Components
 

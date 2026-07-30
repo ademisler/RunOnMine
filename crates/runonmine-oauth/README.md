@@ -7,8 +7,8 @@ Security properties:
 
 - RFC 8414 authorization-server metadata and RFC 9728 protected-resource metadata.
 - Public dynamic clients with exact redirect URI matching and mandatory PKCE S256.
-- Separate one-time state for the GitHub owner login and a separate one-time CSRF token for consent.
-- GitHub identity is revalidated on every authorization flow; the configured owner is the only accepted identity.
+- Separate one-time state for GitHub owner authentication and a separate one-time CSRF token for consent.
+- GitHub identity is revalidated on every authorization flow against only the immutable numeric user ID; login is bounded display metadata and safe same-ID renames can be reconciled separately.
 - Opaque 256-bit authorization codes and tokens. Only keyed, domain-separated hashes are persisted.
 - 15-minute access tokens and rotating 30-day refresh tokens with family-wide reuse revocation.
 - Token scopes are always intersected with current local policy; a token cannot expand local permissions.

@@ -954,6 +954,12 @@ mod tests {
             refresh_token: None,
             scope: None,
         })?;
+        let grant = service.authenticate_access(
+            first.access_token.expose_secret(),
+            Scope::MachineRead,
+            &ScopeSet::all(),
+        )?;
+        assert_eq!(grant.subject, "github:42");
         let old_refresh = first.refresh_token.expose_secret().to_owned();
         let second = service.issue_token(&TokenRequest {
             grant_type: "refresh_token".to_owned(),

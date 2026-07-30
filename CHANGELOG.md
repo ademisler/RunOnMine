@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Make the immutable GitHub numeric user ID the sole OAuth owner authority. GitHub login is now display metadata: a verified same-ID rename is atomically reconciled into config, while ID mismatch, invalid provider metadata, connector removal, or concurrent authority changes fail closed without mutating the stored owner.
 - Add explicit Chrome, Chromium, or Edge executable selection with `browser executable set|auto|show`. Selection stores a canonical supported binary, every launch revalidates it, missing selections degrade only browser availability, local CLI output shows the exact path, and MCP/support diagnostics expose only bounded source/product/basename identity; external CDP remains loopback-only, local-only, and incompatible with protected mode.
 - Track every owned Chromium launch with an owner-only crash lease and reconcile browser leftovers before HTTP or stdio startup. Reaping requires same-user, token, exact profile, executable and PID/start-time evidence; ambiguous processes are retained and reported, while stale disposable profiles are removed.
 - Bound every browser/CDP operation with a configurable deadline and recover timed-out sessions by quarantining the connection, force-terminating owned Chromium, cleaning ephemeral state, and lazily starting a fresh session; expose only bounded timeout counters and operation categories in browser diagnostics.

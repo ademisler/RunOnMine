@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,7 +22,8 @@ use runonmine_core::{
     AppConfig, AppPaths, ConnectorConfig, ConnectorKind, PolicyEngine, PolicyMode,
 };
 use runonmine_oauth::{
-    GitHubApiOwnerVerifier, OAuthService, OAuthServiceConfig, ScopeSet, SqliteOAuthStore,
+    GitHubApiOwnerVerifier, GitHubIdentity, GitHubIdentityObservationError, GitHubIdentityObserver,
+    OAuthService, OAuthServiceConfig, ObservedGitHubOwnerVerifier, ScopeSet, SqliteOAuthStore,
     TokenHasher, oauth_router,
 };
 use secrecy::ExposeSecret;
@@ -88,6 +90,55 @@ impl std::fmt::Debug for OAuthHttpConnector {
             .field("public_host", &self.public_host)
             .field("resource_metadata", &self.resource_metadata)
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+struct OAuthOwnerLoginObserver {
+    config_path: PathBuf,
+    connector_id: String,
+    expected_owner_id: u64,
+}
+
+impl GitHubIdentityObserver for OAuthOwnerLoginObserver {
+    fn observe(&self, identity: &GitHubIdentity) -> Result<(), GitHubIdentityObservationError> {
+        if identity.id != self.expected_owner_id {
+            tracing::error!(
+                connector_id = %self.connector_id,
+                expected_owner_id = self.expected_owner_id,
+                observed_owner_id = identity.id,
+                "refused OAuth owner display-login reconciliation after numeric identity mismatch"
+            );
+            return Err(GitHubIdentityObservationError::new());
+        }
+        let result = AppConfig::update(&self.config_path, |config| {
+            config.reconcile_oauth_owner_display_login(
+                &self.connector_id,
+                self.expected_owner_id,
+                identity.id,
+                &identity.login,
+            )
+        });
+        match result {
+            Ok(true) => {
+                tracing::info!(
+                    connector_id = %self.connector_id,
+                    owner_id = identity.id,
+                    "updated OAuth owner display login after verified GitHub rename"
+                );
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(error) => {
+                tracing::error!(
+                    connector_id = %self.connector_id,
+                    owner_id = identity.id,
+                    error_category = %error.root_cause(),
+                    "failed to reconcile OAuth owner display login"
+                );
+                Err(GitHubIdentityObservationError::new())
+            }
+        }
     }
 }
 
@@ -447,9 +498,16 @@ fn build_oauth_connector(
     let verifier = GitHubApiOwnerVerifier::new(
         client_id.expose_secret().to_owned(),
         client_secret,
-        &owner.github_login,
         owner.github_id,
     )?;
+    let verifier = ObservedGitHubOwnerVerifier::new(
+        Arc::new(verifier),
+        Arc::new(OAuthOwnerLoginObserver {
+            config_path: paths.config_file(),
+            connector_id: connector.id.clone(),
+            expected_owner_id: owner.github_id,
+        }),
+    );
     let service = OAuthService::new(
         OAuthServiceConfig {
             connector_id: connector.id.clone(),
@@ -773,7 +831,10 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use runonmine_core::secrets::SecretStore;
-    use runonmine_core::{Capability, CloudflareQuickSettings};
+    use runonmine_core::{
+        Capability, CloudflareNamedSettings, CloudflareQuickSettings, OAuthOwnerSettings,
+        PolicyPreset,
+    };
     use runonmine_oauth::Scope;
     use secrecy::SecretString;
 
@@ -808,6 +869,104 @@ mod tests {
                 .remove(name);
             Ok(())
         }
+    }
+
+    fn oauth_owner_test_config(paths: &AppPaths) -> Result<AppConfig> {
+        let credentials = paths
+            .config_file()
+            .parent()
+            .context("test config path has no parent")?
+            .join("oauth-tunnel-credentials.json");
+        std::fs::write(&credentials, b"{}")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let mut config = AppConfig::default();
+        config.connectors.push(ConnectorConfig {
+            id: "oauth-owner-test".to_owned(),
+            name: "OAuth owner test".to_owned(),
+            kind: ConnectorKind::CloudflareOauth,
+            enabled: true,
+            policy_preset: PolicyPreset::Safe,
+            pack_overrides: BTreeMap::new(),
+            tool_overrides: BTreeMap::new(),
+            policy_rules: Vec::new(),
+            public_base_url: Some(Url::parse("https://mcp.example.com/")?),
+            cloudflare_quick: None,
+            cloudflare_named: Some(CloudflareNamedSettings {
+                tunnel_id: "01234567-89ab-cdef-0123-456789abcdef".to_owned(),
+                credentials_file: credentials.canonicalize()?,
+                hostname: "mcp.example.com".to_owned(),
+                cloudflared_path: None,
+                metrics_port: 47_824,
+            }),
+            oauth_owner: Some(OAuthOwnerSettings {
+                github_login: "old-owner".to_owned(),
+                github_id: 42,
+            }),
+            openai_tunnel: None,
+        });
+        Ok(config)
+    }
+
+    #[test]
+    fn verified_owner_rename_updates_only_display_login_atomically() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        oauth_owner_test_config(&paths)?.save(&paths.config_file())?;
+        let observer = OAuthOwnerLoginObserver {
+            config_path: paths.config_file(),
+            connector_id: "oauth-owner-test".to_owned(),
+            expected_owner_id: 42,
+        };
+
+        observer
+            .observe(&GitHubIdentity {
+                id: 42,
+                login: "renamed-owner".to_owned(),
+            })
+            .map_err(|_| anyhow::anyhow!("verified owner rename was rejected"))?;
+        let config = AppConfig::load(&paths.config_file())?;
+        let owner = config
+            .connector("oauth-owner-test")
+            .and_then(|connector| connector.oauth_owner.as_ref())
+            .context("updated OAuth owner is missing")?;
+        assert_eq!(owner.github_id, 42);
+        assert_eq!(owner.github_login, "renamed-owner");
+        Ok(())
+    }
+
+    #[test]
+    fn owner_observer_rejects_numeric_id_mismatch_without_mutating_login() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        oauth_owner_test_config(&paths)?.save(&paths.config_file())?;
+        let observer = OAuthOwnerLoginObserver {
+            config_path: paths.config_file(),
+            connector_id: "oauth-owner-test".to_owned(),
+            expected_owner_id: 42,
+        };
+
+        assert!(
+            observer
+                .observe(&GitHubIdentity {
+                    id: 7,
+                    login: "old-owner".to_owned(),
+                })
+                .is_err()
+        );
+        let config = AppConfig::load(&paths.config_file())?;
+        let owner = config
+            .connector("oauth-owner-test")
+            .and_then(|connector| connector.oauth_owner.as_ref())
+            .context("OAuth owner is missing")?;
+        assert_eq!(owner.github_id, 42);
+        assert_eq!(owner.github_login, "old-owner");
+        Ok(())
     }
 
     #[tokio::test]

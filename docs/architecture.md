@@ -155,6 +155,15 @@ from server-held state: a stable client-ID fingerprint, registration timestamp,
 requested redirect origin, and the deduplicated registered-origin set. The
 client-supplied name remains explicitly unverified.
 
+OAuth owner authority is the configured positive GitHub numeric user ID, and
+subjects are stored as `github:<numeric-user-id>`. Login strings never
+participate in authorization. After GitHub returns the expected ID, a separate
+observer validates the returned login as bounded display metadata and updates
+only that field through the owner-only config lock and atomic save. Connector
+disappearance, ID mismatch, invalid login metadata, or a concurrent configured-ID
+change aborts the callback with a generic server error and leaves authority
+unchanged.
+
 ## Local data
 
 - `config.toml` contains non-secret configuration, is replaced atomically, and uses an owner-only sidecar lock for transactional read-modify-write updates.

@@ -16,7 +16,10 @@ mod store;
 
 pub use crypto::{HashPurpose, SecretHash, TokenHasher, generate_secret};
 pub use error::{OAuthError, OAuthErrorCode, StoreError};
-pub use github::{GitHubApiOwnerVerifier, GitHubIdentity, GitHubOwnerVerifier};
+pub use github::{
+    GitHubApiOwnerVerifier, GitHubIdentity, GitHubIdentityObservationError, GitHubIdentityObserver,
+    GitHubOwnerVerifier, ObservedGitHubOwnerVerifier,
+};
 pub use http::oauth_router;
 pub use metadata::{AuthorizationServerMetadata, ProtectedResourceMetadata};
 pub use model::{

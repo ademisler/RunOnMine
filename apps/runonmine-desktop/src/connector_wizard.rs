@@ -107,7 +107,7 @@ impl ConnectorWizardState {
                         field(ui, "Credentials JSON path", &mut self.credentials_file, false, "/absolute/path/credentials.json");
                         field(ui, "GitHub OAuth client ID", &mut self.github_client_id, false, "Client ID");
                         field(ui, "GitHub OAuth client secret", &mut self.github_client_secret, true, "Stored securely");
-                        field(ui, "GitHub owner login", &mut self.github_owner, false, "username");
+                        field(ui, "GitHub owner display login", &mut self.github_owner, false, "username");
                         field(ui, "GitHub owner numeric ID", &mut self.github_owner_id, false, "123456");
                     }
                     WizardKind::OpenAi => {

@@ -537,6 +537,53 @@ impl AppConfig {
             .iter_mut()
             .find(|connector| connector.id == id)
     }
+
+    /// Updates only the display login for an OAuth owner whose immutable numeric
+    /// identity still matches both the configured and freshly observed values.
+    /// The numeric ID remains the sole authorization authority.
+    pub fn reconcile_oauth_owner_display_login(
+        &mut self,
+        connector_id: &str,
+        expected_owner_id: u64,
+        observed_owner_id: u64,
+        observed_login: &str,
+    ) -> Result<bool> {
+        if expected_owner_id == 0 || observed_owner_id != expected_owner_id {
+            bail!("observed OAuth owner numeric ID does not match configured authority");
+        }
+        let login = observed_login.trim();
+        if !valid_github_login_display(login) || login != observed_login {
+            bail!("observed GitHub login is invalid display metadata");
+        }
+        let connector = self
+            .connector_mut(connector_id)
+            .context("OAuth connector disappeared during owner identity reconciliation")?;
+        if connector.kind != ConnectorKind::CloudflareOauth {
+            bail!("owner identity reconciliation requires an OAuth connector");
+        }
+        let owner = connector
+            .oauth_owner
+            .as_mut()
+            .context("OAuth connector owner disappeared during identity reconciliation")?;
+        if owner.github_id != expected_owner_id {
+            bail!("configured OAuth owner authority changed during identity reconciliation");
+        }
+        if owner.github_login == login {
+            return Ok(false);
+        }
+        login.clone_into(&mut owner.github_login);
+        Ok(true)
+    }
+}
+
+fn valid_github_login_display(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= 39
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn validate_app_endpoint(config: &AppConfig) -> Result<()> {
@@ -831,12 +878,9 @@ fn validate_connector_settings(connector: &ConnectorConfig, agent_port: u16) -> 
             .oauth_owner
             .as_ref()
             .context("OAuth connector owner is missing")?;
-        if owner.github_login.trim().is_empty()
-            || owner.github_login.len() > 39
-            || owner.github_id == 0
-        {
+        if !valid_github_login_display(&owner.github_login) || owner.github_id == 0 {
             bail!(
-                "OAuth connector owner must include a valid GitHub login and immutable numeric ID; rerun connector setup to migrate older configurations"
+                "OAuth connector owner must include an immutable positive GitHub numeric ID and valid display login; rerun connector setup to migrate older configurations"
             );
         }
     }
@@ -1042,6 +1086,86 @@ mod tests {
                 .public_base_url
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_owner_login_rename_preserves_numeric_authority() -> Result<()> {
+        let mut config = AppConfig::default();
+        let mut connector = ConnectorConfig::local_http_default();
+        connector.id = "oauth-owner-test".to_owned();
+        connector.kind = ConnectorKind::CloudflareOauth;
+        connector.oauth_owner = Some(OAuthOwnerSettings {
+            github_login: "old-login".to_owned(),
+            github_id: 42,
+        });
+        config.connectors.push(connector);
+
+        assert!(config.reconcile_oauth_owner_display_login(
+            "oauth-owner-test",
+            42,
+            42,
+            "renamed-owner"
+        )?);
+        let owner = config
+            .connector("oauth-owner-test")
+            .and_then(|connector| connector.oauth_owner.as_ref())
+            .context("test OAuth owner is missing")?;
+        assert_eq!(owner.github_id, 42);
+        assert_eq!(owner.github_login, "renamed-owner");
+        assert!(!config.reconcile_oauth_owner_display_login(
+            "oauth-owner-test",
+            42,
+            42,
+            "renamed-owner"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_owner_login_reconciliation_rejects_id_change_and_invalid_display() -> Result<()> {
+        let mut config = AppConfig::default();
+        let mut connector = ConnectorConfig::local_http_default();
+        connector.id = "oauth-owner-test".to_owned();
+        connector.kind = ConnectorKind::CloudflareOauth;
+        connector.oauth_owner = Some(OAuthOwnerSettings {
+            github_login: "owner".to_owned(),
+            github_id: 42,
+        });
+        config.connectors.push(connector);
+
+        assert!(
+            config
+                .reconcile_oauth_owner_display_login("oauth-owner-test", 42, 7, "same-login")
+                .is_err()
+        );
+        assert!(
+            config
+                .reconcile_oauth_owner_display_login("oauth-owner-test", 42, 42, "invalid login")
+                .is_err()
+        );
+        config
+            .connector_mut("oauth-owner-test")
+            .and_then(|connector| connector.oauth_owner.as_mut())
+            .context("test OAuth owner is missing")?
+            .github_id = 7;
+        assert!(
+            config
+                .reconcile_oauth_owner_display_login("oauth-owner-test", 42, 42, "renamed-owner")
+                .is_err(),
+            "a concurrent authority change must prevent display-login migration"
+        );
+        config
+            .connector_mut("oauth-owner-test")
+            .and_then(|connector| connector.oauth_owner.as_mut())
+            .context("test OAuth owner is missing")?
+            .github_id = 42;
+        let owner = config
+            .connector("oauth-owner-test")
+            .and_then(|connector| connector.oauth_owner.as_ref())
+            .context("test OAuth owner is missing")?;
+        assert_eq!(owner.github_id, 42);
+        assert_eq!(owner.github_login, "owner");
         Ok(())
     }
 

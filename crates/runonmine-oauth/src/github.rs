@@ -29,11 +29,73 @@ pub trait GitHubOwnerVerifier: Send + Sync {
     ) -> Result<GitHubIdentity, OAuthError>;
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("GitHub identity observation failed")]
+pub struct GitHubIdentityObservationError;
+
+impl GitHubIdentityObservationError {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GitHubIdentityObservationError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub trait GitHubIdentityObserver: Send + Sync {
+    /// Reconciles non-authoritative identity metadata after the immutable ID was
+    /// verified. Implementations must not widen or replace the numeric authority.
+    fn observe(&self, identity: &GitHubIdentity) -> Result<(), GitHubIdentityObservationError>;
+}
+
+pub struct ObservedGitHubOwnerVerifier {
+    verifier: std::sync::Arc<dyn GitHubOwnerVerifier>,
+    observer: std::sync::Arc<dyn GitHubIdentityObserver>,
+}
+
+impl std::fmt::Debug for ObservedGitHubOwnerVerifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ObservedGitHubOwnerVerifier")
+            .field("verifier", &"dyn GitHubOwnerVerifier")
+            .field("observer", &"dyn GitHubIdentityObserver")
+            .finish()
+    }
+}
+
+impl ObservedGitHubOwnerVerifier {
+    #[must_use]
+    pub fn new(
+        verifier: std::sync::Arc<dyn GitHubOwnerVerifier>,
+        observer: std::sync::Arc<dyn GitHubIdentityObserver>,
+    ) -> Self {
+        Self { verifier, observer }
+    }
+}
+
+#[async_trait]
+impl GitHubOwnerVerifier for ObservedGitHubOwnerVerifier {
+    async fn verify_code(
+        &self,
+        code: SecretString,
+        callback_url: &Url,
+    ) -> Result<GitHubIdentity, OAuthError> {
+        let identity = self.verifier.verify_code(code, callback_url).await?;
+        self.observer
+            .observe(&identity)
+            .map_err(|_| OAuthError::server())?;
+        Ok(identity)
+    }
+}
+
 pub struct GitHubApiOwnerVerifier {
     client: reqwest::Client,
     client_id: String,
     client_secret: SecretString,
-    owner_login: String,
     owner_id: u64,
 }
 
@@ -43,7 +105,6 @@ impl std::fmt::Debug for GitHubApiOwnerVerifier {
             .debug_struct("GitHubApiOwnerVerifier")
             .field("client_id", &self.client_id)
             .field("client_secret", &"[REDACTED]")
-            .field("owner_login", &self.owner_login)
             .field("owner_id", &self.owner_id)
             .finish_non_exhaustive()
     }
@@ -53,15 +114,9 @@ impl GitHubApiOwnerVerifier {
     pub fn new(
         client_id: String,
         client_secret: SecretString,
-        owner_login: &str,
         owner_id: u64,
     ) -> Result<Self, OAuthError> {
-        let owner_login = owner_login.trim().to_owned();
-        if client_id.trim().is_empty()
-            || client_secret.expose_secret().is_empty()
-            || owner_login.is_empty()
-            || owner_login.len() > 39
-            || owner_id == 0
+        if client_id.trim().is_empty() || client_secret.expose_secret().is_empty() || owner_id == 0
         {
             return Err(OAuthError::configuration());
         }
@@ -77,7 +132,6 @@ impl GitHubApiOwnerVerifier {
             client,
             client_id,
             client_secret,
-            owner_login,
             owner_id,
         })
     }
@@ -141,16 +195,31 @@ impl GitHubOwnerVerifier for GitHubApiOwnerVerifier {
             return Err(OAuthError::access_denied());
         }
         let user: GitHubUserResponse = bounded_json(user_response).await?;
-        let login_matches = user.login.eq_ignore_ascii_case(&self.owner_login);
-        let id_matches = self.owner_id == user.id;
-        if !login_matches || !id_matches {
-            return Err(OAuthError::access_denied());
-        }
-        Ok(GitHubIdentity {
-            id: user.id,
-            login: user.login,
-        })
+        verify_owner_identity(self.owner_id, user)
     }
+}
+
+fn verify_owner_identity(
+    expected_owner_id: u64,
+    user: GitHubUserResponse,
+) -> Result<GitHubIdentity, OAuthError> {
+    if expected_owner_id == 0
+        || user.id != expected_owner_id
+        || user.login.is_empty()
+        || user.login.len() > 39
+        || user.login.starts_with('-')
+        || user.login.ends_with('-')
+        || !user
+            .login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(OAuthError::access_denied());
+    }
+    Ok(GitHubIdentity {
+        id: user.id,
+        login: user.login,
+    })
 }
 
 async fn bounded_json<T: serde::de::DeserializeOwned>(
@@ -175,6 +244,135 @@ async fn bounded_json<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn immutable_numeric_id_authorizes_a_safe_login_rename() -> Result<(), OAuthError> {
+        let identity = verify_owner_identity(
+            42,
+            GitHubUserResponse {
+                id: 42,
+                login: "renamed-owner".to_owned(),
+            },
+        )?;
+        assert_eq!(identity.id, 42);
+        assert_eq!(identity.login, "renamed-owner");
+        Ok(())
+    }
+
+    #[test]
+    fn matching_login_cannot_override_a_different_numeric_id() {
+        assert!(
+            verify_owner_identity(
+                42,
+                GitHubUserResponse {
+                    id: 7,
+                    login: "owner".to_owned(),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unsafe_provider_login_is_rejected_even_for_the_expected_id() {
+        assert!(
+            verify_owner_identity(
+                42,
+                GitHubUserResponse {
+                    id: 42,
+                    login: "owner\nspoof".to_owned(),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[derive(Debug)]
+    struct StaticVerifier(GitHubIdentity);
+
+    #[async_trait]
+    impl GitHubOwnerVerifier for StaticVerifier {
+        async fn verify_code(
+            &self,
+            _code: SecretString,
+            _callback_url: &Url,
+        ) -> Result<GitHubIdentity, OAuthError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingObserver {
+        observed: std::sync::Mutex<Vec<GitHubIdentity>>,
+        fail: bool,
+    }
+
+    impl GitHubIdentityObserver for RecordingObserver {
+        fn observe(&self, identity: &GitHubIdentity) -> Result<(), GitHubIdentityObservationError> {
+            self.observed
+                .lock()
+                .map_err(|_| GitHubIdentityObservationError::new())?
+                .push(identity.clone());
+            if self.fail {
+                return Err(GitHubIdentityObservationError::new());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_verifier_reconciles_only_after_identity_verification()
+    -> Result<(), OAuthError> {
+        let observer = std::sync::Arc::new(RecordingObserver {
+            observed: std::sync::Mutex::new(Vec::new()),
+            fail: false,
+        });
+        let verifier = ObservedGitHubOwnerVerifier::new(
+            std::sync::Arc::new(StaticVerifier(GitHubIdentity {
+                id: 42,
+                login: "renamed-owner".to_owned(),
+            })),
+            observer.clone(),
+        );
+        let identity = verifier
+            .verify_code(
+                SecretString::from("one-time-code".to_owned()),
+                &Url::parse("https://mine.example/oauth/github/callback")
+                    .map_err(|_| OAuthError::configuration())?,
+            )
+            .await?;
+        assert_eq!(identity.id, 42);
+        let identities = observer.observed.lock().map_err(|_| OAuthError::server())?;
+        assert_eq!(identities.as_slice(), &[identity]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observer_failure_fails_closed_after_numeric_identity_verification()
+    -> Result<(), OAuthError> {
+        let verifier = ObservedGitHubOwnerVerifier::new(
+            std::sync::Arc::new(StaticVerifier(GitHubIdentity {
+                id: 42,
+                login: "renamed-owner".to_owned(),
+            })),
+            std::sync::Arc::new(RecordingObserver {
+                observed: std::sync::Mutex::new(Vec::new()),
+                fail: true,
+            }),
+        );
+        let result = verifier
+            .verify_code(
+                SecretString::from("one-time-code".to_owned()),
+                &Url::parse("https://mine.example/oauth/github/callback")
+                    .map_err(|_| OAuthError::configuration())?,
+            )
+            .await;
+        let Err(error) = result else {
+            return Err(OAuthError::server());
+        };
+        assert_eq!(error.code, crate::OAuthErrorCode::ServerError);
+        Ok(())
+    }
 
     #[test]
     fn github_user_agent_tracks_the_package_version() {

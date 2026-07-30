@@ -148,7 +148,7 @@ hashes are stored in SQLite. The GitHub client secret, hashing key, and
 registration access token remain in the platform credential store.
 
 The public hostname, Cloudflare tunnel ID, credentials file, GitHub OAuth client
-ID, expected GitHub owner login, and immutable positive GitHub numeric owner ID are required. The CLI prompts for secrets rather
+ID, GitHub owner display login, and immutable positive GitHub numeric owner ID are required. Only the numeric ID authorizes the owner; the login is display metadata and is atomically refreshed after a verified same-ID GitHub rename. The CLI prompts for secrets rather
 than accepting them in command-line arguments. Incoming OAuth and MCP requests must use the configured public hostname with no explicit port or HTTPS port `443`; other Host authorities return 404.
 
 ## OpenAI Secure MCP Tunnel
