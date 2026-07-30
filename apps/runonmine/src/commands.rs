@@ -470,13 +470,20 @@ fn oauth_registration_endpoint(connector: &ConnectorConfig) -> Result<Url> {
 pub(super) fn admin(command: AdminCommand) -> Result<()> {
     let helper = sibling_executable("runonmine-helper")?;
     match command {
-        AdminCommand::Install { allowed_programs } => {
+        AdminCommand::Install {
+            allowed_programs,
+            profile_file,
+        } => {
             for path in &allowed_programs {
                 if !path.is_absolute() {
                     bail!("admin allowlist entries must be absolute paths");
                 }
             }
-            install_admin_helper(&helper, &allowed_programs)
+            if let Some(path) = profile_file.as_deref() {
+                ProgramProfileDocument::load(path)
+                    .context("admin program profile validation failed")?;
+            }
+            install_admin_helper(&helper, &allowed_programs, profile_file.as_deref())
         }
         AdminCommand::Uninstall => run_elevated_helper(&helper, &["uninstall".into()]),
         AdminCommand::Status => run_process(ProcessCommand::new(helper).arg("status")),
@@ -1020,7 +1027,11 @@ pub(super) fn sibling_executable(name: &str) -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
-pub(super) fn install_admin_helper(helper: &Path, allowed_programs: &[PathBuf]) -> Result<()> {
+pub(super) fn install_admin_helper(
+    helper: &Path,
+    allowed_programs: &[PathBuf],
+    profile_file: Option<&Path>,
+) -> Result<()> {
     use std::ffi::OsString;
 
     let effective_uid = nix::unistd::geteuid().as_raw();
@@ -1044,11 +1055,19 @@ pub(super) fn install_admin_helper(helper: &Path, allowed_programs: &[PathBuf]) 
         arguments.push(OsString::from("--allow-program"));
         arguments.push(program.as_os_str().to_owned());
     }
+    if let Some(profile_file) = profile_file {
+        arguments.push(OsString::from("--profile-file"));
+        arguments.push(profile_file.as_os_str().to_owned());
+    }
     run_elevated_helper(helper, &arguments)
 }
 
 #[cfg(windows)]
-pub(super) fn install_admin_helper(helper: &Path, allowed_programs: &[PathBuf]) -> Result<()> {
+pub(super) fn install_admin_helper(
+    helper: &Path,
+    allowed_programs: &[PathBuf],
+    profile_file: Option<&Path>,
+) -> Result<()> {
     use runonmine_platform::helper::{OwnerIdentity, resolve_install_owner};
     use std::ffi::OsString;
 
@@ -1063,6 +1082,10 @@ pub(super) fn install_admin_helper(helper: &Path, allowed_programs: &[PathBuf]) 
     for program in allowed_programs {
         arguments.push(OsString::from("--allow-program"));
         arguments.push(program.as_os_str().to_owned());
+    }
+    if let Some(profile_file) = profile_file {
+        arguments.push(OsString::from("--profile-file"));
+        arguments.push(profile_file.as_os_str().to_owned());
     }
     run_elevated_helper(helper, &arguments)
 }

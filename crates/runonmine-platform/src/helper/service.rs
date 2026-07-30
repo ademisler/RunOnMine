@@ -9,7 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use super::{AdminPolicy, HelperClient, HelperRequest, HelperResult, OwnerIdentity};
+use super::{
+    AdminPolicy, AdminProgramRule, HelperClient, HelperRequest, HelperResult, OwnerIdentity,
+};
 
 #[cfg(target_os = "macos")]
 const MACOS_SERVICE_LABEL: &str = "dev.runonmine.helper";
@@ -21,7 +23,7 @@ const WINDOWS_SERVICE_NAME: &str = "RunOnMineHelper";
 #[derive(Clone, Debug)]
 pub struct HelperInstallOptions {
     pub owner: OwnerIdentity,
-    pub allowed_programs: Vec<PathBuf>,
+    pub allowed_programs: Vec<AdminProgramRule>,
 }
 
 #[derive(Clone, Debug, Serialize)]

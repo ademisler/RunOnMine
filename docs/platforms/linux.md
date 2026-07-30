@@ -66,3 +66,5 @@ Chromium, desktop capture/input, and D-Bus tools are listed only when the
 current session has the required executable, display, and session bus.
 The optional root helper uses `SO_PEERCRED`, restricts its Unix socket to the
 installing user, and is not installed by either service command.
+
+Arguments are additionally restricted by the installed executable-specific command profile; an executable added with `--allow-program` alone accepts no arguments.

@@ -123,8 +123,12 @@ only explicitly installed, hash-pinned absolute program paths. Before policy
 evaluation, the requested program passes through the same root/SYSTEM ownership,
 non-symlink, regular-file, and canonical path resolver used when installing the
 helper allowlist. Alternate path spellings therefore cannot avoid an executable
-resource rule. Program arguments can still be security-sensitive and must be
-reviewed before approval.
+resource rule. `--allow-program` permits only the empty argument vector. Every
+argument-bearing invocation must match an installed executable-specific command
+profile: exact subcommand, declared flags and values, forbidden flags, exact
+positional schemas, and canonical path-root constraints. Local MCP approval is
+still required when policy mode is `ask`; approval cannot widen the helper's
+root-owned command profile. See [`admin-helper.md`](admin-helper.md).
 
 
 ## Emergency lock

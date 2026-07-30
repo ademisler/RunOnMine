@@ -19,7 +19,9 @@ use runonmine_core::{
     OpenAiTunnelSettings, PolicyMode, PolicyPreset, StateStore,
 };
 use runonmine_oauth::SqliteOAuthStore;
-use runonmine_platform::{LinuxSystemService, UserService, current};
+use runonmine_platform::{
+    LinuxSystemService, UserService, current, helper::ProgramProfileDocument,
+};
 use secrecy::{ExposeSecret, SecretString};
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -395,9 +397,12 @@ enum OauthSessionCommand {
 #[derive(Debug, Subcommand)]
 enum AdminCommand {
     Install {
-        /// Root/SYSTEM-owned executable to permit through `admin_exec`. May be repeated.
+        /// Root/SYSTEM-owned executable to permit with no arguments. May be repeated.
         #[arg(long = "allow-program", value_name = "ABSOLUTE_PATH")]
         allowed_programs: Vec<PathBuf>,
+        /// Versioned JSON document with executable-specific invocation profiles.
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        profile_file: Option<PathBuf>,
     },
     Uninstall,
     Status,

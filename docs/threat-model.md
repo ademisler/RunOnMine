@@ -52,6 +52,7 @@ compromised.
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
 | An alternate executable path spelling avoids a canonical admin policy rule | MCP authorization and helper allowlist installation share the same root/SYSTEM-owned, non-symlink canonical program identity |
+| A hash-pinned helper executable is abused through dangerous subcommands, flags, response files, or path arguments | executable-specific command schemas; exact subcommand and positional sequence; allowlisted typed flag values; deny-first forbidden flags; response-file rejection; canonical existing/create path roots; argument-free compatibility entries |
 | Browser automation reaches an unrelated daily profile or internal network through a popup, worker, background target, WebSocket, mixed DNS answer, or DNS rebinding | isolated profile by default; process-wide loopback proxy with no implicit bypass; QUIC and non-proxied WebRTC UDP disabled; every connection re-resolves and rejects any mixed/private answer before exact-IP connect; CDP URL checks remain defense in depth; protected external CDP fails closed |
 | Audit rows are edited or reordered | BLAKE3 hash chain, retained chain anchor, startup and doctor verification |
 | A stale refresh token is replayed | one-time rotation and family-wide revocation on reuse |
@@ -61,10 +62,13 @@ compromised.
 ## Privileged helper boundary
 
 The helper is absent by default and is not a general privileged shell. During
-installation, the owner supplies absolute executable paths. The root/SYSTEM
-policy records identity and a SHA-256 digest. Requests are framed and size
-limited, arguments are passed without shell parsing, and execution has a
-process-tree timeout.
+installation, the owner supplies absolute executable paths and either an
+argument-free compatibility entry or a versioned command profile. The
+root/SYSTEM policy records identity, a SHA-256 digest, exact subcommands,
+allowlisted typed flags, deny-first forbidden flags, exact positional schemas,
+and canonical path constraints. Requests are framed and size limited, arguments
+are passed without shell parsing, and execution has a process-tree timeout.
+Version-1 broad-argument policies are rejected and require reinstall.
 
 On macOS and Linux, peer credentials must match the installing UID; root is
 accepted only for the helper health check used during installation. On Windows,

@@ -39,7 +39,10 @@ connect outward to the loopback listener at `127.0.0.1:47821`.
 - `runonmine-helper`: optional, separately installed privileged helper.
 
 The helper is absent by default. Normal setup and user-service installation do
-not install it.
+not install it. Executable identity alone never authorizes arbitrary privileged
+arguments: `--allow-program` is argument-free, while subcommands, flags,
+positional values and path roots require an explicit versioned command profile.
+See [`docs/admin-helper.md`](docs/admin-helper.md).
 
 ## First local run
 

@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use runonmine_platform::helper::{
-    HelperInstallOptions, HelperManager, resolve_install_owner, serve_installed,
+    AdminProgramRule, HelperInstallOptions, HelperManager, ProgramProfileDocument,
+    resolve_install_owner, serve_installed,
 };
 
 #[derive(Debug, Parser)]
@@ -28,9 +29,12 @@ enum Command {
         /// Windows SID allowed to connect. Defaults to the elevated caller SID.
         #[arg(long, conflicts_with = "owner_uid")]
         owner_sid: Option<String>,
-        /// Root-controlled executable to permit. May be repeated. Default: none.
+        /// Root-controlled executable to permit with no arguments. May be repeated.
         #[arg(long = "allow-program", value_name = "ABSOLUTE_PATH")]
         allowed_programs: Vec<PathBuf>,
+        /// Versioned JSON document with executable-specific invocation profiles.
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        profile_file: Option<PathBuf>,
     },
     /// Remove the helper service, binary, policy and local IPC endpoint.
     Uninstall,
@@ -82,13 +86,21 @@ async fn run_async(command: Command) -> Result<()> {
             owner_uid,
             owner_sid,
             allowed_programs,
+            profile_file,
         } => {
             let owner = resolve_install_owner(owner_uid, owner_sid)?;
+            let mut program_profiles = allowed_programs
+                .into_iter()
+                .map(AdminProgramRule::no_arguments)
+                .collect::<Vec<_>>();
+            if let Some(profile_file) = profile_file {
+                program_profiles.extend(ProgramProfileDocument::load(&profile_file)?.programs);
+            }
             let manager = HelperManager::discover()?;
             manager
                 .install(HelperInstallOptions {
                     owner,
-                    allowed_programs,
+                    allowed_programs: program_profiles,
                 })
                 .await?;
             println!("RunOnMine privileged helper installed and health-checked.");
@@ -233,6 +245,7 @@ mod tests {
             owner_uid,
             owner_sid,
             allowed_programs,
+            profile_file,
         } = cli.command
         else {
             anyhow::bail!("unexpected helper command");
@@ -240,6 +253,24 @@ mod tests {
         assert_eq!(owner_uid, Some(1000));
         assert!(owner_sid.is_none());
         assert_eq!(allowed_programs, vec![PathBuf::from("/usr/bin/example")]);
+        assert!(profile_file.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn install_accepts_an_absolute_program_profile_file() -> Result<()> {
+        let cli = Cli::try_parse_from([
+            "runonmine-helper",
+            "install",
+            "--owner-uid",
+            "1000",
+            "--profile-file",
+            "/tmp/admin-profile.json",
+        ])?;
+        let Command::Install { profile_file, .. } = cli.command else {
+            anyhow::bail!("unexpected helper command");
+        };
+        assert_eq!(profile_file, Some(PathBuf::from("/tmp/admin-profile.json")));
         Ok(())
     }
 

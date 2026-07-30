@@ -22,6 +22,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
 
+mod arguments;
 mod service;
 
 #[cfg(unix)]
@@ -29,12 +30,18 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+pub use arguments::{
+    AdminArgumentSchema, AdminCommandSchema, AdminFlagSchema, AdminPathMode, AdminProgramRule,
+};
 pub use service::{
     HelperInstallOptions, HelperManager, HelperServiceStatus, installed_policy_path,
     resolve_install_owner,
 };
 
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const POLICY_VERSION: u16 = 2;
+pub const PROGRAM_PROFILE_VERSION: u16 = 1;
+pub const MAX_PROGRAM_PROFILES: usize = 128;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
@@ -81,22 +88,64 @@ pub fn canonical_program_identity(path: &Path) -> Result<PathBuf> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramProfileDocument {
+    pub version: u16,
+    pub programs: Vec<AdminProgramRule>,
+}
+
+impl ProgramProfileDocument {
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            bail!("admin program profile file must use an absolute path");
+        }
+        reject_symlink(path, "admin program profile")?;
+        let metadata = fs::metadata(path).context("failed to inspect admin program profile")?;
+        if metadata.len() > MAX_REQUEST_BYTES as u64 {
+            bail!("admin program profile exceeds the size limit");
+        }
+        let bytes = fs::read(path).context("failed to read admin program profile")?;
+        let document: Self =
+            serde_json::from_slice(&bytes).context("admin program profile is not valid JSON")?;
+        if document.version != PROGRAM_PROFILE_VERSION {
+            bail!("unsupported admin program profile version");
+        }
+        if document.programs.is_empty() || document.programs.len() > MAX_PROGRAM_PROFILES {
+            bail!("admin program profile contains an invalid program count");
+        }
+        for program in &document.programs {
+            program.validate()?;
+        }
+        Ok(document)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllowedProgram {
     pub canonical_path: PathBuf,
     pub sha256: String,
+    #[serde(default = "default_no_argument_commands")]
+    pub commands: Vec<AdminCommandSchema>,
 }
 
 impl AllowedProgram {
     pub fn inspect(path: &Path) -> Result<Self> {
-        let canonical_path = canonical_program_identity(path)?;
+        Self::inspect_rule(AdminProgramRule::no_arguments(path.to_path_buf()))
+    }
+
+    pub fn inspect_rule(rule: AdminProgramRule) -> Result<Self> {
+        let rule = rule.normalize()?;
+        let canonical_path = canonical_program_identity(&rule.program)?;
         let sha256 = sha256_file(&canonical_path)?;
         Ok(Self {
             canonical_path,
             sha256,
+            commands: rule.commands,
         })
     }
 
-    fn matches(&self, requested: &Path) -> Result<bool> {
+    fn matches_program(&self, requested: &Path) -> Result<bool> {
         if !requested.is_absolute() {
             return Ok(false);
         }
@@ -118,9 +167,45 @@ impl AllowedProgram {
             actual_hash.as_bytes().ct_eq(self.sha256.as_bytes()),
         ))
     }
+
+    fn permits(&self, execution: &AdminExecution) -> Result<bool> {
+        if !self.matches_program(&execution.program)? {
+            return Ok(false);
+        }
+        for command in &self.commands {
+            if command.permits(&execution.args)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self.canonical_path.is_absolute()
+            || self.sha256.len() != 64
+            || !self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || self.commands.is_empty()
+            || self.commands.len() > 64
+        {
+            bail!("installed admin program policy is invalid");
+        }
+        let canonical = canonical_program_identity(&self.canonical_path)?;
+        if canonical != self.canonical_path {
+            bail!("installed admin program path is not canonical");
+        }
+        for command in &self.commands {
+            command.validates_loaded_roots()?;
+        }
+        Ok(())
+    }
+}
+
+fn default_no_argument_commands() -> Vec<AdminCommandSchema> {
+    vec![AdminCommandSchema::no_arguments()]
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdminPolicy {
     pub version: u16,
     pub owner: OwnerIdentity,
@@ -129,16 +214,33 @@ pub struct AdminPolicy {
 }
 
 impl AdminPolicy {
-    pub fn build(owner: OwnerIdentity, programs: &[PathBuf]) -> Result<Self> {
+    pub fn build(owner: OwnerIdentity, programs: &[AdminProgramRule]) -> Result<Self> {
         owner.validate()?;
-        let mut allowed_programs = programs
-            .iter()
-            .map(|path| AllowedProgram::inspect(path))
-            .collect::<Result<Vec<_>>>()?;
+        if programs.len() > MAX_PROGRAM_PROFILES {
+            bail!("too many admin program profiles");
+        }
+        let mut allowed_programs = Vec::<AllowedProgram>::new();
+        for rule in programs.iter().cloned() {
+            let inspected = AllowedProgram::inspect_rule(rule)?;
+            if let Some(existing) = allowed_programs
+                .iter_mut()
+                .find(|program| program.canonical_path == inspected.canonical_path)
+            {
+                if existing.sha256 != inspected.sha256 {
+                    bail!("duplicate admin program profile has a different executable digest");
+                }
+                for command in inspected.commands {
+                    if !existing.commands.contains(&command) {
+                        existing.commands.push(command);
+                    }
+                }
+            } else {
+                allowed_programs.push(inspected);
+            }
+        }
         allowed_programs.sort_by(|left, right| left.canonical_path.cmp(&right.canonical_path));
-        allowed_programs.dedup_by(|left, right| left.canonical_path == right.canonical_path);
         Ok(Self {
-            version: PROTOCOL_VERSION,
+            version: POLICY_VERSION,
             owner,
             allowed_programs,
         })
@@ -152,16 +254,23 @@ impl AdminPolicy {
         }
         let policy: Self =
             serde_json::from_slice(&bytes).context("helper policy is not valid JSON")?;
-        if policy.version != PROTOCOL_VERSION {
-            bail!("unsupported helper policy version");
+        if policy.version != POLICY_VERSION {
+            bail!("unsupported helper policy version; reinstall the privileged helper");
         }
         policy.owner.validate()?;
+        if policy.allowed_programs.len() > MAX_PROGRAM_PROFILES {
+            bail!("installed helper policy has too many programs");
+        }
+        for program in &policy.allowed_programs {
+            program.validate()?;
+        }
         Ok(policy)
     }
 
-    pub fn permits(&self, program: &Path) -> Result<bool> {
+    pub fn permits(&self, execution: &AdminExecution) -> Result<bool> {
+        execution.validate()?;
         for allowed in &self.allowed_programs {
-            if allowed.matches(program)? {
+            if allowed.permits(execution)? {
                 return Ok(true);
             }
         }
@@ -235,11 +344,11 @@ impl AdminExecution {
         if self.args.len() > 128 {
             bail!("admin execution has too many arguments");
         }
-        if self
-            .args
-            .iter()
-            .any(|argument| argument.len() > 8 * 1024 || argument.contains('\0'))
-        {
+        if self.args.iter().any(|argument| {
+            argument.is_empty()
+                || argument.len() > 8 * 1024
+                || argument.chars().any(char::is_control)
+        }) {
             bail!("admin execution contains an invalid argument");
         }
         if self.timeout_ms == 0 || Duration::from_millis(self.timeout_ms) > MAX_TIMEOUT {
@@ -457,12 +566,12 @@ async fn handle_authenticated_request(
             HelperResponse::healthy(request_id, policy.allowed_programs.len())
         }
         AdminOperation::Execute(execution) => {
-            match policy.permits(&execution.program) {
+            match policy.permits(&execution) {
                 Ok(true) => {}
                 Ok(false) => {
                     return HelperResponse::rejected(
                         request_id,
-                        "the executable is not in the installed admin allowlist",
+                        "the privileged invocation is not permitted by the installed admin policy",
                     );
                 }
                 Err(_) => {
@@ -729,6 +838,180 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn compatibility_allow_program_is_strictly_argument_free() -> Result<()> {
+        let program = PathBuf::from("/usr/bin/id");
+        let policy = AdminPolicy::build(
+            OwnerIdentity::UnixUid { uid: 1000 },
+            &[AdminProgramRule::no_arguments(program.clone())],
+        )?;
+        let without_arguments = AdminExecution {
+            program: program.clone(),
+            args: Vec::new(),
+            timeout_ms: 1_000,
+        };
+        let with_arguments = AdminExecution {
+            program,
+            args: vec!["-u".to_owned()],
+            timeout_ms: 1_000,
+        };
+        assert!(policy.permits(&without_arguments)?);
+        assert!(!policy.permits(&with_arguments)?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn authenticated_helper_rejects_arguments_outside_the_installed_schema() -> Result<()> {
+        let program = PathBuf::from("/usr/bin/id");
+        let policy = AdminPolicy::build(
+            OwnerIdentity::UnixUid { uid: 1000 },
+            &[AdminProgramRule::no_arguments(program.clone())],
+        )?;
+        let request =
+            HelperRequest::execute(program, vec!["-u".to_owned()], Duration::from_secs(1))?;
+        let response = handle_authenticated_request(&policy, request).await;
+        assert!(matches!(response.result, HelperResult::Rejected { .. }));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_policy_enforces_subcommands_flags_values_and_path_roots() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = root.path().join("agent.conf");
+        fs::write(&config, b"test")?;
+        let program = PathBuf::from("/usr/bin/id");
+        let rule = AdminProgramRule {
+            program: program.clone(),
+            commands: vec![AdminCommandSchema {
+                subcommand: Some("inspect".to_owned()),
+                flags: vec![AdminFlagSchema {
+                    name: "--config".to_owned(),
+                    value: Some(AdminArgumentSchema::Path {
+                        roots: vec![root.path().to_path_buf()],
+                        mode: AdminPathMode::ExistingFile,
+                    }),
+                    repeatable: false,
+                }],
+                forbidden_flags: vec!["--root".to_owned()],
+                positionals: vec![AdminArgumentSchema::Choice {
+                    values: vec!["safe-target".to_owned()],
+                }],
+            }],
+        };
+        let policy = AdminPolicy::build(OwnerIdentity::UnixUid { uid: 1000 }, &[rule])?;
+        let allowed = AdminExecution {
+            program: program.clone(),
+            args: vec![
+                "inspect".to_owned(),
+                "--config".to_owned(),
+                config.to_string_lossy().into_owned(),
+                "safe-target".to_owned(),
+            ],
+            timeout_ms: 1_000,
+        };
+        assert!(policy.permits(&allowed)?);
+        for args in [
+            vec!["delete".to_owned(), "safe-target".to_owned()],
+            vec![
+                "inspect".to_owned(),
+                "--root=/".to_owned(),
+                "safe-target".to_owned(),
+            ],
+            vec![
+                "inspect".to_owned(),
+                "--config".to_owned(),
+                "/etc/passwd".to_owned(),
+                "safe-target".to_owned(),
+            ],
+            vec![
+                "inspect".to_owned(),
+                "--config".to_owned(),
+                config.to_string_lossy().into_owned(),
+                "unsafe-target".to_owned(),
+            ],
+        ] {
+            assert!(!policy.permits(&AdminExecution {
+                program: program.clone(),
+                args,
+                timeout_ms: 1_000,
+            })?);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_policy_without_command_schemas_fails_closed_to_no_arguments() -> Result<()> {
+        let allowed = AllowedProgram::inspect(Path::new("/usr/bin/id"))?;
+        let mut encoded = serde_json::to_value(AdminPolicy {
+            version: POLICY_VERSION,
+            owner: OwnerIdentity::UnixUid { uid: 1000 },
+            allowed_programs: vec![allowed],
+        })?;
+        let commands = encoded
+            .get_mut("allowed_programs")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|programs| programs.first_mut())
+            .and_then(serde_json::Value::as_object_mut)
+            .context("test policy has no allowed program")?;
+        commands.remove("commands");
+        let directory = tempfile::tempdir()?;
+        let policy_path = directory.path().join("policy.json");
+        fs::write(&policy_path, serde_json::to_vec(&encoded)?)?;
+        let policy = AdminPolicy::load(&policy_path)?;
+        assert!(policy.permits(&AdminExecution {
+            program: PathBuf::from("/usr/bin/id"),
+            args: Vec::new(),
+            timeout_ms: 1_000,
+        })?);
+        assert!(!policy.permits(&AdminExecution {
+            program: PathBuf::from("/usr/bin/id"),
+            args: vec!["-u".to_owned()],
+            timeout_ms: 1_000,
+        })?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v1_policy_requires_an_explicit_helper_reinstall() -> Result<()> {
+        let allowed = AllowedProgram::inspect(Path::new("/usr/bin/id"))?;
+        let directory = tempfile::tempdir()?;
+        let policy_path = directory.path().join("legacy-policy.json");
+        fs::write(
+            &policy_path,
+            serde_json::to_vec(&AdminPolicy {
+                version: 1,
+                owner: OwnerIdentity::UnixUid { uid: 1000 },
+                allowed_programs: vec![allowed],
+            })?,
+        )?;
+        assert!(AdminPolicy::load(&policy_path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn profile_document_rejects_unknown_fields_and_relative_paths() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let unknown = directory.path().join("unknown.json");
+        fs::write(
+            &unknown,
+            br#"{"version":1,"programs":[],"unexpected":true}"#,
+        )?;
+        assert!(ProgramProfileDocument::load(&unknown).is_err());
+
+        let relative = directory.path().join("relative.json");
+        fs::write(
+            &relative,
+            br#"{"version":1,"programs":[{"program":"relative","commands":[{"subcommand":null,"flags":[],"forbidden_flags":[],"positionals":[]}]}]}"#,
+        )?;
+        assert!(ProgramProfileDocument::load(&relative).is_err());
+        Ok(())
+    }
+
     #[test]
     fn protocol_rejects_relative_programs_and_unbounded_timeouts() {
         assert!(
@@ -748,6 +1031,31 @@ mod tests {
                 }),
                 Vec::new(),
                 MAX_TIMEOUT + Duration::from_millis(1)
+            )
+            .is_err()
+        );
+        let absolute = PathBuf::from(if cfg!(windows) {
+            r"C:\Windows\System32\whoami.exe"
+        } else {
+            "/usr/bin/id"
+        });
+        assert!(
+            HelperRequest::execute(
+                absolute.clone(),
+                vec![String::new()],
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert!(
+            HelperRequest::execute(
+                absolute,
+                vec![
+                    "line
+break"
+                        .to_owned()
+                ],
+                Duration::from_secs(1)
             )
             .is_err()
         );

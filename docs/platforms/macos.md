@@ -25,3 +25,5 @@ must be considered before installation.
 
 The existing `com.idemasler.macmcp.*` services, port `45799`, and MacMCP config,
 logs, and data are outside RunOnMine's ownership and must not be modified.
+
+Arguments are additionally restricted by the installed executable-specific command profile; an executable added with `--allow-program` alone accepts no arguments.

@@ -23,3 +23,5 @@ and non-interactive flags, then passes the script over stdin.
 
 The beta NSIS installer is unsigned. Windows may show an unrecognized publisher
 warning. Verify the accompanying SHA-256 file before running it.
+
+Arguments are additionally restricted by the installed executable-specific command profile; an executable added with `--allow-program` alone accepts no arguments.
