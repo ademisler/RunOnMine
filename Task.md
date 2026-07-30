@@ -37,7 +37,7 @@ Status markers:
 - [x] **P1-06 — Prevent OAuth client-name impersonation in consent UI.** Show client ID fingerprint, redirect origins, registration time and unverified-client warning.
 - [x] **P1-07 — Namespace OAuth state by connector/issuer.** Clients, authorizations, codes, tokens, sessions and revocation must be connector-specific.
 - [x] **P1-08 — Expire approval rows atomically on timeout.** Audit and state must not temporarily disagree.
-- [ ] **P1-09 — Harden browser private-network enforcement across all Chromium targets.** Cover popup, worker, WebSocket, background target and DNS-rebinding paths with adversarial integration tests.
+- [x] **P1-09 — Harden browser private-network enforcement across all Chromium targets.** Cover popup, worker, WebSocket, background target and DNS-rebinding paths with adversarial integration tests.
 - [ ] **P1-10 — Restrict privileged helper arguments.** Add executable-specific subcommand/argument schemas, path constraints and forbidden flags.
 - [ ] **P1-11 — Reduce helper executable verification/execution TOCTOU.** Revalidate file identity or execute from a verified handle where supported.
 - [ ] **P1-12 — Make helper installation transactional.** Stage binary/policy/service, restart, health-check and restore the previous installation on failure.

@@ -58,6 +58,15 @@ context and the exact-action authorization identity. An inactive session uses
 `about:blank` without starting Chromium. The origin is read again after any local
 approval wait; a changed origin is re-authorized before the operation continues.
 
+When private-network access is disabled, the isolated Chromium process is
+launched behind a RunOnMine-owned loopback HTTP proxy. Process-level proxy,
+host-resolver, QUIC, loopback-bypass, and WebRTC settings make the boundary
+independent of page/target attachment, covering popups, workers, service workers,
+background targets, and WebSockets. The proxy validates the complete DNS answer
+on every connection and connects to the exact checked IP. Existing external CDP
+processes are rejected in protected mode because their launch-time network
+configuration cannot be proven or replaced.
+
 Privileged executable resources use the helper's shared canonical program
 identity resolver before local policy evaluation. The resolver requires an
 absolute root/SYSTEM-owned regular non-symlink file, enforces platform ACL/mode

@@ -1,7 +1,10 @@
 //! Isolated browser-profile and CDP automation primitives.
 
+mod network_proxy;
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -14,6 +17,9 @@ use chromiumoxide::cdp::browser_protocol::network::ErrorReason;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::{Page, ScreenshotParams};
 use futures::StreamExt;
+use network_proxy::{
+    BrowserNetworkGuard, DestinationResolver, SystemDestinationResolver, canonical_destination_host,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
 use url::Url;
@@ -94,17 +100,32 @@ struct ActiveBrowser {
     page: Page,
     handler_task: tokio::task::JoinHandle<()>,
     interceptor_task: tokio::task::JoinHandle<()>,
+    network_guard: Option<BrowserNetworkGuard>,
     owned_process: bool,
     page_owned: bool,
 }
 
-#[derive(Debug)]
 pub struct BrowserSession {
     profile: BrowserProfile,
     headless: bool,
     allow_private_network: bool,
     max_output_bytes: usize,
+    resolver: Arc<dyn DestinationResolver>,
+    #[cfg(test)]
+    extra_browser_args: Vec<(String, String)>,
     active: Mutex<Option<ActiveBrowser>>,
+}
+
+impl std::fmt::Debug for BrowserSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserSession")
+            .field("profile", &self.profile)
+            .field("headless", &self.headless)
+            .field("allow_private_network", &self.allow_private_network)
+            .field("max_output_bytes", &self.max_output_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BrowserSession {
@@ -119,23 +140,60 @@ impl BrowserSession {
             headless,
             allow_private_network,
             max_output_bytes: max_output_bytes.max(1),
+            resolver: Arc::new(SystemDestinationResolver),
+            #[cfg(test)]
+            extra_browser_args: Vec::new(),
+            active: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_network_test_support(
+        profile: BrowserProfile,
+        headless: bool,
+        max_output_bytes: usize,
+        resolver: Arc<dyn DestinationResolver>,
+        extra_browser_args: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            profile,
+            headless,
+            allow_private_network: false,
+            max_output_bytes: max_output_bytes.max(1),
+            resolver,
+            extra_browser_args,
             active: Mutex::new(None),
         }
     }
 
     pub async fn open(&self, url: &str) -> Result<String> {
-        validate_navigation_url(url, self.allow_private_network).await?;
+        validate_navigation_url_with_resolver(
+            url,
+            self.allow_private_network,
+            self.resolver.as_ref(),
+        )
+        .await?;
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
         let page = active.browser.new_page("about:blank").await?;
-        let interceptor_task = install_request_guard(&page, self.allow_private_network).await?;
+        let interceptor_task = install_request_guard(
+            &page,
+            self.allow_private_network,
+            Arc::clone(&self.resolver),
+        )
+        .await?;
         if let Err(error) = page.goto(url).await {
             interceptor_task.abort();
             let _ignored = page.close().await;
             return Err(error.into());
         }
         let current_url = page.url().await?.unwrap_or_else(|| url.to_owned());
-        if let Err(error) = validate_navigation_url(&current_url, self.allow_private_network).await
+        if let Err(error) = validate_navigation_url_with_resolver(
+            &current_url,
+            self.allow_private_network,
+            self.resolver.as_ref(),
+        )
+        .await
         {
             stop_request_guard(&page, &interceptor_task).await;
             let _ignored = page.close().await;
@@ -152,12 +210,22 @@ impl BrowserSession {
     }
 
     pub async fn navigate(&self, url: &str) -> Result<String> {
-        validate_navigation_url(url, self.allow_private_network).await?;
+        validate_navigation_url_with_resolver(
+            url,
+            self.allow_private_network,
+            self.resolver.as_ref(),
+        )
+        .await?;
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
         active.page.goto(url).await?;
         let current = active.page.url().await?.unwrap_or_else(|| url.to_owned());
-        validate_navigation_url(&current, self.allow_private_network).await?;
+        validate_navigation_url_with_resolver(
+            &current,
+            self.allow_private_network,
+            self.resolver.as_ref(),
+        )
+        .await?;
         Ok(current)
     }
 
@@ -306,6 +374,9 @@ impl BrowserSession {
             let _result = active.browser.close().await;
             let _result = tokio::time::timeout(Duration::from_secs(5), active.browser.wait()).await;
         }
+        if let Some(mut guard) = active.network_guard.take() {
+            guard.stop().await;
+        }
         active.handler_task.abort();
         self.cleanup_profile();
         Ok(())
@@ -327,27 +398,51 @@ impl BrowserSession {
     async fn ensure_active(&self) -> Result<MutexGuard<'_, Option<ActiveBrowser>>> {
         let mut slot = self.active.lock().await;
         if slot.is_none() {
-            let (mut browser, mut handler, owned_process) = match &self.profile {
+            validate_browser_network_mode(&self.profile, self.allow_private_network)?;
+            let (mut browser, mut handler, owned_process, network_guard) = match &self.profile {
                 BrowserProfile::Isolated { directory, .. } => {
                     ensure_private_directory(directory)?;
                     let executable = chromium_executable()
                         .context("a supported Chromium installation was not found")?;
+                    let mut network_guard = if self.allow_private_network {
+                        None
+                    } else {
+                        Some(BrowserNetworkGuard::start(Arc::clone(&self.resolver)).await?)
+                    };
                     let mut builder = BrowserConfig::builder()
                         .chrome_executable(executable)
                         .user_data_dir(directory)
                         .window_size(1_280, 900)
                         .launch_timeout(Duration::from_secs(30))
                         .request_timeout(Duration::from_mins(1));
+                    if let Some(guard) = network_guard.as_ref() {
+                        for argument in guarded_browser_arguments(guard.address()) {
+                            builder = match argument.value {
+                                Some(value) => builder.arg((argument.key, value.as_str())),
+                                None => builder.arg(argument.key),
+                            };
+                        }
+                    }
+                    #[cfg(test)]
+                    for (key, value) in &self.extra_browser_args {
+                        builder = builder.arg((key.as_str(), value.as_str()));
+                    }
                     if !self.headless {
                         builder = builder.with_head();
                     }
                     let config = builder.build().map_err(anyhow::Error::msg)?;
-                    let (browser, handler) = Browser::launch(config).await?;
-                    (browser, handler, true)
+                    let launched = Browser::launch(config).await;
+                    if launched.is_err()
+                        && let Some(guard) = network_guard.as_mut()
+                    {
+                        guard.stop().await;
+                    }
+                    let (browser, handler) = launched?;
+                    (browser, handler, true, network_guard)
                 }
                 BrowserProfile::ExternalCdp { endpoint } => {
                     let (browser, handler) = Browser::connect(endpoint.to_string()).await?;
-                    (browser, handler, false)
+                    (browser, handler, false, None)
                 }
             };
             let handler_task = tokio::spawn(async move {
@@ -366,12 +461,18 @@ impl BrowserSession {
                 Some(page) => (page, owned_process),
                 None => (browser.new_page("about:blank").await?, true),
             };
-            let interceptor_task = install_request_guard(&page, self.allow_private_network).await?;
+            let interceptor_task = install_request_guard(
+                &page,
+                self.allow_private_network,
+                Arc::clone(&self.resolver),
+            )
+            .await?;
             *slot = Some(ActiveBrowser {
                 browser,
                 page,
                 handler_task,
                 interceptor_task,
+                network_guard,
                 owned_process,
                 page_owned,
             });
@@ -418,6 +519,49 @@ impl Drop for BrowserSession {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct BrowserArgument {
+    key: &'static str,
+    value: Option<String>,
+}
+
+fn guarded_browser_arguments(proxy_address: std::net::SocketAddr) -> Vec<BrowserArgument> {
+    vec![
+        BrowserArgument {
+            key: "proxy-server",
+            value: Some(format!("http://{proxy_address}")),
+        },
+        BrowserArgument {
+            key: "proxy-bypass-list",
+            value: Some("<-loopback>".to_owned()),
+        },
+        BrowserArgument {
+            key: "host-resolver-rules",
+            value: Some("MAP * ~NOTFOUND, EXCLUDE 127.0.0.1".to_owned()),
+        },
+        BrowserArgument {
+            key: "force-webrtc-ip-handling-policy",
+            value: Some("disable_non_proxied_udp".to_owned()),
+        },
+        BrowserArgument {
+            key: "disable-quic",
+            value: None,
+        },
+    ]
+}
+
+fn validate_browser_network_mode(
+    profile: &BrowserProfile,
+    allow_private_network: bool,
+) -> Result<()> {
+    if matches!(profile, BrowserProfile::ExternalCdp { .. }) && !allow_private_network {
+        bail!(
+            "external CDP cannot provide browser-wide private-network enforcement; enable the explicit local private-network option or use an isolated profile"
+        );
+    }
+    Ok(())
+}
+
 async fn stop_request_guard(page: &Page, task: &tokio::task::JoinHandle<()>) {
     let _ignored = page.execute(FetchDisableParams::default()).await;
     task.abort();
@@ -426,6 +570,7 @@ async fn stop_request_guard(page: &Page, task: &tokio::task::JoinHandle<()>) {
 async fn install_request_guard(
     page: &Page,
     allow_private_network: bool,
+    resolver: Arc<dyn DestinationResolver>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let mut requests = page.event_listener::<EventRequestPaused>().await?;
     page.execute(FetchEnableParams::default()).await?;
@@ -437,9 +582,13 @@ async fn install_request_guard(
                 if event.response_status_code.is_some() || event.response_error_reason.is_some() {
                     true
                 } else {
-                    validate_request_url(&event.request.url, allow_private_network)
-                        .await
-                        .is_ok()
+                    validate_request_url_with_resolver(
+                        &event.request.url,
+                        allow_private_network,
+                        resolver.as_ref(),
+                    )
+                    .await
+                    .is_ok()
                 };
             let result = if allowed {
                 guarded_page
@@ -496,6 +645,8 @@ pub fn chromium_executable() -> Option<PathBuf> {
     ]);
     #[cfg(target_os = "linux")]
     candidates.extend([
+        PathBuf::from("/opt/google/chrome/google-chrome"),
+        PathBuf::from("/opt/google/chrome/chrome"),
         PathBuf::from("/usr/bin/google-chrome"),
         PathBuf::from("/usr/bin/google-chrome-stable"),
         PathBuf::from("/usr/bin/chromium"),
@@ -529,7 +680,17 @@ pub fn chromium_executable() -> Option<PathBuf> {
     })
 }
 
+#[cfg(test)]
 async fn validate_navigation_url(value: &str, allow_private_network: bool) -> Result<()> {
+    validate_navigation_url_with_resolver(value, allow_private_network, &SystemDestinationResolver)
+        .await
+}
+
+async fn validate_navigation_url_with_resolver(
+    value: &str,
+    allow_private_network: bool,
+    resolver: &dyn DestinationResolver,
+) -> Result<()> {
     if value.len() > 16 * 1_024 {
         bail!("browser URL exceeds the size limit");
     }
@@ -540,10 +701,20 @@ async fn validate_navigation_url(value: &str, allow_private_network: bool) -> Re
         }
         return Ok(());
     }
-    validate_web_url(&url, allow_private_network).await
+    validate_web_url_with_resolver(&url, allow_private_network, resolver).await
 }
 
+#[cfg(test)]
 async fn validate_request_url(value: &str, allow_private_network: bool) -> Result<()> {
+    validate_request_url_with_resolver(value, allow_private_network, &SystemDestinationResolver)
+        .await
+}
+
+async fn validate_request_url_with_resolver(
+    value: &str,
+    allow_private_network: bool,
+    resolver: &dyn DestinationResolver,
+) -> Result<()> {
     if value.len() > 1024 * 1_024 {
         bail!("browser request URL exceeds the size limit");
     }
@@ -551,14 +722,20 @@ async fn validate_request_url(value: &str, allow_private_network: bool) -> Resul
     match url.scheme() {
         "about" if url.as_str() == "about:blank" => Ok(()),
         "data" | "blob" => Ok(()),
-        "http" | "https" => validate_web_url(&url, allow_private_network).await,
+        "http" | "https" | "ws" | "wss" => {
+            validate_web_url_with_resolver(&url, allow_private_network, resolver).await
+        }
         _ => bail!("unsupported browser request protocol"),
     }
 }
 
-async fn validate_web_url(url: &Url, allow_private_network: bool) -> Result<()> {
-    if !matches!(url.scheme(), "http" | "https") {
-        bail!("browser navigation only supports HTTP, HTTPS, and about:blank URLs");
+async fn validate_web_url_with_resolver(
+    url: &Url,
+    allow_private_network: bool,
+    resolver: &dyn DestinationResolver,
+) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
+        bail!("browser navigation only supports HTTP, HTTPS, WebSocket, and about:blank URLs");
     }
     if !url.username().is_empty() || url.password().is_some() {
         bail!("browser URLs must not contain embedded credentials");
@@ -566,25 +743,20 @@ async fn validate_web_url(url: &Url, allow_private_network: bool) -> Result<()> 
     if allow_private_network {
         return Ok(());
     }
-    let host = url.host_str().context("browser URL has no host")?;
-    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+    let host = canonical_destination_host(url.host_str().context("browser URL has no host")?);
+    if host == "localhost" || host.ends_with(".localhost") {
         bail!("private-network browser navigation is disabled");
-    }
-    if let Ok(address) = host.parse::<IpAddr>() {
-        if is_non_public_address(address) {
-            bail!("private-network browser navigation is disabled");
-        }
-        return Ok(());
     }
     let port = url
         .port_or_known_default()
         .context("browser URL has no effective port")?;
-    let addresses = tokio::net::lookup_host((host, port))
-        .await
-        .context("browser host could not be resolved")?;
-    if addresses
-        .map(|address| address.ip())
-        .any(is_non_public_address)
+    let destination = resolver.resolve(&host, port).await?;
+    if destination.addresses.is_empty()
+        || destination
+            .addresses
+            .iter()
+            .map(std::net::SocketAddr::ip)
+            .any(is_non_public_address)
     {
         bail!("browser host resolves to a private or non-routable address");
     }
@@ -630,12 +802,32 @@ fn is_non_public_ipv4(address: Ipv4Addr) -> bool {
 }
 
 fn is_non_public_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    let ipv4_compatible = segments[..6] == [0, 0, 0, 0, 0, 0];
+    let nat64_well_known = segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0];
+    let nat64_local = segments[0..3] == [0x0064, 0xff9b, 0x0001];
+    let discard_only = segments[..4] == [0x0100, 0, 0, 0];
+    let special_2001 = segments[0] == 0x2001 && segments[1] & 0xfe00 == 0;
+    let documentation_2001 = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    let documentation_3fff = segments[0] == 0x3fff && segments[1] & 0xf000 == 0;
+    let six_to_four = segments[0] == 0x2002;
+    let segment_routing = segments[0] == 0x5f00;
+
     address.is_loopback()
         || address.is_unspecified()
         || address.is_multicast()
         || address.is_unique_local()
         || address.is_unicast_link_local()
         || address.to_ipv4_mapped().is_some_and(is_non_public_ipv4)
+        || ipv4_compatible
+        || nat64_well_known
+        || nat64_local
+        || discard_only
+        || special_2001
+        || documentation_2001
+        || documentation_3fff
+        || six_to_four
+        || segment_routing
 }
 
 fn validate_selector(selector: &str) -> Result<()> {
@@ -663,7 +855,16 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::FutureExt as _;
+    use futures::future::BoxFuture;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
     use super::*;
+    use crate::network_proxy::ResolvedDestination;
 
     #[test]
     fn external_cdp_rejects_remote_host_unsupported_scheme_and_sensitive_url_data() -> Result<()> {
@@ -678,6 +879,53 @@ mod tests {
         }
         assert!(
             BrowserProfile::external(Url::parse("http://localhost:9222/devtools/browser")?).is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn guarded_browser_arguments_are_process_wide_and_fail_closed() -> Result<()> {
+        let address: std::net::SocketAddr = "127.0.0.1:43123".parse()?;
+        assert_eq!(
+            guarded_browser_arguments(address),
+            vec![
+                BrowserArgument {
+                    key: "proxy-server",
+                    value: Some("http://127.0.0.1:43123".to_owned()),
+                },
+                BrowserArgument {
+                    key: "proxy-bypass-list",
+                    value: Some("<-loopback>".to_owned()),
+                },
+                BrowserArgument {
+                    key: "host-resolver-rules",
+                    value: Some("MAP * ~NOTFOUND, EXCLUDE 127.0.0.1".to_owned()),
+                },
+                BrowserArgument {
+                    key: "force-webrtc-ip-handling-policy",
+                    value: Some("disable_non_proxied_udp".to_owned()),
+                },
+                BrowserArgument {
+                    key: "disable-quic",
+                    value: None,
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn protected_mode_rejects_external_cdp_before_connection() -> Result<()> {
+        let external =
+            BrowserProfile::external(Url::parse("http://127.0.0.1:9222/devtools/browser")?)?;
+        assert!(validate_browser_network_mode(&external, false).is_err());
+        assert!(validate_browser_network_mode(&external, true).is_ok());
+        assert!(
+            validate_browser_network_mode(
+                &BrowserProfile::isolated_ephemeral(PathBuf::from("profile")),
+                false,
+            )
+            .is_ok()
         );
         Ok(())
     }
@@ -733,6 +981,26 @@ mod tests {
     }
 
     #[test]
+    fn special_ipv6_translation_and_documentation_ranges_are_non_public() -> Result<()> {
+        for address in [
+            "::c0a8:101",
+            "::ffff:192.168.1.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b:1::c0a8:1",
+            "100::1",
+            "2001::1",
+            "2001:db8::1",
+            "2002:c0a8:101::1",
+            "3fff::1",
+            "5f00::1",
+        ] {
+            assert!(is_non_public_ipv6(address.parse()?));
+        }
+        assert!(!is_non_public_ipv6("2606:4700:4700::1111".parse()?));
+        Ok(())
+    }
+
+    #[test]
     fn bounded_text_preserves_utf8_boundaries() {
         let bounded = bound_utf8(
             BoundedValue {
@@ -754,5 +1022,219 @@ mod tests {
         );
         let persistent = BrowserProfile::isolated_persistent(PathBuf::from("/tmp/example"));
         assert!(persistent.cleanup_directory().is_none());
+    }
+
+    #[derive(Debug)]
+    struct BrowserTestResolver {
+        host: String,
+        port: u16,
+        connect_address: std::net::SocketAddr,
+    }
+
+    impl DestinationResolver for BrowserTestResolver {
+        fn resolve<'a>(
+            &'a self,
+            host: &'a str,
+            port: u16,
+        ) -> BoxFuture<'a, Result<ResolvedDestination>> {
+            async move {
+                if host == self.host && port == self.port {
+                    return Ok(ResolvedDestination {
+                        addresses: vec![std::net::SocketAddr::new(
+                            IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+                            port,
+                        )],
+                        connect_override: Some(vec![self.connect_address]),
+                    });
+                }
+                let address = host
+                    .parse::<IpAddr>()
+                    .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                Ok(ResolvedDestination {
+                    addresses: vec![std::net::SocketAddr::new(address, port)],
+                    connect_override: None,
+                })
+            }
+            .boxed()
+        }
+    }
+
+    async fn spawn_seed_server(
+        private_url: String,
+    ) -> Result<(
+        std::net::SocketAddr,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    )> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let (shutdown, mut shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((mut stream, _)) = accepted else { break; };
+                        let private_url = private_url.clone();
+                        tokio::spawn(async move {
+                            let mut request = Vec::new();
+                            let mut chunk = [0_u8; 4096];
+                            loop {
+                                let Ok(read) = stream.read(&mut chunk).await else { return; };
+                                if read == 0 { return; }
+                                request.extend_from_slice(&chunk[..read]);
+                                if request.windows(4).any(|window| window == b"\r\n\r\n")
+                                    || request.len() > 64 * 1024
+                                {
+                                    break;
+                                }
+                            }
+                            let first_line = String::from_utf8_lossy(&request)
+                                .lines()
+                                .next()
+                                .unwrap_or_default()
+                                .to_owned();
+                            let (content_type, body) = if first_line.contains(" /sw.js ") {
+                                (
+                                    "application/javascript",
+                                    format!(
+                                        "self.addEventListener('message', event => {{ fetch('{private_url}/service-worker', {{mode:'no-cors'}}).then(() => event.source.postMessage('proxy-response')).catch(() => event.source.postMessage('blocked')); }});"
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "text/html",
+                                    "<!doctype html><meta charset=utf-8><title>RunOnMine browser network test</title><body>ready</body>".to_owned(),
+                                )
+                            };
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nService-Worker-Allowed: /\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ignored = stream.write_all(response.as_bytes()).await;
+                        });
+                    }
+                    _ = &mut shutdown_rx => break,
+                }
+            }
+        });
+        Ok((address, shutdown, task))
+    }
+
+    async fn spawn_private_probe() -> Result<(
+        std::net::SocketAddr,
+        Arc<AtomicUsize>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    )> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let connections = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&connections);
+        let (shutdown, mut shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((mut stream, _)) = accepted else { break; };
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        tokio::spawn(async move {
+                            let mut buffer = [0_u8; 4096];
+                            let _ignored = stream.read(&mut buffer).await;
+                            let _ignored = stream.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                            ).await;
+                        });
+                    }
+                    _ = &mut shutdown_rx => break,
+                }
+            }
+        });
+        Ok((address, connections, shutdown, task))
+    }
+
+    fn browser_attack_script(
+        private_url: &str,
+        private_address: std::net::SocketAddr,
+    ) -> Result<String> {
+        let script = include_str!("../tests/fixtures/network_attacks.js");
+        Ok(script
+            .replace(
+                "__PRIVATE_HTTP_JSON__",
+                &serde_json::to_string(private_url)?,
+            )
+            .replace(
+                "__PRIVATE_WS_JSON__",
+                &serde_json::to_string(&format!("ws://{private_address}"))?,
+            )
+            .replace("__PRIVATE_PORT__", &private_address.port().to_string()))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn browser_wide_proxy_blocks_popup_workers_websocket_and_rebinding() -> Result<()> {
+        if !chromium_available() {
+            return Ok(());
+        }
+        let (private_address, private_connections, private_shutdown, private_task) =
+            spawn_private_probe().await?;
+        let private_url = format!("http://{private_address}");
+        let (seed_address, seed_shutdown, seed_task) =
+            spawn_seed_server(private_url.clone()).await?;
+        let public_host = "public.browser.test";
+        let public_origin = format!("http://{public_host}:{}", seed_address.port());
+        let resolver = Arc::new(BrowserTestResolver {
+            host: public_host.to_owned(),
+            port: seed_address.port(),
+            connect_address: seed_address,
+        });
+        let temporary = tempfile::tempdir()?;
+        let session = BrowserSession::with_network_test_support(
+            BrowserProfile::isolated_ephemeral(temporary.path().join("profile")),
+            true,
+            1024 * 1024,
+            resolver,
+            vec![(
+                "unsafely-treat-insecure-origin-as-secure".to_owned(),
+                public_origin.clone(),
+            )],
+        );
+        session.open(&format!("{public_origin}/")).await?;
+        let script = browser_attack_script(&private_url, private_address)?;
+        let result = session.evaluate(&script).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let private_connection_count = private_connections.load(Ordering::SeqCst);
+
+        session.close().await?;
+        let _ignored = seed_shutdown.send(());
+        let _ignored = private_shutdown.send(());
+        seed_task.await?;
+        private_task.await?;
+
+        for key in [
+            "fetch",
+            "worker",
+            "sharedWorker",
+            "serviceWorker",
+            "rebinding",
+        ] {
+            let outcome = result
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .with_context(|| format!("browser probe {key} produced no result: {result}"))?;
+            assert!(
+                matches!(outcome, "blocked" | "proxy-response"),
+                "browser probe {key} did not complete through the guarded network path: {result}"
+            );
+        }
+        assert_eq!(result["websocket"], "blocked", "WebSocket result: {result}");
+        assert!(
+            matches!(result["popup"].as_str(), Some("attempted" | "blocked")),
+            "popup target did not execute: {result}"
+        );
+        assert_eq!(
+            private_connection_count, 0,
+            "a popup, worker, WebSocket, background target, or rebinding request reached the private probe: {result}"
+        );
+        Ok(())
     }
 }

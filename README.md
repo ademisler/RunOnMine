@@ -104,8 +104,11 @@ sharing it.
 - Denied tools are omitted from MCP discovery and rejected if called directly.
 - File operations use open directory capabilities and descriptor-relative traversal inside explicitly selected roots; path checks and file access are not separated by a canonicalize-then-open race.
 - The default browser profile is disposable and isolated from the user's daily
-  browser profile. Redirects and subresources are intercepted; private,
-  loopback, link-local, and non-routable targets are denied. Private-network
+  browser profile. A browser-process-wide loopback proxy covers pages, popups,
+  dedicated/shared/service workers, background targets, HTTP(S), and WebSocket
+  connections. It resolves every outbound connection, rejects the whole answer
+  set when any address is private or non-routable, and connects only to the
+  checked IP. QUIC and non-proxied WebRTC UDP are disabled. Private-network
   access is a local-connector-only opt-in and remains blocked for remote connectors.
 - Secrets use the operating-system credential store, with an explicit encrypted headless Linux fallback. The encrypted file backend uses an owner-only cross-process lock so CLI, desktop, and agent updates cannot overwrite one another.
 - Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. Database directories are private, database/WAL/shared-memory files are owner-only, and worker threads are joined during shutdown. MCP authorization, approval, and audit paths use asynchronous worker replies.

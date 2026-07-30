@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Enforce browser private-network policy with a Chromium-process-wide loopback proxy covering popups, dedicated/shared/service workers, background targets, HTTP(S), WebSockets, mixed DNS answers, and DNS rebinding; disable QUIC and non-proxied WebRTC UDP, and reject protected external CDP fail-closed.
 - Commit approval timeout state and its `timed_out` audit event in one SQLite transaction, roll back both on audit failure, prevent late owner actions from creating grants, and preserve an owner decision that commits first.
 - Namespace OAuth clients, registration limits, authorization state, consents, codes, tokens, and sessions by connector; require connector-qualified administrative revocation and discard legacy namespace-free beta credentials during migration.
 - Mark dynamically registered OAuth client names as unverified and show a stable client fingerprint, registration time, requested redirect origin, and every registered redirect origin on the local consent page.

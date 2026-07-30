@@ -52,7 +52,7 @@ compromised.
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
 | An alternate executable path spelling avoids a canonical admin policy rule | MCP authorization and helper allowlist installation share the same root/SYSTEM-owned, non-symlink canonical program identity |
-| Browser automation reaches an unrelated daily profile or internal network | isolated profile by default; private-network destinations denied by default; expert attachment requires a credential-free loopback CDP URL; initial and final navigation destinations plus redirects/subresources are validated |
+| Browser automation reaches an unrelated daily profile or internal network through a popup, worker, background target, WebSocket, mixed DNS answer, or DNS rebinding | isolated profile by default; process-wide loopback proxy with no implicit bypass; QUIC and non-proxied WebRTC UDP disabled; every connection re-resolves and rejects any mixed/private answer before exact-IP connect; CDP URL checks remain defense in depth; protected external CDP fails closed |
 | Audit rows are edited or reordered | BLAKE3 hash chain, retained chain anchor, startup and doctor verification |
 | A stale refresh token is replayed | one-time rotation and family-wide revocation on reuse |
 | Session identifiers cross connector boundaries | connector-bound session state, 30-minute idle expiry, request body limit, concurrency and rate limits |
@@ -84,6 +84,6 @@ prevent a fully compromised user account from deleting the database and its
 anchor. A malicious process already running as the same user can also interact
 with user-accessible files and UI outside RunOnMine's control.
 
-Quick Tunnel with no user identity is a temporary development mode, not a substitute for OAuth. Its secret path is a bearer credential and is rotated by the emergency lock. Browser destination validation occurs before navigation, after the final navigation result, and during CDP Fetch interception for redirects and subresources. This reduces SSRF exposure but is not a complete network sandbox.
+Quick Tunnel with no user identity is a temporary development mode, not a substitute for OAuth. Its secret path is a bearer credential and is rotated by the emergency lock. Browser destination validation occurs before navigation, after the final navigation result, during CDP Fetch interception, and at the browser-process-wide proxy for every HTTP(S) or WebSocket connection. The proxy is not a defense against a compromised Chromium process or another malicious process already running as the same user.
 Unsigned beta packages provide checksums and SBOMs but no publisher identity,
 notarization, or code-signing guarantee.
