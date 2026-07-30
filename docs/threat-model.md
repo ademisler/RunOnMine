@@ -52,6 +52,7 @@ compromised.
 | Release SBOM or clean-install evidence is missing/mismatched | per-target CycloneDX validation with target/commit/lock/binary provenance, strict clean-install evidence validator, and public release gates that fail closed |
 | Connector shutdown is uncertain but reported stopped and restarted | typed cleanup certainty and orphan risk; uncertain process-group termination is terminal and suppresses restart |
 | Headless master key leaks through process environment | system service uses a root-owned systemd credential; environment input is compatibility-only and native desktop stores remain preferred |
+| Desktop credential drafts remain in ordinary heap buffers after submit/cancel | zeroizing input fields, explicit wipe on existing reset paths, and zeroize-on-drop; values are never added to support output or logs |
 | Diagnostics are scraped by automation but output shape or failure meaning varies by command | stable typed doctor records and a shared versioned `{schema_version, command, data}` envelope for doctor, audit tail, service status, and local HTTP status |
 | One OAuth registration source exhausts all dynamic-client capacity | transactionally enforced per-source cap plus the existing connector-global cap and indexed source lookup |
 | Platform security checks are silently skipped or toolchain inputs are ignored | relevant macOS/Windows/ARM jobs are unconditional and exact toolchain/components/targets are installed by a checked-in rustup script |

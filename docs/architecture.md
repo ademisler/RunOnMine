@@ -419,3 +419,13 @@ shutdown, and cleanup failures. Terminal state also records whether cleanup was
 not required, completed, or uncertain. A failed process-group/Job Object kill,
 status error, or shutdown timeout produces `uncertain` cleanup with orphan risk;
 the supervisor does not start another copy in that condition.
+
+## Desktop sensitive input memory
+
+Desktop form state never stores credential-like inputs in ordinary `String`
+fields. Secret, token, password, API-key and credential drafts use
+`Zeroizing<String>`; submit/cancel/reset paths explicitly zero the buffer and
+remaining allocation is wiped on drop. Rendering receives only borrowed text
+and credential values are moved directly into the credential transaction layer.
+This reduces residual-memory exposure but does not claim protection against a
+fully compromised desktop process.

@@ -57,11 +57,11 @@ Status markers:
 
 ## P2 — Architecture, reliability and maintainability
 
-- [ ] **P2-01 — Split oversized modules.** Refactor desktop main, MCP dispatcher, CLI commands, storage, OAuth store/service, installer and xtask into domain modules.
-- [ ] **P2-02 — Break down very long functions.** Replace broad `too_many_lines` suppressions with typed handlers and state transitions.
-- [ ] **P2-03 — Separate desktop model/update/effects/views.** Remove direct database, secret and child-process orchestration from rendering code.
-- [ ] **P2-04 — Move desktop refresh work off the UI thread.** Use background snapshots, incremental audit verification and pagination.
-- [ ] **P2-05 — Zeroize desktop credential inputs.** Use secret wrappers and explicit clearing.
+- [!] **P2-01 — Split oversized modules.** Connector transactions, credential updates, support bundles, doctor and several runtime domains are separated, but the desktop application shell and a few core/MCP/OAuth modules remain oversized and require a staged refactor after UI regression coverage is broader.
+- [!] **P2-02 — Break down very long functions.** New security/reliability work uses typed handlers and state transitions without broad suppressions, but legacy long desktop/storage/MCP functions remain and are tracked rather than hidden.
+- [!] **P2-03 — Separate desktop model/update/effects/views.** Credential mutation effects already live outside rendering and sensitive inputs use dedicated wrappers, but the desktop shell still combines portions of model/update/view orchestration.
+- [!] **P2-04 — Move desktop refresh work off the UI thread.** Expensive process/network operations are bounded and several effects are asynchronous, but the full desktop snapshot/pagination conversion is not complete and remains a measured UI-performance task.
+- [x] **P2-05 — Zeroize desktop credential inputs.** Every desktop field whose identity denotes a secret, token, password, API key or credential now uses `Zeroizing<String>`; existing submit/cancel/reset paths perform explicit zeroization and drop wipes remaining capacity.
 - [x] **P2-06 — Add StateStore backpressure.** The serialized SQLite worker uses a bounded 128-job queue, one-second enqueue timeout, overload metrics, and no ambiguous post-acceptance result timeout.
 - [x] **P2-07 — Replace approval polling with notifications.** Approval state commits publish an owner-only cross-process filesystem pulse; MCP waiters re-check SQLite immediately on native events and retain a five-second database poll only as recovery for unavailable or missed watcher events.
 - [x] **P2-08 — Preserve sanitized internal error diagnostics.** MCP calls carry request UUIDs; internal failures emit opaque incident references and structured local logs with connector, static category/operation, and audit UUID when available. OAuth store failures use request/connector/category correlation while protocol responses remain standard and generic; raw causes and arguments are not logged.
@@ -121,8 +121,8 @@ Status markers:
 - [x] **P3-05 — Improve consent recovery after transient GitHub errors.** Completed by P2-16 with code-bound callback claims and bounded provider retry.
 - [x] **P3-06 — Show requester identity in approval UI.** Include principal type, client ID/name and subject after principal-bound storage lands.
 - [ ] **P3-07 — Make approval redaction limitations explicit.** Require owner review of the complete effective action.
-- [ ] **P3-08 — Verify audit chains incrementally.** Persist the last verified sequence/checkpoint.
-- [ ] **P3-09 — Reconcile runtime connector artifacts and health in UI.** Show configured, starting, ready, degraded, failed, backoff and stale-credential states.
+- [!] **P3-08 — Expose connector runtime lifecycle in the desktop UI.** CLI/doctor/support diagnostics expose typed lifecycle and degraded state, but a full desktop lifecycle timeline with recovery actions remains open.
+- [!] **P3-09 — Add audit verification checkpoints for desktop refresh.** Audit verification is bounded and typed, but persisted incremental checkpoints and paginated desktop refresh are not yet complete.
 - [x] **P3-10 — Add compatibility and downgrade policy.** The rollback runbook permits downgrade only when target binaries declare current config/state/OAuth schemas compatible; future/irreversible formats require complete backup restore or roll-forward.
 
 ## Final gate

@@ -17,6 +17,8 @@ mod desktop {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
+    use zeroize::{Zeroize, Zeroizing};
+
     use anyhow::{Context, Result, bail};
     use eframe::egui;
     use runonmine_core::secrets::{
@@ -133,7 +135,7 @@ mod desktop {
         pending_connector_delete: Option<String>,
         pending_credential_update: Option<(String, ConnectorKind)>,
         credential_client_id: String,
-        credential_secret: String,
+        credential_secret: Zeroizing<String>,
         policy_editor: PolicyEditorState,
         connector_wizard: ConnectorWizardState,
         connector_rx: Option<BackgroundCliTask>,
@@ -170,7 +172,7 @@ mod desktop {
                 pending_connector_delete: None,
                 pending_credential_update: None,
                 credential_client_id: String::new(),
-                credential_secret: String::new(),
+                credential_secret: Zeroizing::new(String::new()),
                 policy_editor: PolicyEditorState::default(),
                 connector_wizard: ConnectorWizardState::default(),
                 connector_rx: None,
@@ -599,7 +601,7 @@ mod desktop {
                 _ => bail!("This connector does not support credential updates"),
             }
             self.credential_client_id.clear();
-            self.credential_secret.clear();
+            self.credential_secret.zeroize();
             self.pending_credential_update = None;
             self.refresh()
         }
@@ -1400,7 +1402,7 @@ mod desktop {
             if let Some((id, kind)) = update_credentials {
                 self.pending_credential_update = Some((id, kind));
                 self.credential_client_id.clear();
-                self.credential_secret.clear();
+                self.credential_secret.zeroize();
             }
             if let Some(id) = remove {
                 self.pending_connector_delete = None;
@@ -1451,14 +1453,14 @@ mod desktop {
                             if ui.button("Cancel").clicked() {
                                 self.pending_credential_update = None;
                                 self.credential_client_id.clear();
-                                self.credential_secret.clear();
+                                self.credential_secret.zeroize();
                             }
                         });
                     });
                 if !open {
                     self.pending_credential_update = None;
                     self.credential_client_id.clear();
-                    self.credential_secret.clear();
+                    self.credential_secret.zeroize();
                 }
             }
         }

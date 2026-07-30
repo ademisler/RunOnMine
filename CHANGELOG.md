@@ -9,6 +9,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Store desktop credential, token, password and API-key form inputs in zeroizing memory and explicitly wipe existing submit/cancel/reset paths instead of retaining ordinary `String` buffers.
 - Make macOS, Windows and ARM platform CI unconditional for relevant pull requests and replace unsupported Rust-toolchain action inputs with a checked-in exact `rustup` installer.
 - Add global/critical/changed-line coverage ratchets, three additional fuzz targets, a 64-concurrent-call admission soak test, an observable MCP process epoch, and per-source OAuth registration limits.
 - Replace release-target substring matching with an exact six-target allowlist and validate per-target CycloneDX 1.6 SBOM provenance before upload.
