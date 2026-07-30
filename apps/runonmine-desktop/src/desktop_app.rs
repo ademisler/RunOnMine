@@ -27,7 +27,9 @@ use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
 use crate::theme::{self, Icon as UiIcon, StatusTone};
 use runonmine_oauth::SqliteOAuthStore;
 use runonmine_platform::UserService;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tray_icon::{Icon, TrayIconBuilder};
 use uuid::Uuid;
 
@@ -86,9 +88,13 @@ impl RunOnMineDesktop {
             policy_editor: PolicyEditorState::default(),
             connector_wizard: ConnectorWizardState::default(),
             connector_rx: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tray: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             open_menu_id: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             lock_menu_id: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             quit_menu_id: None,
         };
         if let Err(error) = app.initialize() {
@@ -108,11 +114,13 @@ impl RunOnMineDesktop {
         let store = StateStore::open(&paths.state_db())?;
         self.config = Some(config);
         self.store = Some(store);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.create_tray();
         self.start_refresh()?;
         Ok(())
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn create_tray(&mut self) {
         let menu = Menu::new();
         let open = MenuItem::new("Open RunOnMine", true, None);
@@ -193,6 +201,7 @@ impl RunOnMineDesktop {
             "Agent stopped".to_owned()
         };
         self.config = Some(snapshot.config);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(tray) = &self.tray {
             let _result = tray.set_tooltip(Some(&format!("RunOnMine — {}", self.status)));
         }
@@ -213,14 +222,12 @@ impl RunOnMineDesktop {
     }
 
     fn emergency_lock(&mut self) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        let arguments = vec!["lock".to_owned(), "--system".to_owned()];
-        #[cfg(not(target_os = "linux"))]
         let arguments = vec!["lock".to_owned()];
         let output = run_cli_capture(&arguments)?;
         self.diagnostics = output;
         self.start_refresh()?;
         "Locked — restart explicitly to restore access".clone_into(&mut self.status);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(tray) = &self.tray {
             let _result = tray.set_tooltip(Some("RunOnMine — locked"));
         }
@@ -538,6 +545,7 @@ impl RunOnMineDesktop {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn process_menu(&mut self, context: &egui::Context) {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if self.open_menu_id.as_ref() == Some(&event.id) {
@@ -565,6 +573,7 @@ impl RunOnMineDesktop {
 
 impl eframe::App for RunOnMineDesktop {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.process_menu(context);
         self.poll_doctor();
         self.poll_connector_command();
@@ -651,6 +660,7 @@ fn run_cli_capture(arguments: &[String]) -> Result<String> {
     run_cli(&sibling_cli()?, arguments, None)
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn app_icon() -> Result<Icon> {
     const SIZE: usize = 32;
     let mut rgba = vec![0_u8; SIZE * SIZE * 4];

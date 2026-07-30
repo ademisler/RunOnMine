@@ -29,6 +29,9 @@ enum XtaskCommand {
     Package {
         #[arg(long)]
         target: String,
+        /// Build the standalone Linux desktop package variant.
+        #[arg(long)]
+        desktop: bool,
     },
     /// Merge the two macOS architecture builds into universal binaries.
     UniversalMacos,
@@ -36,6 +39,9 @@ enum XtaskCommand {
     StagePackager {
         #[arg(long)]
         target: String,
+        /// Stage the standalone Linux desktop package variant.
+        #[arg(long)]
+        desktop: bool,
     },
     /// Create SHA-256 files for every regular artifact in dist/.
     Checksums,
@@ -45,6 +51,9 @@ enum XtaskCommand {
         path: PathBuf,
         #[arg(long)]
         target: String,
+        /// Validate the standalone Linux desktop package manifest.
+        #[arg(long)]
+        desktop: bool,
     },
     /// Fail unless all package and packager versions match the workspace version.
     VerifyVersions,
@@ -73,11 +82,15 @@ enum XtaskCommand {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        XtaskCommand::Package { target } => package(&target),
+        XtaskCommand::Package { target, desktop } => package(&target, desktop),
         XtaskCommand::UniversalMacos => universal_macos(),
-        XtaskCommand::StagePackager { target } => stage_packager(&target),
+        XtaskCommand::StagePackager { target, desktop } => stage_packager(&target, desktop),
         XtaskCommand::Checksums => checksums(),
-        XtaskCommand::ValidateSbom { path, target } => validate_sbom_file(&path, &target),
+        XtaskCommand::ValidateSbom {
+            path,
+            target,
+            desktop,
+        } => validate_sbom_file(&path, &target, desktop),
         XtaskCommand::VerifyVersions => verify_versions(),
         XtaskCommand::SyncVersions => sync_versions(),
         XtaskCommand::VerifyReleaseTag { tag } => verify_release_tag(&tag),
@@ -89,11 +102,12 @@ fn main() -> Result<()> {
     }
 }
 
-const PACKAGER_CONFIGS: [&str; 4] = [
+const PACKAGER_CONFIGS: [&str; 5] = [
     "packaging/Packager.macos.toml",
     "packaging/Packager.windows.toml",
     "packaging/Packager.linux-x86_64.toml",
     "packaging/Packager.linux-aarch64.toml",
+    "packaging/Packager.linux-desktop-x86_64.toml",
 ];
 
 fn packager_string(table: &toml::Table, relative: &str, keys: &[&str]) -> Result<String> {
@@ -443,13 +457,24 @@ impl ReleaseTarget {
     }
 }
 
-#[cfg(test)]
-fn expected_binaries(target: &str) -> Result<&'static [&'static str]> {
-    Ok(ReleaseTarget::parse(target)?.binaries())
+fn package_binaries(target: ReleaseTarget, desktop: bool) -> Result<&'static [&'static str]> {
+    if desktop {
+        if target != ReleaseTarget::LinuxX86_64 {
+            bail!("the desktop package variant is supported only for x86_64-unknown-linux-gnu");
+        }
+        return Ok(&DESKTOP_BINARIES);
+    }
+    Ok(target.binaries())
 }
 
-fn package(target: &str) -> Result<()> {
+#[cfg(test)]
+fn expected_binaries(target: &str, desktop: bool) -> Result<&'static [&'static str]> {
+    package_binaries(ReleaseTarget::parse(target)?, desktop)
+}
+
+fn package(target: &str, desktop: bool) -> Result<()> {
     let release_target = ReleaseTarget::parse(target)?;
+    let binaries = package_binaries(release_target, desktop)?;
     let root = workspace_root()?;
     let release_dir = root
         .join("target")
@@ -457,7 +482,15 @@ fn package(target: &str) -> Result<()> {
         .join("release");
     let dist = root.join("dist");
     fs::create_dir_all(&dist)?;
-    let package_name = format!("runonmine-{VERSION}-{}-unsigned", release_target.as_str());
+    let package_prefix = if desktop {
+        "runonmine-desktop"
+    } else {
+        "runonmine"
+    };
+    let package_name = format!(
+        "{package_prefix}-{VERSION}-{}-unsigned",
+        release_target.as_str()
+    );
     let staging = root
         .join("target")
         .join("package-staging")
@@ -468,7 +501,7 @@ fn package(target: &str) -> Result<()> {
     fs::create_dir_all(&staging)?;
 
     let mut included = Vec::new();
-    for binary in release_target.binaries() {
+    for binary in binaries {
         let filename = format!("{binary}{}", release_target.executable_suffix());
         let source = release_dir.join(&filename);
         if !source.is_file() {
@@ -484,7 +517,7 @@ fn package(target: &str) -> Result<()> {
     fs::copy(root.join("README.md"), staging.join("README.md"))?;
     let sbom_path = dist.join(format!("{package_name}.sbom.json"));
     let sbom = cyclonedx_sbom(&root, release_target, &included)?;
-    validate_sbom(&sbom, release_target)?;
+    validate_sbom(&sbom, release_target, binaries)?;
     fs::write(&sbom_path, serde_json::to_vec_pretty(&sbom)?)?;
 
     let archive = match release_target.archive_extension() {
@@ -550,8 +583,9 @@ fn universal_macos() -> Result<()> {
     Ok(())
 }
 
-fn stage_packager(target: &str) -> Result<()> {
+fn stage_packager(target: &str, desktop: bool) -> Result<()> {
     let release_target = ReleaseTarget::parse(target)?;
+    let binaries = package_binaries(release_target, desktop)?;
     let root = workspace_root()?;
     let source = root
         .join("target")
@@ -562,9 +596,9 @@ fn stage_packager(target: &str) -> Result<()> {
         fs::remove_dir_all(&staging)?;
     }
     fs::create_dir_all(&staging)?;
-    let expected = release_target.binaries().len();
+    let expected = binaries.len();
     let mut copied = 0_usize;
-    for binary in release_target.binaries() {
+    for binary in binaries {
         let filename = format!("{binary}{}", release_target.executable_suffix());
         let path = source.join(&filename);
         if path.is_file() {
@@ -786,13 +820,14 @@ fn source_revision(root: &Path) -> Result<String> {
     Ok(revision.to_ascii_lowercase())
 }
 
-fn validate_sbom_file(path: &Path, target: &str) -> Result<()> {
+fn validate_sbom_file(path: &Path, target: &str, desktop: bool) -> Result<()> {
     let release_target = ReleaseTarget::parse(target)?;
+    let binaries = package_binaries(release_target, desktop)?;
     let value: Value = serde_json::from_slice(&fs::read(path)?)?;
-    validate_sbom(&value, release_target)
+    validate_sbom(&value, release_target, binaries)
 }
 
-fn validate_sbom(value: &Value, target: ReleaseTarget) -> Result<()> {
+fn validate_sbom(value: &Value, target: ReleaseTarget, binaries: &[&str]) -> Result<()> {
     if value["bomFormat"] != "CycloneDX" || value["specVersion"] != "1.6" {
         bail!("SBOM is not CycloneDX 1.6");
     }
@@ -839,8 +874,7 @@ fn validate_sbom(value: &Value, target: ReleaseTarget) -> Result<()> {
     }
     let included = property("runonmine:included-binaries")
         .context("SBOM included-binaries property is missing")?;
-    let expected = target
-        .binaries()
+    let expected = binaries
         .iter()
         .map(|binary| format!("{binary}{}", target.executable_suffix()))
         .collect::<Vec<_>>()
@@ -1048,7 +1082,7 @@ resources = ["../README.md"]
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert_eq!(sbom["metadata"]["properties"][0]["value"], "a".repeat(64));
-        validate_sbom(&sbom, ReleaseTarget::LinuxX86_64)?;
+        validate_sbom(&sbom, ReleaseTarget::LinuxX86_64, &HEADLESS_BINARIES)?;
         Ok(())
     }
 
@@ -1103,17 +1137,23 @@ resources = ["../README.md"]
     #[test]
     fn package_manifest_is_exact_for_each_platform_family() -> Result<()> {
         assert_eq!(
-            expected_binaries("x86_64-unknown-linux-gnu")?,
+            expected_binaries("x86_64-unknown-linux-gnu", false)?,
             &HEADLESS_BINARIES
         );
         assert_eq!(
-            expected_binaries("universal-apple-darwin")?,
+            expected_binaries("x86_64-unknown-linux-gnu", true)?,
             &DESKTOP_BINARIES
         );
         assert_eq!(
-            expected_binaries("x86_64-pc-windows-msvc")?,
+            expected_binaries("universal-apple-darwin", false)?,
             &DESKTOP_BINARIES
         );
+        assert_eq!(
+            expected_binaries("x86_64-pc-windows-msvc", false)?,
+            &DESKTOP_BINARIES
+        );
+        assert!(expected_binaries("aarch64-unknown-linux-gnu", true).is_err());
+        assert!(expected_binaries("universal-apple-darwin", true).is_err());
         for spoofed in [
             "x86_64-unknown-linux-gnu-extra",
             "linux",

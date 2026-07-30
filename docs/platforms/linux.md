@@ -8,6 +8,44 @@ cargo build --release --no-default-features \
   -p runonmine -p runonmine-agent -p runonmine-helper
 ```
 
+## Desktop control center
+
+The x86_64 desktop package is a standalone alternative to the headless DEB. It
+installs `runonmine`, `runonmine-agent`, `runonmine-helper`, and
+`runonmine-desktop` together under `/usr/bin`, plus a validated freedesktop menu
+entry and icon. Do not install the headless and desktop DEBs together because
+both intentionally own the same CLI and service binaries.
+
+On Ubuntu 24.04, source builds require the X11/Wayland, PipeWire, EGL, GBM, DRM,
+and XKB development libraries used by eframe and optional desktop-control
+capture:
+
+```console
+sudo apt-get install --yes --no-install-recommends \
+  dbus-x11 pkg-config xvfb \
+  libdrm-dev libegl1-mesa-dev libgbm-dev \
+  libpipewire-0.3-dev libspa-0.2-dev \
+  libwayland-dev libx11-dev libxcb1-dev \
+  libxkbcommon-dev libxkbcommon-x11-0
+cargo build --release --locked --target x86_64-unknown-linux-gnu \
+  -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
+```
+
+The control center is a normal Linux window and taskbar application. Tray-menu
+support remains compiled only on macOS and Windows, avoiding a GTK/AppIndicator
+dependency and its separate event-loop requirements on Linux. Install a built
+candidate and start the user service with:
+
+```console
+sudo apt install ./runonmine-desktop_*_amd64.deb
+runonmine setup --root /absolute/path/to/a/project
+runonmine service install
+runonmine-desktop
+```
+
+The desktop emergency lock calls the current user's `runonmine lock`; it does
+not request the root-only `--system` path.
+
 ## Per-user service
 
 Install the normal systemd user unit beside the current account:

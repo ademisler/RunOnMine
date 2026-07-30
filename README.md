@@ -229,6 +229,19 @@ cargo build --release --no-default-features \
   -p runonmine -p runonmine-agent -p runonmine-helper
 ```
 
+On Linux x86_64, the standalone `runonmine-desktop` DEB includes the control
+center plus the CLI, agent, and helper. The Linux window is a normal taskbar
+application; the macOS/Windows tray integration is not compiled on Linux, so no
+GTK/AppIndicator runtime is required. Build and smoke-test it under X11 with:
+
+```console
+cargo build --release --target x86_64-unknown-linux-gnu \
+  -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
+RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a \
+  ./scripts/acceptance/desktop-launch-smoke.sh \
+  target/x86_64-unknown-linux-gnu/release/runonmine-desktop
+```
+
 Release candidates are unsigned. The release workflow creates portable `cargo-dist` archives, native `cargo-packager` installers, CycloneDX SBOMs with dependency edges and Cargo.lock checksums, and SHA-256 artifact checksum files, then opens a draft GitHub prerelease. It never changes repository visibility.
 
 The legacy reference under `Eski örnek` is intentionally ignored and must not

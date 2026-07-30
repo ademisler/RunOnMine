@@ -136,6 +136,55 @@ jobs:
             target/distrib/*
           if-no-files-found: error
 
+
+  linux-desktop:
+    needs: release-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus-x11 desktop-file-utils pkg-config xvfb \
+            libdrm-dev libegl1-mesa-dev libgbm-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-0
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-unknown-linux-gnu
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Build Linux desktop applications
+        run: >-
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
+      - name: Launch Linux desktop under Xvfb
+        run: >-
+          RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a
+          ./scripts/acceptance/desktop-launch-smoke.sh
+          target/x86_64-unknown-linux-gnu/release/runonmine-desktop
+      - run: cargo run --locked -p xtask -- package --target x86_64-unknown-linux-gnu --desktop
+      - name: Validate Linux desktop SBOM and archive
+        run: |
+          sbom=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.sbom.json' -print -quit)
+          archive=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.tar.gz' -print -quit)
+          cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target x86_64-unknown-linux-gnu --desktop
+          ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+      - run: cargo run --locked -p xtask -- stage-packager --target x86_64-unknown-linux-gnu --desktop
+      - run: ./packaging/package-linux-desktop.sh
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-linux-desktop-x86_64
+          path: dist/*
+          if-no-files-found: error
+
   windows:
     needs: release-plan
     runs-on: windows-2025
@@ -172,7 +221,7 @@ jobs:
           if-no-files-found: error
 
   publish-draft:
-    needs: [macos-universal, linux, windows]
+    needs: [macos-universal, linux, linux-desktop, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

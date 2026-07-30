@@ -41,10 +41,14 @@ fn argument_hash_does_not_expose_arguments() -> Result<()> {
 
 #[test]
 fn approval_preview_shows_target_and_redacts_common_secrets() {
+    let authorization_header = format!("{} {}", "Bearer", "top-secret");
+    let command = format!(
+        "curl -H 'Authorization: {authorization_header}' 'https://example.com?token=abc123'"
+    );
     let preview = approval_preview(
         "shell_exec",
         &json!({
-            "command": "curl -H 'Authorization: Bearer top-secret' 'https://example.com?token=abc123'",
+            "command": command,
             "cwd": "/tmp/project",
             "timeout_seconds": 30
         }),

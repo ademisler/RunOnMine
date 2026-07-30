@@ -1,0 +1,41 @@
+name = "runonmine"
+product-name = "RunOnMine"
+version = "0.1.0-beta.1"
+identifier = "dev.runonmine.app"
+description = "Let AI work on the machines you own."
+long-description = "RunOnMine is a local-first MCP security control center. This standalone Linux desktop package includes the CLI, agent, desktop application, and optional privileged-helper binary. The helper remains uninstalled and inactive until explicitly configured by the local owner."
+homepage = "https://github.com/ademisler/RunOnMine"
+authors = ["RunOnMine contributors"]
+license-file = "../LICENSE"
+binaries-dir = "../target/packager-input"
+out-dir = "../dist"
+target-triple = "x86_64-unknown-linux-gnu"
+formats = ["deb"]
+category = "Developer Tool"
+icons = ["assets/runonmine.png"]
+resources = ["../README.md"]
+binaries = [
+  { path = "runonmine-desktop", main = true },
+  { path = "runonmine", main = false },
+  { path = "runonmine-agent", main = false },
+  { path = "runonmine-helper", main = false },
+]
+
+[deb]
+package-name = "runonmine-desktop"
+section = "utils"
+priority = "optional"
+depends = [
+  "libc6 (>= 2.35)",
+  "libgcc-s1",
+  "libgbm1",
+  "libdrm2",
+  "libxcb1",
+  "libx11-6",
+  "libxkbcommon-x11-0",
+  "libwayland-client0",
+  "libegl1",
+  "libgl1",
+  "libpipewire-0.3-0t64 | libpipewire-0.3-0",
+  "libdbus-1-3",
+]

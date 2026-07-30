@@ -60,6 +60,80 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+
+  linux-desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus-x11 desktop-file-utils pkg-config xvfb \
+            libdrm-dev libegl1-mesa-dev libgbm-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-0
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-unknown-linux-gnu
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Run isolated CLI and MCP acceptance
+        run: |
+          ./scripts/acceptance/cli-smoke.sh
+          RUNONMINE_MCP_SOAK_ITERATIONS=25 ./scripts/acceptance/mcp-http-smoke.sh
+      - name: Build Linux desktop applications
+        run: >-
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
+      - name: Launch release desktop under Xvfb
+        run: >-
+          RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a
+          ./scripts/acceptance/desktop-launch-smoke.sh
+          target/x86_64-unknown-linux-gnu/release/runonmine-desktop
+      - run: cargo run --locked -p xtask -- package --target x86_64-unknown-linux-gnu --desktop
+      - name: Validate desktop SBOM and portable artifact
+        run: |
+          sbom=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.sbom.json' -print -quit)
+          archive=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.tar.gz' -print -quit)
+          cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target x86_64-unknown-linux-gnu --desktop
+          ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+      - run: cargo run --locked -p xtask -- stage-packager --target x86_64-unknown-linux-gnu --desktop
+      - run: ./packaging/package-linux-desktop.sh
+      - name: Install, launch, and remove the desktop DEB
+        run: |
+          deb=$(find dist -maxdepth 1 -name '*.deb' -print -quit)
+          test -n "$deb"
+          sudo dpkg --install "$deb"
+          test -x /usr/bin/runonmine
+          test -x /usr/bin/runonmine-agent
+          test -x /usr/bin/runonmine-helper
+          test -x /usr/bin/runonmine-desktop
+          test -f /usr/share/applications/runonmine-desktop.desktop
+          desktop-file-validate /usr/share/applications/runonmine-desktop.desktop
+          grep -Fx 'Exec=runonmine-desktop ' /usr/share/applications/runonmine-desktop.desktop
+          grep -Fx 'Icon=runonmine-desktop' /usr/share/applications/runonmine-desktop.desktop
+          RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a \
+            ./scripts/acceptance/desktop-launch-smoke.sh /usr/bin/runonmine-desktop
+          sudo dpkg --remove runonmine-desktop
+          test ! -e /usr/bin/runonmine-desktop
+          test ! -e /usr/share/applications/runonmine-desktop.desktop
+      - name: Write Linux desktop preflight evidence
+        run: |
+          archive=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.tar.gz' -print -quit)
+          python3 scripts/acceptance/write-artifact-preflight.py \
+            --platform linux-desktop-x86_64 --artifact "$archive" \
+            --output dist/linux-desktop-x86_64-preflight.json \
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,deb_install,uninstall,residue_check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-linux-desktop-x86_64-preflight
+          path: dist/*
+          if-no-files-found: error
+
   macos:
     runs-on: macos-15
     timeout-minutes: 150

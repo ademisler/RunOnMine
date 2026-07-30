@@ -76,3 +76,14 @@ This acceptance does not substitute for Developer ID signing, Apple
 notarization, or a real operating-system reboot. Unsigned local artifacts are
 expected to fail Gatekeeper assessment until the release credentials are
 provided.
+
+## Linux desktop package acceptance
+
+The Ubuntu 24.04 x86_64 desktop preflight builds all four binaries with desktop
+control enabled, launches the release control center under an isolated D-Bus
+session and Xvfb, creates a four-binary portable archive plus CycloneDX SBOM,
+and builds the standalone `runonmine-desktop` DEB. The job installs that DEB,
+validates its freedesktop entry, launches `/usr/bin/runonmine-desktop`, removes
+the package, and verifies that its executable and menu entry are gone. The
+headless Linux package remains a separate artifact and is not replaced by this
+acceptance path.

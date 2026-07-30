@@ -5,6 +5,10 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Make MCP HTTP acceptance own and terminate the real agent PID, with bounded TERM/KILL cleanup, so successful smoke runs cannot orphan listeners or deleted temporary state.
+- Add a standalone Linux x86_64 desktop DEB with all four RunOnMine binaries, a freedesktop menu entry and icon, four-binary SBOM/archive provenance, Xvfb launch acceptance, and real install/remove preflight coverage.
+- Compile tray integration only on macOS and Windows so the Linux control center builds without GTK/AppIndicator, and keep Linux emergency lock scoped to the current user service.
+
 - Restore macOS desktop compilation by declaring its direct Serde dependency and remove platform-only warning regressions exposed by full-feature Clippy.
 - Make every cargo-packager 0.11.8 configuration self-identifying and resolve license, binary, output, and resource paths from the configuration directory; add an xtask regression gate for this contract.
 - Validate the universal macOS DMG on a physical Apple-silicon Mac through native and Rosetta launches, LaunchAgent lifecycle, Streamable HTTP MCP approval flow, all desktop navigation views, retained-data uninstall, full purge, and user-state restoration. Developer ID signing, notarization, and reboot evidence remain separate release gates.

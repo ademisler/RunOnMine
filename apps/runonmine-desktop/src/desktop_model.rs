@@ -6,7 +6,9 @@ use runonmine_core::{
     PersistentGrant, StateStore,
 };
 use runonmine_oauth::{OAuthSession, RegisteredClient};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tray_icon::TrayIcon;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tray_icon::menu::MenuId;
 use url::Url;
 use uuid::Uuid;
@@ -98,8 +100,12 @@ pub(super) struct RunOnMineDesktop {
     pub(super) policy_editor: PolicyEditorState,
     pub(super) connector_wizard: ConnectorWizardState,
     pub(super) connector_rx: Option<BackgroundCliTask>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) tray: Option<TrayIcon>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) open_menu_id: Option<MenuId>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) lock_menu_id: Option<MenuId>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) quit_menu_id: Option<MenuId>,
 }

@@ -16,11 +16,21 @@ fi
 
 sandbox=$(mktemp -d)
 agent_pid=""
-cleanup() {
-  if [ -n "$agent_pid" ]; then
-    kill "$agent_pid" 2>/dev/null || true
-    wait "$agent_pid" 2>/dev/null || true
+stop_agent() {
+  [ -n "$agent_pid" ] || return 0
+  kill "$agent_pid" 2>/dev/null || true
+  for _ in $(seq 1 100); do
+    kill -0 "$agent_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 "$agent_pid" 2>/dev/null; then
+    kill -KILL "$agent_pid" 2>/dev/null || true
   fi
+  wait "$agent_pid" 2>/dev/null || true
+  agent_pid=""
+}
+cleanup() {
+  stop_agent
   rm -rf "$sandbox"
 }
 trap cleanup EXIT HUP INT TERM
@@ -62,7 +72,17 @@ PYCONFIG
 credential="$sandbox/local-http.json"
 run_env "$cli" connect local-http enable --token-output "$credential" >/dev/null
 
-run_env "$agent" run >"$sandbox/agent.log" 2>&1 &
+env \
+  HOME="$sandbox/home" \
+  USERPROFILE="$sandbox/home" \
+  APPDATA="$sandbox/appdata" \
+  LOCALAPPDATA="$sandbox/localappdata" \
+  XDG_CONFIG_HOME="$sandbox/xdg-config" \
+  XDG_STATE_HOME="$sandbox/xdg-state" \
+  XDG_DATA_HOME="$sandbox/xdg-data" \
+  RUNONMINE_TEST_FILE_SECRETS=1 \
+  RUNONMINE_MASTER_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+  "$agent" run >"$sandbox/agent.log" 2>&1 &
 agent_pid=$!
 ready=0
 for _ in $(seq 1 100); do
@@ -121,9 +141,7 @@ fi
 cat "$client_stdout"
 grep -Fx 'approved MCP acceptance write' "$approved_path" >/dev/null
 
-kill "$agent_pid"
-wait "$agent_pid" 2>/dev/null || [ "$?" -eq 143 ]
-agent_pid=""
+stop_agent
 run_env "$cli" uninstall --purge --confirm PURGE >/dev/null
 
 echo "RunOnMine MCP HTTP smoke test passed."

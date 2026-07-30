@@ -23,11 +23,13 @@ runonmine-oauth.workspace = true
 runonmine-platform.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tray-icon = { workspace = true, optional = true }
 uuid.workspace = true
 url.workspace = true
 zeroize.workspace = true
 secrecy.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tray-icon = { workspace = true, optional = true }
 
 [lints]
 workspace = true
