@@ -4595,6 +4595,7 @@ dependencies = [
  "clap",
  "runonmine-core",
  "runonmine-mcp",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
