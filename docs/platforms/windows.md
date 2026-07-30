@@ -31,3 +31,5 @@ The privileged helper retains a handle opened with
 volume serial, file index, size, last-write identity and SHA-256 are rechecked
 before process creation; write/delete/replace opens are blocked while the handle
 is retained.
+
+Helper upgrades stage the executable and policy before stopping the Windows service. The stopped service releases its executable handle; failed service creation/start or health validation restores the previous files and prior installed/running service state.

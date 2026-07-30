@@ -1,14 +1,18 @@
 //! Installation and lifecycle management for the opt-in privileged helper.
 
 use std::fs;
-use std::io::Write as _;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, Output};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use super::install_transaction::{
+    InstallFault, InstallRequest, ServiceLifecycle, ServiceState, install_transaction,
+};
 use super::{
     AdminPolicy, AdminProgramRule, HelperClient, HelperRequest, HelperResult, OwnerIdentity,
 };
@@ -57,6 +61,8 @@ impl HelperManager {
         super::require_installer_identity()?;
         options.owner.validate()?;
         let policy = AdminPolicy::build(options.owner.clone(), &options.allowed_programs)?;
+        let policy_bytes =
+            serde_json::to_vec_pretty(&policy).context("failed to encode helper policy")?;
         let paths = SystemPaths::discover()?;
         validate_source_executable(&self.source_executable)?;
         prepare_system_directory(&paths.binary)?;
@@ -64,29 +70,22 @@ impl HelperManager {
         if let Some(service) = &paths.service_definition {
             prepare_system_directory(service)?;
         }
-
-        atomic_copy_executable(&self.source_executable, &paths.binary)?;
-        atomic_write_json(&paths.policy, &policy, 0o600)?;
-        install_platform_service(&paths)?;
-
-        let client = HelperClient::new(options.owner)?;
-        let mut last_error = None;
-        for _ in 0..30 {
-            match client.request(&HelperRequest::health()).await {
-                Ok(response) if matches!(response.result, HelperResult::Healthy { .. }) => {
-                    return Ok(());
-                }
-                Ok(_) => {
-                    last_error = Some("helper returned an unexpected health response".to_owned());
-                }
-                Err(error) => last_error = Some(error.to_string()),
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        bail!(
-            "the helper service was installed but did not pass its health check: {}",
-            last_error.unwrap_or_else(|| "no response".to_owned())
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let service_definition = Some(platform_service_definition(&paths));
+        #[cfg(windows)]
+        let service_definition: Option<Vec<u8>> = None;
+        install_transaction(
+            InstallRequest {
+                paths: &paths,
+                source_executable: &self.source_executable,
+                policy_bytes: &policy_bytes,
+                service_definition: service_definition.as_deref(),
+                owner: options.owner,
+                fault: InstallFault::None,
+            },
+            &PlatformServiceLifecycle,
         )
+        .await
     }
 
     pub fn uninstall(&self) -> Result<()> {
@@ -207,11 +206,11 @@ fn parse_uid(value: &str) -> Result<u32> {
 }
 
 #[derive(Clone, Debug)]
-struct SystemPaths {
-    binary: PathBuf,
-    policy: PathBuf,
-    service_definition: Option<PathBuf>,
-    socket: PathBuf,
+pub(super) struct SystemPaths {
+    pub(super) binary: PathBuf,
+    pub(super) policy: PathBuf,
+    pub(super) service_definition: Option<PathBuf>,
+    pub(super) socket: PathBuf,
 }
 
 impl SystemPaths {
@@ -295,73 +294,7 @@ fn prepare_system_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn atomic_copy_executable(source: &Path, destination: &Path) -> Result<()> {
-    reject_existing_symlink(destination)?;
-    let parent = destination
-        .parent()
-        .context("helper destination has no parent directory")?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    let mut input = fs::File::open(source).context("failed to open the helper executable")?;
-    std::io::copy(&mut input, temporary.as_file_mut())
-        .context("failed to stage the helper executable")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o755))?;
-    }
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(destination)
-        .map_err(|error| error.error)
-        .context("failed to activate helper executable")?;
-    #[cfg(windows)]
-    harden_windows_file_acl(destination, true)?;
-    #[cfg(unix)]
-    fs::File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-fn atomic_write_json<T>(destination: &Path, value: &T, mode: u32) -> Result<()>
-where
-    T: Serialize,
-{
-    let bytes = serde_json::to_vec_pretty(value).context("failed to encode helper policy")?;
-    atomic_write(destination, &bytes, mode)?;
-    #[cfg(windows)]
-    harden_windows_file_acl(destination, false)?;
-    Ok(())
-}
-
-fn atomic_write(destination: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    reject_existing_symlink(destination)?;
-    let parent = destination
-        .parent()
-        .context("system file has no parent directory")?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).context("failed to stage a helper system file")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(mode))?;
-    }
-    #[cfg(not(unix))]
-    let _ = mode;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(destination)
-        .map_err(|error| error.error)
-        .context("failed to activate helper system file")?;
-    #[cfg(unix)]
-    fs::File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-fn reject_existing_symlink(path: &Path) -> Result<()> {
+pub(super) fn reject_existing_symlink(path: &Path) -> Result<()> {
     if path
         .symlink_metadata()
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -371,7 +304,7 @@ fn reject_existing_symlink(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_regular_file_if_present(path: &Path) -> Result<()> {
+pub(super) fn remove_regular_file_if_present(path: &Path) -> Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -381,6 +314,72 @@ fn remove_regular_file_if_present(path: &Path) -> Result<()> {
         bail!("refusing to remove a non-regular helper system path");
     }
     fs::remove_file(path).context("failed to remove helper system file")
+}
+
+pub(super) fn apply_artifact_permissions(path: &Path, executable: bool, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("failed to secure helper artifact {}", path.display()))?;
+    }
+    #[cfg(windows)]
+    harden_windows_file_acl(path, executable)?;
+    #[cfg(not(windows))]
+    let _ = executable;
+    #[cfg(not(unix))]
+    let _ = mode;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PlatformServiceLifecycle;
+
+impl ServiceLifecycle for PlatformServiceLifecycle {
+    fn state(&self, paths: &SystemPaths) -> Result<ServiceState> {
+        platform_service_state(paths)
+    }
+
+    fn stop(&self, paths: &SystemPaths) -> Result<()> {
+        stop_platform_service_for_update(paths)
+    }
+
+    fn activate(&self, paths: &SystemPaths) -> Result<()> {
+        activate_platform_service(paths)
+    }
+
+    fn restore(&self, paths: &SystemPaths, previous: ServiceState) -> Result<()> {
+        restore_platform_service(paths, previous)
+    }
+
+    fn health(
+        &self,
+        owner: OwnerIdentity,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>> {
+        Box::pin(wait_for_helper_health(owner))
+    }
+}
+
+async fn wait_for_helper_health(owner: OwnerIdentity) -> Result<()> {
+    let client = HelperClient::new(owner)?;
+    let mut last_error = None;
+    for _ in 0..30 {
+        match client.request(&HelperRequest::health()).await {
+            Ok(response) if matches!(response.result, HelperResult::Healthy { .. }) => {
+                return Ok(());
+            }
+            Ok(_) => {
+                last_error = Some("helper returned an unexpected health response".to_owned());
+            }
+            Err(error) => last_error = Some(error.to_string()),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!(
+        "the helper service did not pass its health check: {}",
+        last_error.unwrap_or_else(|| "no response".to_owned())
+    )
 }
 
 fn remove_empty_parent(path: &Path) -> Result<()> {
@@ -402,29 +401,153 @@ fn remove_empty_parent(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_platform_service(paths: &SystemPaths) -> Result<()> {
+fn platform_service_definition(paths: &SystemPaths) -> Vec<u8> {
+    let executable = xml_escape(&paths.binary.to_string_lossy());
+    format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\"><dict>\n\
+             <key>Label</key><string>{MACOS_SERVICE_LABEL}</string>\n\
+             <key>ProgramArguments</key><array><string>{executable}</string><string>serve</string></array>\n\
+             <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n\
+             <key>ProcessType</key><string>Background</string>\n\
+             <key>StandardOutPath</key><string>/var/log/runonmine-helper.log</string>\n\
+             <key>StandardErrorPath</key><string>/var/log/runonmine-helper.log</string>\n\
+             </dict></plist>\n"
+        )
+        .into_bytes()
+}
+
+#[cfg(target_os = "linux")]
+fn platform_service_definition(paths: &SystemPaths) -> Vec<u8> {
+    let executable = systemd_escape(&paths.binary.to_string_lossy());
+    format!(
+        "[Unit]\nDescription=RunOnMine opt-in privileged helper\nAfter=local-fs.target\n\n\
+             [Service]\nType=simple\nExecStart={executable} serve\nUser=root\nGroup=root\n\
+             Restart=on-failure\nRestartSec=2\nRuntimeDirectory=runonmine-helper\n\
+             RuntimeDirectoryMode=0755\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\n\
+             ReadWritePaths=/run/runonmine-helper\nLockPersonality=true\n\
+             [Install]\nWantedBy=multi-user.target\n"
+    )
+    .into_bytes()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_service_state(paths: &SystemPaths) -> Result<ServiceState> {
+    let loaded = Command::new("launchctl")
+        .args(["print", &format!("system/{MACOS_SERVICE_LABEL}")])
+        .output()
+        .context("failed to query the RunOnMine LaunchDaemon")?
+        .status
+        .success();
+    Ok(ServiceState {
+        installed: loaded
+            || paths
+                .service_definition
+                .as_ref()
+                .is_some_and(|definition| definition.is_file()),
+        enabled: loaded,
+        running: loaded,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn platform_service_state(paths: &SystemPaths) -> Result<ServiceState> {
+    let load_state = Command::new("systemctl")
+        .args([
+            "show",
+            "--property=LoadState",
+            "--value",
+            LINUX_SERVICE_NAME,
+        ])
+        .output()
+        .context("failed to query the RunOnMine helper unit load state")?;
+    let known_to_systemd = load_state.status.success()
+        && !matches!(
+            String::from_utf8_lossy(&load_state.stdout).trim(),
+            "" | "not-found"
+        );
+    let enabled = Command::new("systemctl")
+        .args(["is-enabled", LINUX_SERVICE_NAME])
+        .output()
+        .context("failed to query the RunOnMine helper enable state")?
+        .status
+        .success();
+    let running = Command::new("systemctl")
+        .args(["is-active", LINUX_SERVICE_NAME])
+        .output()
+        .context("failed to query the RunOnMine helper running state")?
+        .status
+        .success();
+    Ok(ServiceState {
+        installed: known_to_systemd
+            || paths
+                .service_definition
+                .as_ref()
+                .is_some_and(|definition| definition.is_file()),
+        enabled,
+        running,
+    })
+}
+
+#[cfg(windows)]
+fn platform_service_state(_paths: &SystemPaths) -> Result<ServiceState> {
+    let query = Command::new("sc.exe")
+        .args(["query", WINDOWS_SERVICE_NAME])
+        .output()
+        .context("failed to query the RunOnMine helper service")?;
+    let installed = query.status.success();
+    let query_text = format!(
+        "{} {}",
+        String::from_utf8_lossy(&query.stdout),
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let configuration = if installed {
+        Some(
+            Command::new("sc.exe")
+                .args(["qc", WINDOWS_SERVICE_NAME])
+                .output()
+                .context("failed to query the RunOnMine helper start type")?,
+        )
+    } else {
+        None
+    };
+    let enabled = configuration.as_ref().is_some_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("AUTO_START")
+    });
+    Ok(ServiceState {
+        installed,
+        enabled,
+        running: installed
+            && (query_text.contains("RUNNING") || query_text.contains("STATE              : 4")),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn stop_platform_service_for_update(_paths: &SystemPaths) -> Result<()> {
+    macos_bootout_allow_absent()
+}
+
+#[cfg(target_os = "linux")]
+fn stop_platform_service_for_update(_paths: &SystemPaths) -> Result<()> {
+    linux_service_command_allow_absent(
+        &["stop", LINUX_SERVICE_NAME],
+        "failed to stop the RunOnMine helper service",
+    )
+}
+
+#[cfg(windows)]
+fn stop_platform_service_for_update(_paths: &SystemPaths) -> Result<()> {
+    windows_stop_allow_absent()
+}
+
+#[cfg(target_os = "macos")]
+fn activate_platform_service(paths: &SystemPaths) -> Result<()> {
     let definition = paths
         .service_definition
         .as_ref()
         .context("LaunchDaemon definition path is unavailable")?;
-    let executable = xml_escape(&paths.binary.to_string_lossy());
-    let plist = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\"><dict>\n\
-         <key>Label</key><string>{MACOS_SERVICE_LABEL}</string>\n\
-         <key>ProgramArguments</key><array><string>{executable}</string><string>serve</string></array>\n\
-         <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n\
-         <key>ProcessType</key><string>Background</string>\n\
-         <key>StandardOutPath</key><string>/var/log/runonmine-helper.log</string>\n\
-         <key>StandardErrorPath</key><string>/var/log/runonmine-helper.log</string>\n\
-         </dict></plist>\n"
-    );
-    atomic_write(definition, plist.as_bytes(), 0o644)?;
-    let _ignored = Command::new("launchctl")
-        .args(["bootout", &format!("system/{MACOS_SERVICE_LABEL}")])
-        .output();
     command_success(
         Command::new("launchctl").args([
             "bootstrap",
@@ -436,55 +559,162 @@ fn install_platform_service(paths: &SystemPaths) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn install_platform_service(paths: &SystemPaths) -> Result<()> {
-    let definition = paths
-        .service_definition
-        .as_ref()
-        .context("systemd service definition path is unavailable")?;
-    let executable = systemd_escape(&paths.binary.to_string_lossy());
-    let unit = format!(
-        "[Unit]\nDescription=RunOnMine opt-in privileged helper\nAfter=local-fs.target\n\n\
-         [Service]\nType=simple\nExecStart={executable} serve\nUser=root\nGroup=root\n\
-         Restart=on-failure\nRestartSec=2\nRuntimeDirectory=runonmine-helper\n\
-         RuntimeDirectoryMode=0755\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\n\
-         ReadWritePaths=/run/runonmine-helper\nLockPersonality=true\n\
-         [Install]\nWantedBy=multi-user.target\n"
-    );
-    atomic_write(definition, unit.as_bytes(), 0o644)?;
+fn activate_platform_service(_paths: &SystemPaths) -> Result<()> {
     command_success(
         Command::new("systemctl").arg("daemon-reload"),
         "failed to reload systemd",
     )?;
     command_success(
-        Command::new("systemctl").args(["enable", "--now", LINUX_SERVICE_NAME]),
+        Command::new("systemctl").args(["enable", LINUX_SERVICE_NAME]),
         "failed to enable the RunOnMine helper service",
+    )?;
+    command_success(
+        Command::new("systemctl").args(["restart", LINUX_SERVICE_NAME]),
+        "failed to restart the RunOnMine helper service",
     )
 }
 
 #[cfg(windows)]
-fn install_platform_service(paths: &SystemPaths) -> Result<()> {
-    let command_line = format!("\"{}\" service", paths.binary.display());
-    let _ignored = Command::new("sc.exe")
-        .args(["stop", WINDOWS_SERVICE_NAME])
-        .output();
-    let _ignored = Command::new("sc.exe")
-        .args(["delete", WINDOWS_SERVICE_NAME])
-        .output();
+fn activate_platform_service(paths: &SystemPaths) -> Result<()> {
+    configure_windows_service(paths, true)?;
     command_success(
-        Command::new("sc.exe").args([
-            "create",
-            WINDOWS_SERVICE_NAME,
-            "binPath=",
-            &command_line,
-            "start=",
-            "auto",
-            "obj=",
-            "LocalSystem",
-            "DisplayName=",
-            "RunOnMine Privileged Helper",
-        ]),
-        "failed to create the RunOnMine LocalSystem service",
+        Command::new("sc.exe").args(["start", WINDOWS_SERVICE_NAME]),
+        "failed to start the RunOnMine LocalSystem service",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn restore_platform_service(paths: &SystemPaths, previous: ServiceState) -> Result<()> {
+    macos_bootout_allow_absent()?;
+    if previous.enabled || previous.running {
+        activate_platform_service(paths)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn restore_platform_service(_paths: &SystemPaths, previous: ServiceState) -> Result<()> {
+    command_success(
+        Command::new("systemctl").arg("daemon-reload"),
+        "failed to reload systemd during helper rollback",
     )?;
+    if !previous.installed {
+        return linux_service_command_allow_absent(
+            &["disable", "--now", LINUX_SERVICE_NAME],
+            "failed to remove the newly installed helper service",
+        );
+    }
+    if previous.enabled {
+        command_success(
+            Command::new("systemctl").args(["enable", LINUX_SERVICE_NAME]),
+            "failed to restore the helper enable state",
+        )?;
+    } else {
+        linux_service_command_allow_absent(
+            &["disable", LINUX_SERVICE_NAME],
+            "failed to restore the helper disabled state",
+        )?;
+    }
+    if previous.running {
+        command_success(
+            Command::new("systemctl").args(["start", LINUX_SERVICE_NAME]),
+            "failed to restart the restored helper service",
+        )
+    } else {
+        linux_service_command_allow_absent(
+            &["stop", LINUX_SERVICE_NAME],
+            "failed to restore the helper stopped state",
+        )
+    }
+}
+
+#[cfg(windows)]
+fn restore_platform_service(paths: &SystemPaths, previous: ServiceState) -> Result<()> {
+    windows_stop_allow_absent()?;
+    if !previous.installed {
+        return windows_delete_allow_absent();
+    }
+    configure_windows_service(paths, previous.enabled)?;
+    if previous.running {
+        command_success(
+            Command::new("sc.exe").args(["start", WINDOWS_SERVICE_NAME]),
+            "failed to restart the restored RunOnMine helper service",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bootout_allow_absent() -> Result<()> {
+    let output = Command::new("launchctl")
+        .args(["bootout", &format!("system/{MACOS_SERVICE_LABEL}")])
+        .output()
+        .context("failed to request RunOnMine LaunchDaemon shutdown")?;
+    if output.status.success() || output.status.code() == Some(3) {
+        Ok(())
+    } else {
+        bail!(
+            "failed to stop the RunOnMine LaunchDaemon: {}",
+            sanitized_output(&output)
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_service_command_allow_absent(args: &[&str], context: &str) -> Result<()> {
+    let output = Command::new("systemctl")
+        .args(args)
+        .output()
+        .with_context(|| context.to_owned())?;
+    let detail = sanitized_output(&output).to_ascii_lowercase();
+    if output.status.success()
+        || detail.contains("not loaded")
+        || detail.contains("not found")
+        || detail.contains("does not exist")
+    {
+        Ok(())
+    } else {
+        bail!("{context}: {}", sanitized_output(&output))
+    }
+}
+
+#[cfg(windows)]
+fn configure_windows_service(paths: &SystemPaths, automatic: bool) -> Result<()> {
+    let command_line = format!("\"{}\" service", paths.binary.display());
+    let start_type = if automatic { "auto" } else { "demand" };
+    if platform_service_installed()? {
+        command_success(
+            Command::new("sc.exe").args([
+                "config",
+                WINDOWS_SERVICE_NAME,
+                "binPath=",
+                &command_line,
+                "start=",
+                start_type,
+                "obj=",
+                "LocalSystem",
+                "DisplayName=",
+                "RunOnMine Privileged Helper",
+            ]),
+            "failed to update the RunOnMine LocalSystem service",
+        )?;
+    } else {
+        command_success(
+            Command::new("sc.exe").args([
+                "create",
+                WINDOWS_SERVICE_NAME,
+                "binPath=",
+                &command_line,
+                "start=",
+                start_type,
+                "obj=",
+                "LocalSystem",
+                "DisplayName=",
+                "RunOnMine Privileged Helper",
+            ]),
+            "failed to create the RunOnMine LocalSystem service",
+        )?;
+    }
     command_success(
         Command::new("sc.exe").args([
             "description",
@@ -492,11 +722,51 @@ fn install_platform_service(paths: &SystemPaths) -> Result<()> {
             "Opt-in RunOnMine privileged helper restricted to its installing user",
         ]),
         "failed to describe the RunOnMine LocalSystem service",
-    )?;
-    command_success(
-        Command::new("sc.exe").args(["start", WINDOWS_SERVICE_NAME]),
-        "failed to start the RunOnMine LocalSystem service",
     )
+}
+
+#[cfg(windows)]
+fn windows_stop_allow_absent() -> Result<()> {
+    let output = Command::new("sc.exe")
+        .args(["stop", WINDOWS_SERVICE_NAME])
+        .output()
+        .context("failed to request RunOnMine helper service shutdown")?;
+    let detail = sanitized_output(&output);
+    if detail.contains("1060") {
+        return Ok(());
+    }
+    if !output.status.success() && !detail.contains("1062") {
+        bail!("failed to stop the RunOnMine helper service: {detail}");
+    }
+    for _ in 0..50 {
+        let query = Command::new("sc.exe")
+            .args(["query", WINDOWS_SERVICE_NAME])
+            .output()
+            .context("failed to wait for RunOnMine helper service shutdown")?;
+        let query_detail = sanitized_output(&query);
+        if query_detail.contains("1060")
+            || query_detail.contains("STOPPED")
+            || query_detail.contains("STATE              : 1")
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bail!("the RunOnMine helper service did not stop before artifact activation")
+}
+
+#[cfg(windows)]
+fn windows_delete_allow_absent() -> Result<()> {
+    let output = Command::new("sc.exe")
+        .args(["delete", WINDOWS_SERVICE_NAME])
+        .output()
+        .context("failed to request RunOnMine helper service removal")?;
+    let detail = sanitized_output(&output);
+    if output.status.success() || detail.contains("1060") {
+        Ok(())
+    } else {
+        bail!("failed to delete the RunOnMine helper service: {detail}")
+    }
 }
 
 #[cfg(target_os = "macos")]

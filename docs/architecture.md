@@ -126,3 +126,13 @@ handle, retained through process creation, and revalidated immediately before
 spawn. Linux launches the descriptor path itself; Windows holds a non-write/non-
 delete-sharing handle; other platforms compare the retained handle with the
 current canonical path at the last possible point.
+
+## Transactional helper installation
+
+Helper installation is a staged transaction rather than a sequence of
+independent writes. The installer prepares the executable, policy and service
+definition in their destination directories, snapshots the previous artifacts
+and service state, stops the service, atomically activates the files, starts the
+platform service and verifies authenticated health. Any handled failure restores
+the old artifacts and installed/running state; an unsuccessful first install is
+fully removed.

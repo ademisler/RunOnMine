@@ -104,6 +104,36 @@ Flag values use the same schemas. A flag may be supplied as `--flag value` or
 `--flag=value`, but its normalized name, value type, and repeatability must match
 the profile exactly.
 
+## Transactional installation and rollback
+
+Installation prepares all three platform artifacts before touching the running
+helper:
+
+1. the helper executable is copied to a same-filesystem staging file;
+2. the normalized root/SYSTEM policy is serialized to a private staging file;
+3. the launchd plist or systemd unit is rendered to a staging file where the
+   platform uses a file-backed service definition.
+
+RunOnMine then snapshots the existing executable, policy, service definition,
+and whether the service was installed and running. Only after every stage and
+snapshot succeeds does it stop the old service and activate the new files. The
+new service must start and answer an authenticated helper health request before
+the transaction commits.
+
+A binary/policy/service-definition activation error, platform service start
+error, or failed health check triggers rollback. The failed service is stopped,
+all previous artifacts are restored in reverse order, the former installed and
+running state is recreated, and a previously running helper is health-checked
+again using the owner from its restored policy. A failed first installation
+removes all newly activated files and unregisters the new service instead of
+leaving a partial privileged installation.
+
+Staging files live in each destination's parent directory so activation does
+not cross filesystems. File modes and Windows ACL hardening are applied again
+after activation and restoration, and Unix parent directories are synchronized
+after each rename. This transaction handles reported installation failures;
+crash-recovery journaling is a separate lifecycle concern.
+
 ## Executable identity and spawn races
 
 Executable installation and every execution request use an open file handle,

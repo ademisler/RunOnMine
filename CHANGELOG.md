@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Make privileged-helper installation transactional: stage the binary, policy and service definition on their destination filesystems before stopping the service; snapshot the previous artifacts and installed/running state; activate, start and health-check the new helper; and restore every prior file and service state after partial activation, service-start or health failures.
 - Pin privileged-helper execution to a verified open executable: use `O_NOFOLLOW` handle inspection and `/proc/self/fd` inode execution on Linux, retain a read-sharing-only file handle plus volume/file-index identity on Windows, revalidate handle/path identity and SHA-256 immediately before spawn on other platforms, and reject in-place content changes.
 - Replace executable-only privileged-helper authorization with version-2 command profiles covering exact subcommands, typed flags and values, deny-first forbidden flags, exact positional schemas, response-file rejection and canonical path roots; make `--allow-program` argument-free and reject legacy broad-argument policies until explicit reinstall.
 - Enforce browser private-network policy with a Chromium-process-wide loopback proxy covering popups, dedicated/shared/service workers, background targets, HTTP(S), WebSockets, mixed DNS answers, and DNS rebinding; disable QUIC and non-proxied WebRTC UDP, and reject protected external CDP fail-closed.

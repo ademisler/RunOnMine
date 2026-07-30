@@ -73,3 +73,5 @@ Privileged helper execution is inode-pinned. The root-owned executable is opened
 with `O_NOFOLLOW`, verified and hashed through that handle, rehashed immediately
 before spawn, and executed through `/proc/self/fd/<fd>`. A pathname replacement
 after authorization cannot redirect the child to a different inode.
+
+Helper upgrades stage the executable, policy and systemd unit before stopping the service. A failed start or health check restores the previous files, reloads systemd, recreates the former enabled/running state and verifies the restored helper when it was previously running.

@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 mod arguments;
 mod executable;
+mod install_transaction;
 mod service;
 
 #[cfg(unix)]
