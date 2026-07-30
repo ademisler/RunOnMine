@@ -109,6 +109,7 @@ sharing it.
   access is a local-connector-only opt-in and remains blocked for remote connectors.
 - Secrets use the operating-system credential store, with an explicit encrypted headless Linux fallback. The encrypted file backend uses an owner-only cross-process lock so CLI, desktop, and agent updates cannot overwrite one another.
 - Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. Database directories are private, database/WAL/shared-memory files are owner-only, and worker threads are joined during shutdown. MCP authorization, approval, and audit paths use asynchronous worker replies.
+- OAuth clients, authorization state, codes, tokens, and refresh families are isolated by connector/issuer even when connectors share one local SQLite database.
 - Audit records contain argument summaries and hashes rather than raw command,
   token, cookie, or stdin contents.
 - Audit records form a tamper-evident chain and retain 30 days or 100 MiB by default.
@@ -169,4 +170,3 @@ be committed.
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
-- OAuth clients, codes, tokens, and refresh families are isolated by connector/issuer even when connectors share the same local SQLite state file.

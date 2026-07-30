@@ -1401,8 +1401,18 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn connector_namespaces_isolate_all_oauth_state_and_revocation() -> Result<(), StoreError> {
+    struct NamespaceFixture {
+        _directory: tempfile::TempDir,
+        connector_a: SqliteOAuthStore,
+        connector_b: SqliteOAuthStore,
+        admin: SqliteOAuthStore,
+        client_a: RegisteredClient,
+        client_b: RegisteredClient,
+        now: DateTime<Utc>,
+        redirect_uri: Url,
+    }
+
+    fn namespace_fixture() -> Result<NamespaceFixture, StoreError> {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("state.db");
         let connector_a = SqliteOAuthStore::open_scoped(&database, "connector-a")?;
@@ -1443,11 +1453,46 @@ mod tests {
             connector_b.register_client_limited(&client_b, &limits)?,
             RegistrationOutcome::Registered
         );
-        assert!(connector_a.client(&client_a.client_id)?.is_some());
-        assert!(connector_a.client(&client_b.client_id)?.is_none());
-        assert!(connector_b.client(&client_b.client_id)?.is_some());
-        assert!(connector_b.client(&client_a.client_id)?.is_none());
-        let clients = admin.registered_clients()?;
+        Ok(NamespaceFixture {
+            _directory: directory,
+            connector_a,
+            connector_b,
+            admin,
+            client_a,
+            client_b,
+            now,
+            redirect_uri,
+        })
+    }
+
+    #[test]
+    fn connector_namespaces_isolate_clients_and_authorizations() -> Result<(), StoreError> {
+        let fixture = namespace_fixture()?;
+        assert!(
+            fixture
+                .connector_a
+                .client(&fixture.client_a.client_id)?
+                .is_some()
+        );
+        assert!(
+            fixture
+                .connector_a
+                .client(&fixture.client_b.client_id)?
+                .is_none()
+        );
+        assert!(
+            fixture
+                .connector_b
+                .client(&fixture.client_b.client_id)?
+                .is_some()
+        );
+        assert!(
+            fixture
+                .connector_b
+                .client(&fixture.client_a.client_id)?
+                .is_none()
+        );
+        let clients = fixture.admin.registered_clients()?;
         assert_eq!(clients.len(), 2);
         assert_eq!(
             clients
@@ -1458,142 +1503,180 @@ mod tests {
         );
 
         let raw_state = SecretHash::from_slice(&[7_u8; 32])?;
-        for (store, client) in [(&connector_a, &client_a), (&connector_b, &client_b)] {
+        for (store, client) in [
+            (&fixture.connector_a, &fixture.client_a),
+            (&fixture.connector_b, &fixture.client_b),
+        ] {
             store.put_authorization(&PendingAuthorization {
                 provider_state_hash: raw_state,
                 client_id: client.client_id.clone(),
-                redirect_uri: redirect_uri.clone(),
+                redirect_uri: fixture.redirect_uri.clone(),
                 client_state: format!("state-{}", client.connector_id),
                 scopes: ScopeSet::machine_read(),
                 code_challenge: "challenge-value".to_owned(),
-                expires_at: now + chrono::Duration::minutes(5),
+                expires_at: fixture.now + chrono::Duration::minutes(5),
             })?;
         }
         assert_eq!(
-            connector_a.take_authorization(&raw_state, now)?.client_id,
-            client_a.client_id
+            fixture
+                .connector_a
+                .take_authorization(&raw_state, fixture.now)?
+                .client_id,
+            fixture.client_a.client_id
         );
         assert_eq!(
-            connector_b.take_authorization(&raw_state, now)?.client_id,
-            client_b.client_id
+            fixture
+                .connector_b
+                .take_authorization(&raw_state, fixture.now)?
+                .client_id,
+            fixture.client_b.client_id
         );
+        Ok(())
+    }
 
+    #[test]
+    fn connector_namespaces_isolate_consents() -> Result<(), StoreError> {
+        let fixture = namespace_fixture()?;
         let raw_csrf = SecretHash::from_slice(&[8_u8; 32])?;
         let consent_a = Uuid::new_v4();
         let consent_b = Uuid::new_v4();
-        connector_a.put_consent(&PendingConsent {
-            id: consent_a,
-            csrf_hash: raw_csrf,
-            client_id: client_a.client_id.clone(),
-            redirect_uri: redirect_uri.clone(),
-            client_state: "consent-a".to_owned(),
-            scopes: ScopeSet::machine_read(),
-            code_challenge: "challenge-value".to_owned(),
-            subject: "github:42".to_owned(),
-            expires_at: now + chrono::Duration::minutes(5),
-        })?;
-        connector_b.put_consent(&PendingConsent {
-            id: consent_b,
-            csrf_hash: raw_csrf,
-            client_id: client_b.client_id.clone(),
-            redirect_uri: redirect_uri.clone(),
-            client_state: "consent-b".to_owned(),
-            scopes: ScopeSet::machine_read(),
-            code_challenge: "challenge-value".to_owned(),
-            subject: "github:42".to_owned(),
-            expires_at: now + chrono::Duration::minutes(5),
-        })?;
+        for (store, client, id) in [
+            (&fixture.connector_a, &fixture.client_a, consent_a),
+            (&fixture.connector_b, &fixture.client_b, consent_b),
+        ] {
+            store.put_consent(&PendingConsent {
+                id,
+                csrf_hash: raw_csrf,
+                client_id: client.client_id.clone(),
+                redirect_uri: fixture.redirect_uri.clone(),
+                client_state: format!("consent-{}", client.connector_id),
+                scopes: ScopeSet::machine_read(),
+                code_challenge: "challenge-value".to_owned(),
+                subject: "github:42".to_owned(),
+                expires_at: fixture.now + chrono::Duration::minutes(5),
+            })?;
+        }
         assert!(matches!(
-            connector_b.take_consent(consent_a, &raw_csrf, now),
+            fixture
+                .connector_b
+                .take_consent(consent_a, &raw_csrf, fixture.now),
             Err(StoreError::NotFound)
         ));
         assert_eq!(
-            connector_a
-                .take_consent(consent_a, &raw_csrf, now)?
+            fixture
+                .connector_a
+                .take_consent(consent_a, &raw_csrf, fixture.now)?
                 .client_id,
-            client_a.client_id
+            fixture.client_a.client_id
         );
         assert_eq!(
-            connector_b
-                .take_consent(consent_b, &raw_csrf, now)?
+            fixture
+                .connector_b
+                .take_consent(consent_b, &raw_csrf, fixture.now)?
                 .client_id,
-            client_b.client_id
+            fixture.client_b.client_id
         );
+        Ok(())
+    }
 
+    #[test]
+    fn connector_namespaces_isolate_codes_tokens_sessions_and_revocation() -> Result<(), StoreError>
+    {
+        let fixture = namespace_fixture()?;
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(Sha256::digest(verifier.as_bytes()));
         let raw_code = SecretHash::from_slice(&[9_u8; 32])?;
-        for (store, client) in [(&connector_a, &client_a), (&connector_b, &client_b)] {
+        for (store, client) in [
+            (&fixture.connector_a, &fixture.client_a),
+            (&fixture.connector_b, &fixture.client_b),
+        ] {
             store.put_authorization_code(&AuthorizationCodeGrant {
                 code_hash: raw_code,
                 client_id: client.client_id.clone(),
-                redirect_uri: redirect_uri.clone(),
+                redirect_uri: fixture.redirect_uri.clone(),
                 scopes: ScopeSet::machine_read(),
                 code_challenge: challenge.clone(),
                 subject: "github:42".to_owned(),
-                expires_at: now + chrono::Duration::minutes(5),
+                expires_at: fixture.now + chrono::Duration::minutes(5),
             })?;
         }
         let raw_access = SecretHash::from_slice(&[10_u8; 32])?;
-        let raw_refresh = SecretHash::from_slice(&[11_u8; 32])?;
         let tokens = TokenPairDraft {
             access_hash: raw_access,
-            refresh_hash: raw_refresh,
-            access_expires_at: now + chrono::Duration::minutes(15),
-            refresh_expires_at: now + chrono::Duration::days(30),
+            refresh_hash: SecretHash::from_slice(&[11_u8; 32])?,
+            access_expires_at: fixture.now + chrono::Duration::minutes(15),
+            refresh_expires_at: fixture.now + chrono::Duration::days(30),
         };
-        connector_a.exchange_authorization_code(
-            &raw_code,
-            &client_a.client_id,
-            &redirect_uri,
-            verifier,
-            &tokens,
-            now,
-        )?;
-        connector_b.exchange_authorization_code(
-            &raw_code,
-            &client_b.client_id,
-            &redirect_uri,
-            verifier,
-            &tokens,
-            now,
-        )?;
-        assert_eq!(
-            connector_a
-                .access_grant(&raw_access, now)?
-                .ok_or(StoreError::NotFound)?
-                .client_id,
-            client_a.client_id
-        );
-        assert_eq!(
-            connector_b
-                .access_grant(&raw_access, now)?
-                .ok_or(StoreError::NotFound)?
-                .client_id,
-            client_b.client_id
-        );
-        let sessions = admin.sessions(None)?;
+        for (store, client) in [
+            (&fixture.connector_a, &fixture.client_a),
+            (&fixture.connector_b, &fixture.client_b),
+        ] {
+            store.exchange_authorization_code(
+                &raw_code,
+                &client.client_id,
+                &fixture.redirect_uri,
+                verifier,
+                &tokens,
+                fixture.now,
+            )?;
+            assert_eq!(
+                store
+                    .access_grant(&raw_access, fixture.now)?
+                    .ok_or(StoreError::NotFound)?
+                    .client_id,
+                client.client_id
+            );
+        }
+        let sessions = fixture.admin.sessions(None)?;
         assert_eq!(sessions.len(), 2);
         let session_b = sessions
             .iter()
             .find(|session| session.connector_id == "connector-b")
             .ok_or(StoreError::NotFound)?;
         assert_eq!(
-            admin.revoke_session_for("connector-a", session_b.family_id)?,
+            fixture
+                .admin
+                .revoke_session_for("connector-a", session_b.family_id)?,
             0
         );
 
-        connector_a.revoke_token(&raw_access)?;
-        assert!(connector_a.access_grant(&raw_access, now)?.is_none());
-        assert!(connector_b.access_grant(&raw_access, now)?.is_some());
+        fixture.connector_a.revoke_token(&raw_access)?;
+        assert!(
+            fixture
+                .connector_a
+                .access_grant(&raw_access, fixture.now)?
+                .is_none()
+        );
+        assert!(
+            fixture
+                .connector_b
+                .access_grant(&raw_access, fixture.now)?
+                .is_some()
+        );
         assert_eq!(
-            admin.revoke_client_tokens_for("connector-a", &client_b.client_id)?,
+            fixture
+                .admin
+                .revoke_client_tokens_for("connector-a", &fixture.client_b.client_id)?,
             0
         );
-        assert!(connector_b.access_grant(&raw_access, now)?.is_some());
-        assert!(!admin.delete_client_for("connector-a", &client_b.client_id)?);
-        assert!(connector_b.client(&client_b.client_id)?.is_some());
+        assert!(
+            fixture
+                .connector_b
+                .access_grant(&raw_access, fixture.now)?
+                .is_some()
+        );
+        assert!(
+            !fixture
+                .admin
+                .delete_client_for("connector-a", &fixture.client_b.client_id)?
+        );
+        assert!(
+            fixture
+                .connector_b
+                .client(&fixture.client_b.client_id)?
+                .is_some()
+        );
         Ok(())
     }
 
