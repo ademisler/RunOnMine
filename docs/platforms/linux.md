@@ -18,7 +18,9 @@ runonmine service status
 ```
 
 The unit is stored below `~/.config/systemd/user` and runs with the current
-account's normal authority. It uses `ProtectSystem=strict` and
+account's normal authority. The agent is copied first into the platform data
+directory at `service-bin/<package-version>/runonmine-agent`; moving or deleting
+the downloaded archive therefore does not break the service. It uses `ProtectSystem=strict` and
 `ProtectHome=read-only`, then opens RunOnMine's private configuration, state,
 local-data directories, and every canonical selected filesystem root through
 explicit `ReadWritePaths` entries. `runonmine service install` reads the current
@@ -29,10 +31,15 @@ disagree.
 
 ## Headless system service
 
-For a machine without a login session, choose an existing non-root account and
-install the explicit system unit as root:
+For a machine without a login session, choose an existing non-root account,
+create a root-owned systemd credential, and install the explicit system unit as
+root:
 
 ```console
+sudo install -d -m 0700 /etc/runonmine
+openssl rand -hex 32 | sudo tee /etc/runonmine/master-key >/dev/null
+sudo chmod 0600 /etc/runonmine/master-key
+sudo chown root:root /etc/runonmine/master-key
 sudo runonmine service install --system --user runonmine
 runonmine service status --system
 ```
@@ -53,12 +60,20 @@ configuration, state, and secrets are preserved.
 
 ## Secrets
 
-Secret Service is used when a session bus is available. A truly headless
-process must explicitly provide `RUNONMINE_MASTER_KEY`, encoded as base64 or hex and decoding to exactly 32 bytes. RunOnMine then uses an XChaCha20-Poly1305 file backend with a private cross-process lock. Without Secret Service or a valid master key, secret-dependent connectors fail closed.
+Secret Service is used when a session bus is available. The headless system unit
+uses systemd `LoadCredential` and reads
+`$CREDENTIALS_DIRECTORY/runonmine-master-key`; the source file must be the
+root-owned, non-symlink `/etc/runonmine/master-key` with no group/other access.
+The value is base64 or hex and must decode to exactly 32 bytes. RunOnMine then
+uses an XChaCha20-Poly1305 file backend with a private cross-process lock.
+`RUNONMINE_MASTER_KEY` remains an explicit compatibility fallback for non-systemd
+hosts, not the recommended service configuration.
 
-Do not put the master key in the repository, unit file, shell history, or
-world-readable environment file. Supply it through the host's secret injection
-facility.
+To rotate the key, stop the service, export or recreate connector credentials,
+atomically replace `/etc/runonmine/master-key` with a new 32-byte value at mode
+0600, remove the old encrypted secret file only after credentials are safely
+reprovisioned, and restart. Never place the key in the repository, unit file,
+shell history, or a world-readable environment file.
 
 ## Conditional tools
 

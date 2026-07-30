@@ -8,13 +8,30 @@ pub(super) fn update_config_with_secrets<T>(
     secrets: &dyn runonmine_core::secrets::SecretStore,
     update: impl FnOnce(&mut AppConfig, &mut SecretTransaction<'_>) -> Result<T>,
 ) -> Result<T> {
+    runonmine_core::secrets::recover_pending_config_secret_transaction(config_path, secrets)?;
     let mut transaction = SecretTransaction::new(secrets);
-    AppConfig::update_with_rollback(
+    let result = AppConfig::update_with_activation(
         config_path,
         &mut transaction,
-        |config, transaction| update(config, transaction),
+        |config, transaction| {
+            let original = if config_path.exists() {
+                Some(std::fs::read(config_path)?)
+            } else {
+                None
+            };
+            transaction.begin_durable(config_path, original.as_deref())?;
+            update(config, transaction)
+        },
+        |_output, transaction| transaction.mark_config_committed(),
         SecretTransaction::rollback,
-    )
+    );
+    match result {
+        Ok(output) => {
+            transaction.finish_committed()?;
+            Ok(output)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn commit_new_connector(

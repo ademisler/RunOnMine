@@ -1,12 +1,19 @@
 # Windows
 
-The normal agent is registered as a limited logon Scheduled Task:
+The normal agent is copied into the immutable per-user versioned service-binary
+directory and registered as a limited logon Scheduled Task:
 
 ```console
 runonmine.exe setup --root C:\absolute\project
 runonmine.exe service install
 runonmine.exe service status
 ```
+
+
+Task Scheduler is configured to restart the task up to three times at one-minute
+intervals after failure, ignore duplicate instances, and start when the machine
+becomes available. This recovery policy does not elevate the task or change its
+interactive-user authority.
 
 Secrets use Windows Credential Manager. Process timeouts assign descendants to
 a Job Object so child processes do not survive the tool call.

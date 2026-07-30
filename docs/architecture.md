@@ -385,3 +385,29 @@ key set and merges it with the index. Platform keyrings expose the managed index
 but mark coverage partial because historical keyring entries cannot be listed
 portably. Doctor can therefore report and explicitly delete known orphan
 connector credentials without reading or exporting secret values.
+
+## Crash-recoverable config and secret generations
+
+Config/credential mutations create an owner-only sidecar journal while the
+configuration lock is held. The journal stores a bounded base64 config snapshot,
+a BLAKE3 digest, generation UUID, phase, and references to transaction-scoped
+secret backups. Secret values remain in the selected encrypted/keyring backend
+and never enter the journal. A `prepared` journal restores the old config and
+captured credentials; a `config_committed` journal keeps the new generation and
+only removes backups. CLI mutations, desktop credential updates, HTTP agent and
+stdio startup reconcile the journal before consuming config. Future versions,
+symlinks, inconsistent snapshots, and missing captured backups fail closed.
+
+State initialization separately serializes audit-MAC key creation and SQLite
+schema migration with owner-only cross-process locks. Corrupt databases are not
+replaced with empty state; restore requires an explicit trusted copy.
+
+## Stable user-service installation
+
+The CLI sibling `runonmine-agent` is only an installation source. Installation
+copies it into the platform data directory under
+`service-bin/<package-version>/runonmine-agent` and service definitions execute
+that immutable path. Reinstalling identical bytes is idempotent; different bytes
+under the same package version are rejected. Unit/plist activation uses a
+temporary file in the destination directory, file fsync, atomic persist, parent
+fsync, private permissions, and symlink rejection.

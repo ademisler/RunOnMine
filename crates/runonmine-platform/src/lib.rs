@@ -7,7 +7,6 @@ pub mod desktop;
 pub mod helper;
 pub mod native;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -17,7 +16,6 @@ use crate::agent_status::{AgentRestartExpectation, agent_status_path};
 use anyhow::{Context, Result, bail};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use directories::BaseDirs;
-#[cfg(target_os = "linux")]
 use directories::ProjectDirs;
 use serde::Serialize;
 
@@ -98,6 +96,10 @@ fn desktop_session_available() -> bool {
 }
 
 pub const USER_SERVICE_NAME: &str = "runonmine-agent";
+#[cfg(any(windows, test))]
+const WINDOWS_RECOVERY_COMMAND: &str = "$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -StartWhenAvailable; Set-ScheduledTask -TaskName 'RunOnMine Agent' -Settings $settings | Out-Null";
+#[cfg(target_os = "macos")]
+const MACOS_SERVICE_LOG_LIMIT_BYTES: u64 = 5 * 1_024 * 1_024;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ServiceStatus {
@@ -222,6 +224,7 @@ impl LinuxSystemService {
             );
         }
         let account = service_account(run_as_user)?;
+        validate_linux_system_master_key_credential()?;
         if account.uid.is_root() {
             bail!("the headless system service must not run as root");
         }
@@ -248,6 +251,7 @@ impl LinuxSystemService {
             "[Unit]\nDescription=RunOnMine headless MCP agent\nAfter=network-online.target\nWants=network-online.target\n\n\
              [Service]\nType=simple\nUser={run_as_user}\nExecStart={LINUX_SYSTEM_BINARY_PATH} run\n\
              WorkingDirectory={}\nEnvironment={home_environment}\nEnvironment={xdg_config}\nEnvironment={xdg_data}\nEnvironment={status_environment}\n\
+             LoadCredential=runonmine-master-key:{LINUX_SYSTEM_MASTER_KEY_PATH}\n\
              Restart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\
              PrivateDevices=true\nProtectSystem=full\nProtectKernelTunables=true\nProtectKernelModules=true\n\
              ProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nRestrictRealtime=true\n\
@@ -302,6 +306,31 @@ const LINUX_SYSTEM_SERVICE: &str = "runonmine-agent.service";
 const LINUX_SYSTEM_UNIT_PATH: &str = "/etc/systemd/system/runonmine-agent.service";
 #[cfg(target_os = "linux")]
 const LINUX_SYSTEM_BINARY_PATH: &str = "/usr/local/libexec/runonmine/runonmine-agent";
+#[cfg(target_os = "linux")]
+const LINUX_SYSTEM_MASTER_KEY_PATH: &str = "/etc/runonmine/master-key";
+
+#[cfg(target_os = "linux")]
+fn validate_linux_system_master_key_credential() -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let path = Path::new(LINUX_SYSTEM_MASTER_KEY_PATH);
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "headless system service requires a master-key credential at {LINUX_SYSTEM_MASTER_KEY_PATH}"
+        )
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > 4 * 1_024
+    {
+        bail!("system master-key credential must be a bounded regular non-symlink file");
+    }
+    if metadata.uid() != 0 || metadata.permissions().mode() & 0o077 != 0 {
+        bail!("system master-key credential must be root-owned and inaccessible to group/other");
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 fn linux_system_agent_status_path(home: &Path) -> PathBuf {
@@ -383,6 +412,8 @@ fn atomic_write_mode(destination: &Path, contents: &[u8], mode: u32) -> Result<(
     temporary
         .persist(destination)
         .map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -407,32 +438,27 @@ impl UserService {
     }
 
     pub fn install(&self, allowed_roots: &[PathBuf]) -> Result<()> {
-        if !self.agent_executable.is_file() {
-            bail!(
-                "runonmine-agent was not found beside the CLI at {}",
-                self.agent_executable.display()
-            );
-        }
-        let expectation =
-            AgentRestartExpectation::begin(agent_status_path()?, &self.agent_executable)?;
+        let installed_agent = stage_versioned_user_service_agent(&self.agent_executable)?;
+        let installed_service = Self::with_agent_executable(installed_agent.clone());
+        let expectation = AgentRestartExpectation::begin(agent_status_path()?, &installed_agent)?;
         #[cfg(target_os = "macos")]
         {
             let _ = allowed_roots;
-            self.install_macos()?;
+            installed_service.install_macos()?;
         }
         #[cfg(target_os = "linux")]
-        self.install_linux(allowed_roots)?;
+        installed_service.install_linux(allowed_roots)?;
         #[cfg(windows)]
         {
             let _ = allowed_roots;
-            self.install_windows()?;
+            installed_service.install_windows()?;
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
             let _ = (allowed_roots, expectation);
             bail!("service installation is unsupported on this operating system");
         }
-        let status = self.status()?;
+        let status = installed_service.status()?;
         if !status.running {
             bail!(
                 "the installed agent service is not active: {}",
@@ -449,7 +475,8 @@ impl UserService {
     pub fn reconcile_allowed_roots(&self, allowed_roots: &[PathBuf]) -> Result<bool> {
         #[cfg(target_os = "linux")]
         {
-            self.reconcile_linux_allowed_roots(allowed_roots)
+            let installed = installed_user_service_agent_path()?;
+            Self::with_agent_executable(installed).reconcile_linux_allowed_roots(allowed_roots)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -461,15 +488,18 @@ impl UserService {
     pub fn uninstall(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            self.uninstall_macos()
+            self.uninstall_macos()?;
+            remove_versioned_user_service_agent()
         }
         #[cfg(target_os = "linux")]
         {
-            self.uninstall_linux()
+            self.uninstall_linux()?;
+            remove_versioned_user_service_agent()
         }
         #[cfg(windows)]
         {
-            self.uninstall_windows()
+            self.uninstall_windows()?;
+            remove_versioned_user_service_agent()
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
@@ -480,6 +510,7 @@ impl UserService {
     pub fn start(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
+            rotate_macos_service_logs()?;
             command_success(
                 Command::new("launchctl").args([
                     "kickstart",
@@ -518,17 +549,20 @@ impl UserService {
         if !should_restart {
             return Ok(false);
         }
-        let expectation =
-            AgentRestartExpectation::begin(agent_status_path()?, &self.agent_executable)?;
+        let installed_agent = installed_user_service_agent_path()?;
+        let expectation = AgentRestartExpectation::begin(agent_status_path()?, &installed_agent)?;
         #[cfg(target_os = "macos")]
-        command_success(
-            Command::new("launchctl").args([
-                "kickstart",
-                "-k",
-                &format!("{}/dev.runonmine.agent", launch_domain()),
-            ]),
-            "failed to restart the LaunchAgent",
-        )?;
+        {
+            rotate_macos_service_logs()?;
+            command_success(
+                Command::new("launchctl").args([
+                    "kickstart",
+                    "-k",
+                    &format!("{}/dev.runonmine.agent", launch_domain()),
+                ]),
+                "failed to restart the LaunchAgent",
+            )?;
+        }
         #[cfg(target_os = "linux")]
         command_success(
             Command::new("systemctl").args(["--user", "restart", "runonmine-agent.service"]),
@@ -621,10 +655,21 @@ impl UserService {
         let running = installed && windows_scheduled_task_running()?;
         #[cfg(not(windows))]
         let running = output.status.success();
+        let detail = bounded_command_output(&output);
+        #[cfg(target_os = "macos")]
+        let detail = if let Ok(summary) = macos_service_log_summary() {
+            if detail.is_empty() {
+                summary
+            } else {
+                format!("{detail} {summary}")
+            }
+        } else {
+            detail
+        };
         Ok(ServiceStatus {
             installed,
             running,
-            detail: bounded_command_output(&output),
+            detail,
         })
     }
 
@@ -632,7 +677,11 @@ impl UserService {
     fn install_macos(&self) -> Result<()> {
         let path = service_definition_path()?.context("LaunchAgent path is unavailable")?;
         ensure_parent(&path)?;
+        rotate_macos_service_logs()?;
+        let (stdout_path, stderr_path) = macos_service_log_paths()?;
         let executable = xml_escape(&self.agent_executable.to_string_lossy());
+        let stdout = xml_escape(&stdout_path.to_string_lossy());
+        let stderr = xml_escape(&stderr_path.to_string_lossy());
         let plist = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -640,8 +689,15 @@ impl UserService {
              <plist version=\"1.0\"><dict>\n\
              <key>Label</key><string>dev.runonmine.agent</string>\n\
              <key>ProgramArguments</key><array><string>{executable}</string><string>run</string></array>\n\
-             <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n\
-             <key>ProcessType</key><string>Interactive</string>\n\
+             <key>RunAtLoad</key><true/>\n\
+             <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n\
+             <key>ThrottleInterval</key><integer>10</integer>\n\
+             <key>ProcessType</key><string>Background</string>\n\
+             <key>StandardOutPath</key><string>{stdout}</string>\n\
+             <key>StandardErrorPath</key><string>{stderr}</string>\n\
+             <key>EnvironmentVariables</key><dict>\n\
+             <key>RUNONMINE_SERVICE_STDERR_LOG</key><string>{stderr}</string>\n\
+             </dict>\n\
              </dict></plist>\n"
         );
         write_private(&path, plist.as_bytes())?;
@@ -776,6 +832,16 @@ impl UserService {
             "failed to create the logon scheduled task",
         )?;
         command_success(
+            Command::new("powershell.exe").args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                WINDOWS_RECOVERY_COMMAND,
+            ]),
+            "failed to configure scheduled-task crash recovery",
+        )?;
+        command_success(
             Command::new("schtasks.exe").args(["/Run", "/TN", "RunOnMine Agent"]),
             "failed to restart the installed logon scheduled task",
         )
@@ -789,6 +855,110 @@ impl UserService {
             "failed to remove the logon scheduled task",
         )
     }
+}
+
+fn installed_user_service_agent_path() -> Result<PathBuf> {
+    let directories = ProjectDirs::from("dev", "RunOnMine", "RunOnMine")
+        .context("the operating system did not provide a RunOnMine data directory")?;
+    #[cfg(windows)]
+    let filename = "runonmine-agent.exe";
+    #[cfg(not(windows))]
+    let filename = "runonmine-agent";
+    Ok(directories
+        .data_local_dir()
+        .join("service-bin")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join(filename))
+}
+
+fn stage_versioned_user_service_agent(source: &Path) -> Result<PathBuf> {
+    let destination = installed_user_service_agent_path()?;
+    stage_versioned_user_service_agent_to(source, &destination)?;
+    Ok(destination)
+}
+
+fn stage_versioned_user_service_agent_to(source: &Path, destination: &Path) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+
+    let source_metadata = source
+        .symlink_metadata()
+        .with_context(|| format!("runonmine-agent is missing at {}", source.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        bail!("runonmine-agent source must be a regular non-symlink file");
+    }
+    let parent = destination
+        .parent()
+        .context("versioned user-service binary has no parent")?;
+    ensure_user_service_directory(parent)?;
+    if let Ok(metadata) = destination.symlink_metadata() {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("versioned user-service binary is not a safe regular file");
+        }
+        let mut source_bytes = Vec::new();
+        fs::File::open(source)?.read_to_end(&mut source_bytes)?;
+        let mut destination_bytes = Vec::new();
+        fs::File::open(destination)?.read_to_end(&mut destination_bytes)?;
+        if source_bytes != destination_bytes {
+            bail!(
+                "immutable user-service binary for version {} already exists with different bytes",
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        return Ok(());
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    let mut source_file = fs::File::open(source)?;
+    std::io::copy(&mut source_file, &mut temporary)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
+    }
+    temporary
+        .persist_noclobber(destination)
+        .map_err(|error| error.error)?;
+    #[cfg(windows)]
+    restrict_current_user_file(destination)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn ensure_user_service_directory(path: &Path) -> Result<()> {
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!("refusing to use a symlinked user-service binary directory");
+    }
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn remove_versioned_user_service_agent() -> Result<()> {
+    let binary = installed_user_service_agent_path()?;
+    match binary.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("refusing to remove an unsafe user-service binary")
+        }
+        Ok(_) => fs::remove_file(&binary)?,
+    }
+    if let Some(version_directory) = binary.parent() {
+        let _ignored = fs::remove_dir(version_directory);
+        if let Some(service_bin) = version_directory.parent() {
+            let _ignored = fs::remove_dir(service_bin);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -859,6 +1029,8 @@ fn ensure_parent(path: &Path) -> Result<()> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
     if path
         .symlink_metadata()
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -868,13 +1040,90 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
             path.display()
         );
     }
-    fs::write(path, contents)?;
+    let parent = path
+        .parent()
+        .context("service definition has no parent directory")?;
+    ensure_parent(path)?;
+    if parent
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!("refusing to use a symlinked service definition directory");
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(contents)?;
+    temporary.as_file().sync_all()?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service_log_paths() -> Result<(PathBuf, PathBuf)> {
+    let directories = ProjectDirs::from("dev", "RunOnMine", "RunOnMine")
+        .context("the operating system did not provide a RunOnMine data directory")?;
+    let directory = directories.data_local_dir().join("logs");
+    ensure_user_service_directory(&directory)?;
+    Ok((
+        directory.join("agent.stdout.log"),
+        directory.join("agent.stderr.log"),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn rotate_macos_service_logs() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (stdout, stderr) = macos_service_log_paths()?;
+    for path in [stdout, stderr] {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!("refusing to use a symlinked LaunchAgent log");
+        }
+        if path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > MACOS_SERVICE_LOG_LIMIT_BYTES)
+        {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)?;
+            file.sync_all()?;
+        }
+        if !path.exists() {
+            let file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)?;
+            file.sync_all()?;
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service_log_summary() -> Result<String> {
+    let (stdout, stderr) = macos_service_log_paths()?;
+    let stdout_bytes = stdout
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let stderr_bytes = stderr
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    Ok(format!(
+        "launchagent_logs stdout_bytes={stdout_bytes} stderr_bytes={stderr_bytes} limit_bytes={MACOS_SERVICE_LOG_LIMIT_BYTES}"
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -970,10 +1219,72 @@ fn systemd_escape(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+#[cfg(test)]
+mod service_policy_tests {
+    use super::*;
+
+    #[test]
+    fn windows_recovery_policy_restarts_crashed_tasks() {
+        assert!(WINDOWS_RECOVERY_COMMAND.contains("RestartCount 3"));
+        assert!(WINDOWS_RECOVERY_COMMAND.contains("RestartInterval"));
+        assert!(WINDOWS_RECOVERY_COMMAND.contains("MultipleInstances IgnoreNew"));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod private_file_tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    #[test]
+    fn versioned_user_service_binary_is_immutable_and_private() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let source = temporary.path().join("source-agent");
+        let destination = temporary
+            .path()
+            .join("service-bin")
+            .join("0.1.0-test")
+            .join("runonmine-agent");
+        fs::write(&source, b"agent-v1")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700))?;
+        stage_versioned_user_service_agent_to(&source, &destination)?;
+        assert_eq!(fs::read(&destination)?, b"agent-v1");
+        assert_eq!(
+            fs::metadata(&destination)?.permissions().mode() & 0o777,
+            0o700
+        );
+
+        stage_versioned_user_service_agent_to(&source, &destination)?;
+        fs::write(&source, b"different-bytes")?;
+        assert!(stage_versioned_user_service_agent_to(&source, &destination).is_err());
+        assert_eq!(fs::read(&destination)?, b"agent-v1");
+
+        let link_source = temporary.path().join("source-link");
+        symlink(&source, &link_source)?;
+        assert!(stage_versioned_user_service_agent_to(&link_source, &destination).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn private_service_definition_replaces_atomically_with_owner_permissions() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let definition = temporary.path().join("agent.service");
+        write_private(&definition, b"first")?;
+        write_private(&definition, b"second")?;
+        assert_eq!(fs::read(&definition)?, b"second");
+        assert_eq!(
+            fs::metadata(&definition)?.permissions().mode() & 0o777,
+            0o600
+        );
+
+        let target = temporary.path().join("target");
+        fs::write(&target, b"target")?;
+        let link = temporary.path().join("definition-link");
+        symlink(&target, &link)?;
+        assert!(write_private(&link, b"blocked").is_err());
+        assert_eq!(fs::read(&target)?, b"target");
+        Ok(())
+    }
 
     #[test]
     fn private_file_permissions_are_owner_only_and_symlinks_are_rejected() -> Result<()> {

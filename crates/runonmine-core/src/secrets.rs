@@ -11,6 +11,7 @@ use fs2::FileExt as _;
 use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::{AppPaths, atomic};
@@ -41,6 +42,7 @@ pub trait SecretStore: Send + Sync {
 pub struct SecretTransaction<'a> {
     store: &'a dyn SecretStore,
     backups: BTreeMap<String, Option<SecretString>>,
+    durable: Option<DurableSecretTransaction>,
 }
 
 impl std::fmt::Debug for SecretTransaction<'_> {
@@ -48,6 +50,7 @@ impl std::fmt::Debug for SecretTransaction<'_> {
         formatter
             .debug_struct("SecretTransaction")
             .field("backup_count", &self.backups.len())
+            .field("durable", &self.durable.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -58,14 +61,50 @@ impl<'a> SecretTransaction<'a> {
         Self {
             store,
             backups: BTreeMap::new(),
+            durable: None,
         }
     }
 
-    fn remember(&mut self, name: &str) -> Result<()> {
-        if !self.backups.contains_key(name) {
-            self.backups.insert(name.to_owned(), self.store.get(name)?);
+    pub fn begin_durable(
+        &mut self,
+        config_path: &Path,
+        original_config: Option<&[u8]>,
+    ) -> Result<()> {
+        if self.durable.is_some() || !self.backups.is_empty() {
+            bail!("durable secret transaction must begin before mutation");
         }
+        self.durable = Some(DurableSecretTransaction::begin(
+            config_path,
+            original_config,
+        )?);
         Ok(())
+    }
+
+    fn remember(&mut self, name: &str) -> Result<()> {
+        if self.backups.contains_key(name) {
+            return Ok(());
+        }
+        let original = self.store.get(name)?;
+        if let Some(durable) = &mut self.durable {
+            durable.capture(self.store, name, original.as_ref())?;
+        }
+        self.backups.insert(name.to_owned(), original);
+        Ok(())
+    }
+
+    pub fn mark_config_committed(&mut self) -> Result<()> {
+        let durable = self
+            .durable
+            .as_mut()
+            .context("durable transaction was not started")?;
+        durable.mark_committed()
+    }
+
+    pub fn finish_committed(&mut self) -> Result<()> {
+        let Some(mut durable) = self.durable.take() else {
+            return Ok(());
+        };
+        durable.finish_committed(self.store)
     }
 
     /// Stores a value after snapshotting the previous value once.
@@ -89,7 +128,245 @@ impl<'a> SecretTransaction<'a> {
             }
         }
         self.backups.clear();
+        if let Some(mut durable) = self.durable.take() {
+            durable.finish_rolled_back(self.store)?;
+        }
         Ok(())
+    }
+}
+
+const DURABLE_TRANSACTION_VERSION: u16 = 1;
+const MAX_DURABLE_JOURNAL_BYTES: u64 = 4 * 1_024 * 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DurableTransactionPhase {
+    Prepared,
+    ConfigCommitted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSecretBackup {
+    backup_name: String,
+    existed: bool,
+    captured: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableTransactionJournal {
+    version: u16,
+    generation: Uuid,
+    phase: DurableTransactionPhase,
+    original_config: Option<String>,
+    original_config_digest: Option<String>,
+    backups: BTreeMap<String, DurableSecretBackup>,
+}
+
+#[derive(Debug)]
+struct DurableSecretTransaction {
+    journal_path: PathBuf,
+    journal: DurableTransactionJournal,
+    _lock: ProcessFileLock,
+}
+
+impl DurableSecretTransaction {
+    fn begin(config_path: &Path, original_config: Option<&[u8]>) -> Result<Self> {
+        let journal_path = durable_transaction_journal_path(config_path)?;
+        let lock = ProcessFileLock::acquire(&durable_transaction_lock_path(&journal_path))?;
+        if journal_path.exists() {
+            bail!("a pending config/secret transaction must be recovered first");
+        }
+        if original_config.is_some_and(|bytes| bytes.len() as u64 > MAX_DURABLE_JOURNAL_BYTES) {
+            bail!("configuration snapshot exceeds the durable transaction limit");
+        }
+        let encoded =
+            original_config.map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
+        let digest = original_config.map(|bytes| blake3::hash(bytes).to_hex().to_string());
+        let journal = DurableTransactionJournal {
+            version: DURABLE_TRANSACTION_VERSION,
+            generation: Uuid::new_v4(),
+            phase: DurableTransactionPhase::Prepared,
+            original_config: encoded,
+            original_config_digest: digest,
+            backups: BTreeMap::new(),
+        };
+        let transaction = Self {
+            journal_path,
+            journal,
+            _lock: lock,
+        };
+        transaction.persist()?;
+        Ok(transaction)
+    }
+
+    fn capture(
+        &mut self,
+        store: &dyn SecretStore,
+        name: &str,
+        original: Option<&SecretString>,
+    ) -> Result<()> {
+        if self.journal.backups.contains_key(name) {
+            return Ok(());
+        }
+        let backup_name = format!(
+            "transaction.{}.{}",
+            self.journal.generation,
+            blake3::hash(name.as_bytes()).to_hex()
+        );
+        self.journal.backups.insert(
+            name.to_owned(),
+            DurableSecretBackup {
+                backup_name: backup_name.clone(),
+                existed: original.is_some(),
+                captured: false,
+            },
+        );
+        self.persist()?;
+        if let Some(value) = original {
+            store.set(&backup_name, value)?;
+        }
+        self.journal
+            .backups
+            .get_mut(name)
+            .context("durable secret backup disappeared")?
+            .captured = true;
+        self.persist()
+    }
+
+    fn mark_committed(&mut self) -> Result<()> {
+        self.journal.phase = DurableTransactionPhase::ConfigCommitted;
+        self.persist()
+    }
+
+    fn finish_committed(&mut self, store: &dyn SecretStore) -> Result<()> {
+        if self.journal.phase != DurableTransactionPhase::ConfigCommitted {
+            bail!("durable transaction is not committed");
+        }
+        self.cleanup(store)
+    }
+
+    fn finish_rolled_back(&mut self, store: &dyn SecretStore) -> Result<()> {
+        self.cleanup(store)
+    }
+
+    fn persist(&self) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(&self.journal)?;
+        if bytes.len() as u64 > MAX_DURABLE_JOURNAL_BYTES {
+            bail!("durable config/secret transaction journal exceeds the size limit");
+        }
+        atomic::write(&self.journal_path, &bytes, 0o600)?;
+        restrict_secret_file(&self.journal_path)
+    }
+
+    fn cleanup(&mut self, store: &dyn SecretStore) -> Result<()> {
+        for backup in self.journal.backups.values() {
+            store.delete(&backup.backup_name)?;
+        }
+        remove_regular_file_if_present(&self.journal_path)?;
+        Ok(())
+    }
+}
+
+pub fn recover_pending_config_secret_transaction(
+    config_path: &Path,
+    store: &dyn SecretStore,
+) -> Result<bool> {
+    let journal_path = durable_transaction_journal_path(config_path)?;
+    let _lock = ProcessFileLock::acquire(&durable_transaction_lock_path(&journal_path))?;
+    let Some(journal) = load_durable_journal(&journal_path)? else {
+        return Ok(false);
+    };
+    if journal.phase == DurableTransactionPhase::Prepared {
+        restore_config_bytes(config_path, &journal)?;
+        for (name, backup) in &journal.backups {
+            if !backup.captured {
+                continue;
+            }
+            if backup.existed {
+                let value = store
+                    .get(&backup.backup_name)?
+                    .context("durable secret backup is missing")?;
+                store.set(name, &value)?;
+            } else {
+                store.delete(name)?;
+            }
+        }
+    }
+    for backup in journal.backups.values() {
+        store.delete(&backup.backup_name)?;
+    }
+    remove_regular_file_if_present(&journal_path)?;
+    Ok(true)
+}
+
+fn durable_transaction_journal_path(config_path: &Path) -> Result<PathBuf> {
+    let file_name = config_path
+        .file_name()
+        .context("configuration path has no file name")?;
+    let mut journal_name = file_name.to_os_string();
+    journal_name.push(".secret-transaction.json");
+    Ok(config_path.with_file_name(journal_name))
+}
+
+fn durable_transaction_lock_path(journal_path: &Path) -> PathBuf {
+    let mut name = journal_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    journal_path.with_file_name(name)
+}
+
+fn load_durable_journal(path: &Path) -> Result<Option<DurableTransactionJournal>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) => metadata,
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_DURABLE_JOURNAL_BYTES
+    {
+        bail!("durable config/secret transaction journal is unsafe");
+    }
+    let journal: DurableTransactionJournal = serde_json::from_slice(&fs::read(path)?)?;
+    if journal.version != DURABLE_TRANSACTION_VERSION {
+        bail!("unsupported durable config/secret transaction journal version");
+    }
+    Ok(Some(journal))
+}
+
+fn restore_config_bytes(path: &Path, journal: &DurableTransactionJournal) -> Result<()> {
+    match (&journal.original_config, &journal.original_config_digest) {
+        (Some(encoded), Some(expected_digest)) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .context("durable configuration snapshot is invalid")?;
+            if blake3::hash(&bytes).to_hex().as_str() != expected_digest {
+                bail!("durable configuration snapshot digest does not match");
+            }
+            atomic::write(path, &bytes, 0o600)?;
+            restrict_secret_file(path)
+        }
+        (None, None) => remove_regular_file_if_present(path),
+        _ => bail!("durable configuration snapshot metadata is inconsistent"),
+    }
+}
+
+fn remove_regular_file_if_present(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("refusing to remove an unsafe durable transaction file")
+        }
+        Ok(_) => {
+            fs::remove_file(path)?;
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                File::open(parent)?.sync_all()?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -209,8 +486,7 @@ impl std::fmt::Debug for EncryptedFileSecretStore {
 
 impl EncryptedFileSecretStore {
     pub fn from_environment(path: PathBuf, service: impl Into<String>) -> Result<Self> {
-        let raw = std::env::var("RUNONMINE_MASTER_KEY")
-            .context("headless secret storage requires RUNONMINE_MASTER_KEY")?;
+        let raw = load_master_key_material()?;
         let key = decode_master_key(&raw)?;
         Ok(Self {
             path,
@@ -526,6 +802,50 @@ fn default_platform_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore
     Ok(Box::new(KeyringSecretStore::new("dev.runonmine.agent")))
 }
 
+const SYSTEMD_MASTER_KEY_CREDENTIAL: &str = "runonmine-master-key";
+const MAX_MASTER_KEY_FILE_BYTES: u64 = 4 * 1_024;
+
+fn load_master_key_material() -> Result<Zeroizing<String>> {
+    if let Some(directory) = std::env::var_os("CREDENTIALS_DIRECTORY") {
+        return read_master_key_credential(
+            &PathBuf::from(directory).join(SYSTEMD_MASTER_KEY_CREDENTIAL),
+        );
+    }
+    let raw = std::env::var("RUNONMINE_MASTER_KEY").context(
+        "headless secret storage requires a systemd runonmine-master-key credential or RUNONMINE_MASTER_KEY",
+    )?;
+    Ok(Zeroizing::new(raw))
+}
+
+fn read_master_key_credential(path: &Path) -> Result<Zeroizing<String>> {
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect master-key credential at {}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_MASTER_KEY_FILE_BYTES
+    {
+        bail!("master-key credential must be a bounded regular non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!("master-key credential permissions are too broad");
+        }
+    }
+    let raw = Zeroizing::new(fs::read_to_string(path)?);
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        bail!("master-key credential contains invalid whitespace");
+    }
+    Ok(Zeroizing::new(trimmed.to_owned()))
+}
+
 fn decode_master_key(value: &str) -> Result<[u8; 32]> {
     let decoded = if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         hex::decode(value)
@@ -625,6 +945,211 @@ mod tests {
         Ok(())
     }
 
+    fn secret_text(store: &dyn SecretStore, name: &str) -> Result<Option<String>> {
+        Ok(store
+            .get(name)?
+            .map(|value| value.expose_secret().to_owned()))
+    }
+
+    fn transaction_backup_count(store: &MemorySecretStore) -> Result<usize> {
+        Ok(store
+            .values
+            .lock()
+            .map_err(|_| anyhow!("test secret store lock failed"))?
+            .keys()
+            .filter(|name| name.starts_with("transaction."))
+            .count())
+    }
+
+    #[test]
+    fn prepared_durable_transaction_recovers_config_and_secrets_after_drop() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, b"version = 'original'\n")?;
+        let store = MemorySecretStore::default();
+        store.set(
+            "connector.token",
+            &SecretString::from("original-secret".to_owned()),
+        )?;
+
+        {
+            let mut transaction = SecretTransaction::new(&store);
+            transaction.begin_durable(&config_path, Some(&fs::read(&config_path)?))?;
+            transaction.set(
+                "connector.token",
+                &SecretString::from("new-secret".to_owned()),
+            )?;
+            transaction.set(
+                "connector.new",
+                &SecretString::from("temporary-secret".to_owned()),
+            )?;
+            fs::write(&config_path, b"version = 'new'\n")?;
+        }
+
+        assert_eq!(transaction_backup_count(&store)?, 1);
+        assert!(recover_pending_config_secret_transaction(
+            &config_path,
+            &store
+        )?);
+        assert_eq!(fs::read(&config_path)?, b"version = 'original'\n");
+        assert_eq!(
+            secret_text(&store, "connector.token")?,
+            Some("original-secret".to_owned())
+        );
+        assert!(store.get("connector.new")?.is_none());
+        assert_eq!(transaction_backup_count(&store)?, 0);
+        assert!(!durable_transaction_journal_path(&config_path)?.exists());
+        assert!(!recover_pending_config_secret_transaction(
+            &config_path,
+            &store
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn committed_durable_transaction_preserves_new_state_and_cleans_after_drop() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, b"version = 'original'\n")?;
+        let store = MemorySecretStore::default();
+        store.set(
+            "connector.token",
+            &SecretString::from("original-secret".to_owned()),
+        )?;
+
+        {
+            let mut transaction = SecretTransaction::new(&store);
+            transaction.begin_durable(&config_path, Some(&fs::read(&config_path)?))?;
+            transaction.set(
+                "connector.token",
+                &SecretString::from("new-secret".to_owned()),
+            )?;
+            fs::write(&config_path, b"version = 'new'\n")?;
+            transaction.mark_config_committed()?;
+        }
+
+        assert!(recover_pending_config_secret_transaction(
+            &config_path,
+            &store
+        )?);
+        assert_eq!(fs::read(&config_path)?, b"version = 'new'\n");
+        assert_eq!(
+            secret_text(&store, "connector.token")?,
+            Some("new-secret".to_owned())
+        );
+        assert_eq!(transaction_backup_count(&store)?, 0);
+        assert!(!durable_transaction_journal_path(&config_path)?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn future_durable_journal_fails_closed_without_mutating_state() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, b"current-config")?;
+        let store = MemorySecretStore::default();
+        store.set(
+            "connector.token",
+            &SecretString::from("current-secret".to_owned()),
+        )?;
+        let journal_path = durable_transaction_journal_path(&config_path)?;
+        let journal = DurableTransactionJournal {
+            version: DURABLE_TRANSACTION_VERSION + 1,
+            generation: Uuid::new_v4(),
+            phase: DurableTransactionPhase::Prepared,
+            original_config: Some(base64::engine::general_purpose::STANDARD.encode(b"old-config")),
+            original_config_digest: Some(blake3::hash(b"old-config").to_hex().to_string()),
+            backups: BTreeMap::new(),
+        };
+        atomic::write(&journal_path, &serde_json::to_vec(&journal)?, 0o600)?;
+
+        assert!(recover_pending_config_secret_transaction(&config_path, &store).is_err());
+        assert_eq!(fs::read(&config_path)?, b"current-config");
+        assert_eq!(
+            secret_text(&store, "connector.token")?,
+            Some("current-secret".to_owned())
+        );
+        assert!(journal_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn durable_journal_creation_failure_precedes_secret_mutation() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, b"original")?;
+        let journal_path = durable_transaction_journal_path(&config_path)?;
+        fs::create_dir(&journal_path)?;
+        let store = MemorySecretStore::default();
+        store.set(
+            "connector.token",
+            &SecretString::from("original-secret".to_owned()),
+        )?;
+        let mut transaction = SecretTransaction::new(&store);
+
+        assert!(
+            transaction
+                .begin_durable(&config_path, Some(&fs::read(&config_path)?))
+                .is_err()
+        );
+        assert_eq!(
+            secret_text(&store, "connector.token")?,
+            Some("original-secret".to_owned())
+        );
+        assert_eq!(transaction_backup_count(&store)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_recovery_applies_one_generation_once() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, b"original")?;
+        let store = std::sync::Arc::new(MemorySecretStore::default());
+        store.set(
+            "connector.token",
+            &SecretString::from("original-secret".to_owned()),
+        )?;
+        {
+            let mut transaction = SecretTransaction::new(store.as_ref());
+            transaction.begin_durable(&config_path, Some(b"original"))?;
+            transaction.set(
+                "connector.token",
+                &SecretString::from("new-secret".to_owned()),
+            )?;
+            fs::write(&config_path, b"new")?;
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let path = config_path.clone();
+            let store = store.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || -> Result<bool> {
+                barrier.wait();
+                recover_pending_config_secret_transaction(&path, store.as_ref())
+            }));
+        }
+        barrier.wait();
+        let mut outcomes = Vec::new();
+        for thread in threads {
+            outcomes.push(
+                thread
+                    .join()
+                    .map_err(|_| anyhow!("recovery thread panicked"))??,
+            );
+        }
+        outcomes.sort_unstable();
+        assert_eq!(outcomes, vec![false, true]);
+        assert_eq!(fs::read(&config_path)?, b"original");
+        assert_eq!(
+            secret_text(store.as_ref(), "connector.token")?,
+            Some("original-secret".to_owned())
+        );
+        assert_eq!(transaction_backup_count(store.as_ref())?, 0);
+        Ok(())
+    }
+
     #[test]
     fn indexed_store_tracks_names_without_secret_values() -> Result<()> {
         let directory = tempfile::tempdir()?;
@@ -643,6 +1168,29 @@ mod tests {
         assert!(!serialized.contains("never-write-this-value"));
         store.delete("connector.00000000-0000-4000-8000-000000000123.token")?;
         assert!(store.inventory()?.names.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn master_key_credential_is_bounded_private_and_not_a_symlink() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let directory = tempfile::tempdir()?;
+        let credential = directory.path().join(SYSTEMD_MASTER_KEY_CREDENTIAL);
+        fs::write(&credential, format!("{}\n", "ab".repeat(32)))?;
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o400))?;
+        assert_eq!(
+            read_master_key_credential(&credential)?.as_str(),
+            "ab".repeat(32)
+        );
+
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o644))?;
+        assert!(read_master_key_credential(&credential).is_err());
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o400))?;
+        let link = directory.path().join("credential-link");
+        symlink(&credential, &link)?;
+        assert!(read_master_key_credential(&link).is_err());
         Ok(())
     }
 

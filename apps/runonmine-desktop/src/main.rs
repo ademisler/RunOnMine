@@ -19,7 +19,9 @@ mod desktop {
 
     use anyhow::{Context, Result, bail};
     use eframe::egui;
-    use runonmine_core::secrets::default_secret_store;
+    use runonmine_core::secrets::{
+        default_secret_store, recover_pending_config_secret_transaction,
+    };
     use runonmine_core::{
         AppConfig, AppPaths, ApprovalDecision, ApprovalRequest, AuditRecord, ConnectorKind,
         PersistentGrant, PolicyPreset, QuickTunnelRuntimeStore, StateStore,
@@ -188,6 +190,8 @@ mod desktop {
             let paths = AppPaths::discover()?;
             paths.ensure()?;
             self.paths = Some(paths.clone());
+            let secrets = default_secret_store(&paths)?;
+            recover_pending_config_secret_transaction(&paths.config_file(), secrets.as_ref())?;
             let config = AppConfig::load_or_create(&paths.config_file())?;
             let store = StateStore::open(&paths.state_db())?;
             self.config = Some(config);
@@ -230,6 +234,8 @@ mod desktop {
                 .paths
                 .as_ref()
                 .context("RunOnMine paths are unavailable")?;
+            let secrets = default_secret_store(paths)?;
+            recover_pending_config_secret_transaction(&paths.config_file(), secrets.as_ref())?;
             let config = AppConfig::load(&paths.config_file())?;
             let store = self
                 .store

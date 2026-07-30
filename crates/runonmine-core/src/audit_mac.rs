@@ -3,6 +3,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt as _;
 use hmac::{Hmac, Mac as _};
 use sha2::Sha256;
 use subtle::ConstantTimeEq as _;
@@ -37,6 +38,29 @@ impl AuditMacKey {
             fs::create_dir_all(parent)?;
             restrict_directory(parent)?;
         }
+        let lock_path = key_lock_path(&path);
+        if lock_path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!("refusing to use a symlinked audit MAC key lock");
+        }
+        let mut lock_options = OpenOptions::new();
+        lock_options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            lock_options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+        }
+        let lock_file = lock_options.open(&lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))?;
+        }
+        lock_file
+            .lock_exclusive()
+            .context("failed to lock the audit MAC key")?;
         loop {
             match load_key(&path) {
                 Ok(key) => return Ok(key),
@@ -129,6 +153,12 @@ fn constant_time_hex_eq(left: &str, right: &str) -> bool {
     left.len() == right.len() && bool::from(left.as_bytes().ct_eq(right.as_bytes()))
 }
 
+fn key_lock_path(key: &Path) -> PathBuf {
+    let mut path = key.as_os_str().to_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
 fn key_path(database: &Path) -> PathBuf {
     let mut path = database.as_os_str().to_os_string();
     path.push(".audit-key");
@@ -208,6 +238,34 @@ mod tests {
         assert!(key.verifies_tail(&tail, "anchor", 7, "record", &record));
         assert!(!key.verifies_tail(&tail, "changed", 7, "record", &record));
         assert!(!key.verifies_tail(&tail, "anchor", 6, "record", &record));
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_key_creation_returns_one_complete_key() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state.db");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let database = database.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || -> Result<AuditMacKey> {
+                barrier.wait();
+                AuditMacKey::load_or_create(&database)
+            }));
+        }
+        barrier.wait();
+        let first = threads
+            .remove(0)
+            .join()
+            .map_err(|_| anyhow::anyhow!("first audit key thread panicked"))??;
+        let second = threads
+            .remove(0)
+            .join()
+            .map_err(|_| anyhow::anyhow!("second audit key thread panicked"))??;
+        assert_eq!(first.0, second.0);
+        assert_eq!(fs::metadata(key_path(&database))?.len(), KEY_BYTES as u64);
         Ok(())
     }
 

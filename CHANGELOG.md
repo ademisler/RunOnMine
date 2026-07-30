@@ -9,6 +9,9 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Make config/secret updates crash-recoverable with generation journals, config snapshot digests, backend-protected secret backups, startup reconciliation, and fault tests for process loss, write failure, downgrade, corrupt SQLite/WAL, restore, and concurrent migration.
+- Install user agents from immutable per-user version directories, atomically/fsync service definitions, add Windows scheduled-task restart policy, and add macOS crash throttling plus continuously bounded private service logs.
+- Deliver the headless Linux master key through a root-owned systemd credential; environment delivery remains only a documented compatibility fallback.
 - Add startup and doctor reconciliation for config-less connector artifacts: valid orphan directories are preserved in owner-only quarantine, stale Quick Tunnel runtime records are removed, and ambiguous or symlinked entries remain untouched and visible.
 - Maintain a credential-name-only owner index so doctor can report and explicitly repair orphan connector secrets without exposing values; encrypted storage has complete enumeration while legacy platform-keyring coverage is marked partial.
 - Replace the monolithic doctor output with typed modular checks and add a shared versioned JSON envelope to doctor, audit tail, service status, and local HTTP status.

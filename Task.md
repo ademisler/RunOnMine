@@ -82,13 +82,13 @@ Status markers:
 - [x] **P2-23 — Inventory orphan secrets outside purge.** Secret writes maintain an owner-only name index with no values; encrypted storage provides complete enumeration, platform keyrings report partial legacy coverage, and doctor reports or explicitly repairs indexed credentials without a configured connector owner.
 - [x] **P2-24 — Make doctor checks typed and modular.** Doctor is split into domain handlers and emits stable check IDs with severity, status, bounded evidence and remediation; failures, warnings, repairs and skips share one schema.
 - [x] **P2-25 — Standardize machine-readable diagnostics.** Doctor, audit tail, service status and local HTTP status support a common `{schema_version, command, data}` JSON envelope while retaining human-readable defaults.
-- [ ] **P2-26 — Add crash-recoverable config/secret transactions.** Journal generations and reconcile interrupted changes.
-- [ ] **P2-27 — Test interrupted state/config migrations.** Cover process kill, disk full, WAL corruption, restore, downgrade and concurrent migration.
-- [ ] **P2-28 — Install user-service executables into a stable versioned location.** Do not depend on a movable archive path.
-- [ ] **P2-29 — Use atomic/fsynced writes for all service definitions.** Prevent truncated unit/plist/task files.
-- [ ] **P2-30 — Add Windows agent crash recovery.** Use service recovery or an equivalent restart strategy.
-- [ ] **P2-31 — Improve macOS LaunchAgent observability.** Add bounded logs, throttle and crash-loop visibility.
-- [ ] **P2-32 — Replace environment-only headless master-key delivery.** Prefer systemd credentials and native platform stores with rotation guidance.
+- [x] **P2-26 — Add crash-recoverable config/secret transactions.** Config/credential updates use an owner-only generation journal, config snapshot digest, and encrypted/keyring transaction backups; prepared crashes roll back, committed crashes finish cleanup, and agent/desktop/CLI startup reconcile before reading config.
+- [x] **P2-27 — Test interrupted state/config migrations.** Fault tests cover dropped prepared/committed transactions, journal-write failure before mutation, future journal/schema rejection, corrupted DB preservation and trusted restore, malformed WAL behavior, and concurrent audit-key/schema migration locks.
+- [x] **P2-28 — Install user-service executables into a stable versioned location.** User services execute an immutable per-user `service-bin/<package-version>/runonmine-agent`; same-version byte mismatches fail closed and uninstall removes only that managed version.
+- [x] **P2-29 — Use atomic/fsynced writes for all service definitions.** Linux units and macOS plists use same-directory temporary files, file fsync, atomic persist, parent fsync and symlink rejection; Windows task settings are applied transactionally through Task Scheduler commands.
+- [x] **P2-30 — Add Windows agent crash recovery.** The limited logon task uses Task Scheduler restart-on-failure (three one-minute retries), IgnoreNew instance policy and StartWhenAvailable; Windows cfg cross-checks and policy tests cover the generated settings.
+- [x] **P2-31 — Improve macOS LaunchAgent observability.** LaunchAgent uses KeepAlive-on-failure, a 10-second throttle, background process type, private stdout/stderr paths and a tracing writer that continuously truncates stderr before the 5 MiB bound; status reports launchctl state and log sizes.
+- [x] **P2-32 — Replace environment-only headless master-key delivery.** Linux system service requires a root-owned private `/etc/runonmine/master-key` and delivers it with `LoadCredential`; the encrypted backend reads `CREDENTIALS_DIRECTORY` first, with `RUNONMINE_MASTER_KEY` retained only as an explicit compatibility fallback.
 
 ## P2 — Test and quality gates
 

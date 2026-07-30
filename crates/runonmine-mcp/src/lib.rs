@@ -24,7 +24,9 @@ use runonmine_browser::{
 };
 use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::process::{ProcessRequest, execute_shell};
-use runonmine_core::secrets::SecretStore;
+use runonmine_core::secrets::{
+    SecretStore, default_secret_store, recover_pending_config_secret_transaction,
+};
 use runonmine_core::{
     AppConfig, AppPaths, ApprovalPrincipal, AuditOutcome, BrowserProfileMode, Capability,
     ConnectorConfig, ConnectorKind, PolicyContext, PolicyEngine, PolicyMode, PrincipalContext,
@@ -2103,6 +2105,8 @@ pub async fn serve_stdio(connector_id: &str) -> Result<()> {
     if reconciled > 0 {
         tracing::info!(reconciled, "completed pending connector removals");
     }
+    let startup_secrets = default_secret_store(&paths)?;
+    recover_pending_config_secret_transaction(&paths.config_file(), startup_secrets.as_ref())?;
     let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
     reconcile_orphan_connector_artifacts(&paths, &config)?;
     let server = RunOnMineServer::new(Runtime::load(connector_id)?)?;

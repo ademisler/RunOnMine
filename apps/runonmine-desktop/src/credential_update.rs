@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use runonmine_core::secrets::{SecretStore, SecretTransaction};
+use runonmine_core::secrets::{
+    SecretStore, SecretTransaction, recover_pending_config_secret_transaction,
+};
 use runonmine_core::{AppConfig, ConnectorKind};
 use secrecy::SecretString;
 
@@ -13,11 +15,18 @@ pub(crate) fn replace_connector_secrets_transactionally<T>(
     updates: &[(String, SecretString)],
     after_write: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    recover_pending_config_secret_transaction(config_path, store)?;
     let mut transaction = SecretTransaction::new(store);
-    AppConfig::update_with_rollback(
+    let result = AppConfig::update_with_activation(
         config_path,
         &mut transaction,
         |config, transaction| {
+            let original = if config_path.exists() {
+                Some(std::fs::read(config_path)?)
+            } else {
+                None
+            };
+            transaction.begin_durable(config_path, original.as_deref())?;
             let connector = config
                 .connector(connector_id)
                 .context("connector no longer exists")?;
@@ -29,8 +38,16 @@ pub(crate) fn replace_connector_secrets_transactionally<T>(
             }
             after_write()
         },
+        |_output, transaction| transaction.mark_config_committed(),
         SecretTransaction::rollback,
-    )
+    );
+    match result {
+        Ok(output) => {
+            transaction.finish_committed()?;
+            Ok(output)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

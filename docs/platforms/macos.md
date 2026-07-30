@@ -1,13 +1,21 @@
 # macOS
 
 The normal user agent is installed as `dev.runonmine.agent` in
-`~/Library/LaunchAgents`:
+`~/Library/LaunchAgents`; the executable itself is copied into the versioned
+per-user `service-bin` directory:
 
 ```console
 runonmine setup --root /absolute/project/path
 runonmine service install
 runonmine service status
 ```
+
+
+The LaunchAgent restarts only after unsuccessful exits, applies a 10-second
+crash throttle, and reports `launchctl print` state through `service status`.
+Private stdout/stderr files live in RunOnMine's platform log directory. The
+agent tracing writer checks the stderr file before each write and truncates it
+before it would exceed 5 MiB; symlinked or unexpected log paths are rejected.
 
 The desktop application needs macOS Screen Recording permission for capture and
 Accessibility permission for synthetic input and window focus. RunOnMine does

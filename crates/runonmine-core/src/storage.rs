@@ -1,10 +1,12 @@
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
+use fs2::FileExt as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -285,6 +287,49 @@ impl ConnectorAuthorizationCleanup {
     }
 }
 
+#[derive(Debug)]
+struct StateMigrationLock(File);
+
+impl StateMigrationLock {
+    fn acquire(database: &Path) -> Result<Self> {
+        let path = state_migration_lock_path(database);
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!("refusing to use a symlinked state migration lock");
+        }
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+        }
+        let file = options.open(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.lock_exclusive()
+            .context("failed to lock state schema migration")?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for StateMigrationLock {
+    fn drop(&mut self) {
+        let _ignored = self.0.unlock();
+    }
+}
+
+fn state_migration_lock_path(database: &Path) -> PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(".migration.lock");
+    PathBuf::from(path)
+}
+
 #[derive(Clone, Debug)]
 pub struct StateStore {
     worker: Arc<SqliteWorker>,
@@ -308,6 +353,7 @@ impl StateStore {
             restrict_directory(parent)?;
         }
         let audit_mac = AuditMacKey::load_or_create(path)?;
+        let _migration_lock = StateMigrationLock::acquire(path)?;
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open state database at {}", path.display()))?;
         configure_connection(&connection)?;
@@ -2447,6 +2493,118 @@ mod tests {
         );
         assert_eq!(anchor, "GENESIS");
         assert!(store.verify_audit_chain()?);
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_state_database_fails_without_replacing_bytes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state.db");
+        let corrupt = b"not-a-sqlite-database-and-must-not-be-replaced".to_vec();
+        std::fs::write(&database, &corrupt)?;
+
+        assert!(StateStore::open(&database).is_err());
+        assert_eq!(std::fs::read(&database)?, corrupt);
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_state_backup_can_restore_after_corruption() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state.db");
+        let backup = directory.path().join("state.db.backup");
+        {
+            let store = StateStore::open(&database)?;
+            store.append_audit(&test_audit_event("backup survives"))?;
+            assert!(store.verify_audit_chain()?);
+        }
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        std::fs::copy(&database, &backup)?;
+        std::fs::write(&database, b"corrupt")?;
+        assert!(StateStore::open(&database).is_err());
+
+        std::fs::copy(&backup, &database)?;
+        let restored = StateStore::open(&database)?;
+        assert_eq!(restored.audit_tail(10)?.len(), 1);
+        assert!(restored.verify_audit_chain()?);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_legacy_migration_is_serialized_and_idempotent() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state").join("state.db");
+        std::fs::create_dir_all(
+            database
+                .parent()
+                .context("fixture database has no parent")?,
+        )?;
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute_batch(include_str!("../tests/fixtures/core_state_beta_v0.sql"))?;
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let database = database.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || -> Result<StateStore> {
+                barrier.wait();
+                StateStore::open(&database)
+            }));
+        }
+        barrier.wait();
+        let mut stores = Vec::new();
+        for thread in threads {
+            stores.push(
+                thread
+                    .join()
+                    .map_err(|_| anyhow!("migration thread panicked"))??,
+            );
+        }
+        for store in &stores {
+            assert!(store.pending_approvals()?.is_empty());
+            assert!(store.persistent_grants(Some("beta-local"))?.is_empty());
+        }
+        let version: i64 = stores[0].test_call(|connection| {
+            Ok(connection.query_row(
+                "SELECT version FROM schema_versions WHERE component = 'core_state'",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        assert_eq!(version, STATE_SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_wal_never_causes_silent_empty_state_fallback() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state.db");
+        {
+            let store = StateStore::open(&database)?;
+            store.append_audit(&test_audit_event("persisted before malformed wal"))?;
+        }
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        let wal = sqlite_sidecar(&database, "-wal");
+        std::fs::write(&wal, b"malformed-wal-header")?;
+        match StateStore::open(&database) {
+            Ok(store) => {
+                let records = store.audit_tail(10)?;
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].event.summary, "persisted before malformed wal");
+                assert!(store.verify_audit_chain()?);
+            }
+            Err(_) => {
+                assert!(database.is_file());
+            }
+        }
         Ok(())
     }
 

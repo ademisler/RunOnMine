@@ -17,7 +17,9 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get};
 use base64::Engine;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use runonmine_core::secrets::{SecretStore, default_secret_store};
+use runonmine_core::secrets::{
+    SecretStore, default_secret_store, recover_pending_config_secret_transaction,
+};
 use runonmine_core::{
     AppConfig, AppPaths, ConnectorConfig, ConnectorKind, PolicyEngine, PolicyMode,
 };
@@ -175,6 +177,8 @@ pub async fn serve_loopback() -> Result<()> {
     if reconciled > 0 {
         tracing::info!(reconciled, "completed pending connector removals");
     }
+    let startup_secrets = default_secret_store(&paths)?;
+    recover_pending_config_secret_transaction(&paths.config_file(), startup_secrets.as_ref())?;
     let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
     super::reconcile_orphan_connector_artifacts(&paths, &config)?;
     let HttpConnectorBuild { state, degraded } = build_http_connector_state(&paths, &config);
