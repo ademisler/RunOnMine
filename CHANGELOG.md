@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Split platform-native automation from `shell:exec` with a dedicated `platform:exec` OAuth scope and explicit AppleScript, PowerShell, and D-Bus consent text.
 - Default dynamic OAuth registrations that omit `scope` to only `machine:read` instead of every supported capability.
 - Require an owner-controlled initial access token for OAuth dynamic client registration; validate before accounting, enforce atomic per-source/global quotas, expire and prune unused clients, recover capacity, and add no-overwrite owner-only token export and rotation.
 - Canonicalize privileged executable policy resources with the exact root/SYSTEM ownership and path identity resolver used by the helper allowlist.

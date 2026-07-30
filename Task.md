@@ -33,7 +33,7 @@ Status markers:
 - [x] **P1-02 — Canonicalize privileged executable resources before policy evaluation.** Use the same executable identity as the helper.
 - [x] **P1-03 — Harden OAuth Dynamic Client Registration against persistent denial of service.** Validate before consuming rate-limit capacity; add source-aware limits, registration authorization/approval, client expiry/pruning and quota recovery.
 - [x] **P1-04 — Use least-privilege OAuth defaults.** Missing `scope` must not grant every supported scope.
-- [ ] **P1-05 — Separate platform-native OAuth authority from `shell:exec`.** Introduce explicit platform-native scopes and consent text.
+- [x] **P1-05 — Separate platform-native OAuth authority from `shell:exec`.** Introduce explicit platform-native scopes and consent text.
 - [ ] **P1-06 — Prevent OAuth client-name impersonation in consent UI.** Show client ID fingerprint, redirect origins, registration time and unverified-client warning.
 - [ ] **P1-07 — Namespace OAuth state by connector/issuer.** Clients, authorizations, codes, tokens, sessions and revocation must be connector-specific.
 - [ ] **P1-08 — Expire approval rows atomically on timeout.** Audit and state must not temporarily disagree.

@@ -748,7 +748,7 @@ mod tests {
             (Capability::FilesRead, Scope::FilesRead),
             (Capability::FilesWrite, Scope::FilesWrite),
             (Capability::ShellExec, Scope::ShellExec),
-            (Capability::PlatformNative, Scope::ShellExec),
+            (Capability::PlatformNative, Scope::PlatformNative),
             (Capability::BrowserRead, Scope::BrowserRead),
             (Capability::BrowserAct, Scope::BrowserAct),
             (Capability::DesktopControl, Scope::DesktopControl),
@@ -757,5 +757,9 @@ mod tests {
         for (capability, expected) in cases {
             assert_eq!(oauth_scope_for_capability(capability), expected);
         }
+        assert_ne!(
+            oauth_scope_for_capability(Capability::ShellExec),
+            oauth_scope_for_capability(Capability::PlatformNative)
+        );
     }
 }

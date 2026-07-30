@@ -13,6 +13,7 @@ pub enum Scope {
     FilesRead,
     FilesWrite,
     ShellExec,
+    PlatformNative,
     BrowserRead,
     BrowserAct,
     DesktopControl,
@@ -20,11 +21,12 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::MachineRead,
         Self::FilesRead,
         Self::FilesWrite,
         Self::ShellExec,
+        Self::PlatformNative,
         Self::BrowserRead,
         Self::BrowserAct,
         Self::DesktopControl,
@@ -38,10 +40,29 @@ impl Scope {
             Self::FilesRead => "files:read",
             Self::FilesWrite => "files:write",
             Self::ShellExec => "shell:exec",
+            Self::PlatformNative => "platform:exec",
             Self::BrowserRead => "browser:read",
             Self::BrowserAct => "browser:act",
             Self::DesktopControl => "desktop:control",
             Self::AdminExec => "admin:exec",
+        }
+    }
+
+    /// Human-readable capability text shown on the local consent page.
+    #[must_use]
+    pub const fn consent_text(self) -> &'static str {
+        match self {
+            Self::MachineRead => "Read non-secret machine information",
+            Self::FilesRead => "Read files in owner-selected folders",
+            Self::FilesWrite => "Create, change, move, or delete files in owner-selected folders",
+            Self::ShellExec => "Run shell commands as the signed-in user",
+            Self::PlatformNative => {
+                "Run operating-system automation through AppleScript, PowerShell, or D-Bus"
+            }
+            Self::BrowserRead => "Read pages in the isolated browser",
+            Self::BrowserAct => "Navigate and interact with pages in the isolated browser",
+            Self::DesktopControl => "View and control desktop windows and input",
+            Self::AdminExec => "Run separately allowlisted administrator programs",
         }
     }
 }
@@ -61,6 +82,7 @@ impl FromStr for Scope {
             "files:read" => Ok(Self::FilesRead),
             "files:write" => Ok(Self::FilesWrite),
             "shell:exec" => Ok(Self::ShellExec),
+            "platform:exec" => Ok(Self::PlatformNative),
             "browser:read" => Ok(Self::BrowserRead),
             "browser:act" => Ok(Self::BrowserAct),
             "desktop:control" => Ok(Self::DesktopControl),
@@ -183,7 +205,21 @@ mod tests {
         assert!(default.contains(Scope::MachineRead));
         assert!(!default.contains(Scope::FilesRead));
         assert!(!default.contains(Scope::ShellExec));
+        assert!(!default.contains(Scope::PlatformNative));
         assert!(!default.contains(Scope::AdminExec));
+    }
+
+    #[test]
+    fn platform_native_scope_is_distinct_and_has_explicit_consent_text() {
+        assert_eq!(Scope::PlatformNative.as_str(), "platform:exec");
+        assert_ne!(Scope::PlatformNative, Scope::ShellExec);
+        assert!(Scope::PlatformNative.consent_text().contains("AppleScript"));
+        assert_eq!(
+            ScopeSet::parse("shell:exec platform:exec")
+                .unwrap_or_default()
+                .to_space_delimited(),
+            "shell:exec platform:exec"
+        );
     }
 
     #[test]

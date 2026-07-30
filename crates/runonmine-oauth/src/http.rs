@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -175,12 +177,11 @@ async fn revoke(
 
 fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Response {
     let client_name = encode_text(&challenge.client_name);
-    let scope_text = challenge.scopes.to_space_delimited();
-    let scopes = encode_text(&scope_text);
+    let scopes = consent_scope_list(&challenge.scopes);
     let consent_endpoint = service.consent_endpoint();
     let action = encode_text(consent_endpoint.as_str());
     let body = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>RunOnMine authorization</title></head><body><main><h1>Allow AI access to this machine?</h1><p><strong>{client_name}</strong> requests these capabilities:</p><p>{scopes}</p><form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"consent_id\" value=\"{}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button><button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button></form></main></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>RunOnMine authorization</title></head><body><main><h1>Allow AI access to this machine?</h1><p><strong>{client_name}</strong> requests these capabilities:</p>{scopes}<form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"consent_id\" value=\"{}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button><button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button></form></main></body></html>",
         challenge.id,
         challenge.csrf.expose_secret(),
     );
@@ -203,6 +204,20 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
     response
 }
 
+fn consent_scope_list(scopes: &crate::ScopeSet) -> String {
+    let mut html = String::from("<ul>");
+    for scope in scopes.iter() {
+        let _ignored = write!(
+            html,
+            "<li><code>{}</code> — {}</li>",
+            encode_text(scope.as_str()),
+            encode_text(scope.consent_text())
+        );
+    }
+    html.push_str("</ul>");
+    html
+}
+
 fn no_store_headers(headers: &mut HeaderMap) {
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
@@ -221,6 +236,16 @@ fn no_store_redirect(target: &url::Url) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consent_scope_list_distinguishes_shell_from_platform_automation() {
+        let scopes = crate::ScopeSet::parse("shell:exec platform:exec").unwrap_or_default();
+        let html = consent_scope_list(&scopes);
+        assert!(html.contains("shell:exec"));
+        assert!(html.contains("Run shell commands as the signed-in user"));
+        assert!(html.contains("platform:exec"));
+        assert!(html.contains("AppleScript, PowerShell, or D-Bus"));
+    }
 
     #[test]
     fn registration_requires_exact_bearer_syntax() -> Result<(), Box<dyn std::error::Error>> {

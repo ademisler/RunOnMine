@@ -46,6 +46,7 @@ compromised.
 | Concurrent local processes overwrite encrypted fallback secrets | owner-only inter-process file locking around every read-modify-write transaction |
 | OAuth registration floods or abandoned clients exhaust persistent capacity | owner-controlled 256-bit initial access token, validation before accounting, domain-hashed Cloudflare source keys, atomic per-source/global SQLite windows, 256-client cap, 24-hour unused-client expiry, use-based renewal, and pre-capacity pruning |
 | An OAuth dynamic client omits `scope` and silently receives every capability | omission defaults to only `machine:read`; broader scopes must be explicitly registered and later authorization requests remain a subset of that registration |
+| A token granted ordinary `shell:exec` silently gains AppleScript, PowerShell, or D-Bus automation | platform-native tools require the distinct `platform:exec` scope, tool discovery checks that exact scope, and consent renders an explicit operating-system automation description |
 | SQLite sidecars expose state | private parent directories and owner-only database, WAL, and shared-memory files |
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |

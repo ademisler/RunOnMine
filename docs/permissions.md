@@ -88,12 +88,17 @@ runonmine approvals grants revoke <connector> --principal-fingerprint <fingerpri
 ## OAuth scopes
 
 Named Tunnel tokens may contain `machine:read`, `files:read`, `files:write`,
-`shell:exec`, `browser:read`, `browser:act`, `desktop:control`, and
-`admin:exec`. A tool runs only when both the token scope and local policy allow
-it. Dynamic clients that omit `scope` are registered with only `machine:read`;
-all broader capabilities require explicit registration and explicit authorization
-consent. Platform-native scripting maps to `shell:exec` for OAuth and retains its
-separate local capability policy.
+`shell:exec`, `platform:exec`, `browser:read`, `browser:act`,
+`desktop:control`, and `admin:exec`. A tool runs only when both the token scope
+and local policy allow it. Dynamic clients that omit `scope` are registered with
+only `machine:read`; all broader capabilities require explicit registration and
+explicit authorization consent.
+
+`shell:exec` authorizes only the ordinary user shell. AppleScript, PowerShell,
+and structured D-Bus automation require the separate `platform:exec` scope and
+appear as operating-system automation on the local consent page. Existing OAuth
+clients or sessions that contain only `shell:exec` do not gain `platform:exec`;
+they must register and authorize that scope explicitly.
 
 ## Important boundaries
 

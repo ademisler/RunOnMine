@@ -127,12 +127,17 @@ const fn oauth_scope_for_capability(capability: Capability) -> Scope {
         Capability::SystemRead => Scope::MachineRead,
         Capability::FilesRead => Scope::FilesRead,
         Capability::FilesWrite => Scope::FilesWrite,
-        Capability::ShellExec | Capability::PlatformNative => Scope::ShellExec,
+        Capability::ShellExec => Scope::ShellExec,
+        Capability::PlatformNative => Scope::PlatformNative,
         Capability::BrowserRead => Scope::BrowserRead,
         Capability::BrowserAct => Scope::BrowserAct,
         Capability::DesktopControl => Scope::DesktopControl,
         Capability::AdminExec => Scope::AdminExec,
     }
+}
+
+fn oauth_scopes_allow_capability(scopes: &ScopeSet, capability: Capability) -> bool {
+    scopes.contains(oauth_scope_for_capability(capability))
 }
 
 impl Runtime {
@@ -594,7 +599,7 @@ impl RunOnMineServer {
         let RequestPrincipal::OAuth { scopes, .. } = &access.principal else {
             return true;
         };
-        scopes.contains(oauth_scope_for_capability(*capability))
+        oauth_scopes_allow_capability(scopes, *capability)
     }
 
     async fn admin_allowlisted_programs(&self) -> Option<usize> {
@@ -1908,6 +1913,29 @@ use validation::{
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_scope_does_not_authorize_platform_native_tools() {
+        let shell_only = ScopeSet::parse("shell:exec").unwrap_or_default();
+        assert!(oauth_scopes_allow_capability(
+            &shell_only,
+            Capability::ShellExec
+        ));
+        assert!(!oauth_scopes_allow_capability(
+            &shell_only,
+            Capability::PlatformNative
+        ));
+
+        let platform_only = ScopeSet::parse("platform:exec").unwrap_or_default();
+        assert!(oauth_scopes_allow_capability(
+            &platform_only,
+            Capability::PlatformNative
+        ));
+        assert!(!oauth_scopes_allow_capability(
+            &platform_only,
+            Capability::ShellExec
+        ));
+    }
+
     use super::*;
 
     #[test]

@@ -88,7 +88,9 @@ and rotates every OAuth registration token before access can be restored.
 Registration payloads are fully validated before they can consume capacity. A
 registration that omits `scope` receives only `machine:read`; clients must name
 each additional capability explicitly and can never request a scope later that
-was absent from their registered set. Authorized valid registrations are
+was absent from their registered set. Platform-native automation uses the
+separate `platform:exec` scope rather than inheriting `shell:exec`, and the local
+consent page explains that it covers AppleScript, PowerShell, or D-Bus. Authorized valid registrations are
 committed atomically with a SQLite-backed limit of five registrations per
 Cloudflare source per minute, twenty globally per minute, and 256 live clients.
 These limits survive agent restarts. Unused
