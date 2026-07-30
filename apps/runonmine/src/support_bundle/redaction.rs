@@ -169,6 +169,9 @@ pub(super) fn known_sensitive_values(paths: &AppPaths, config: Option<&AppConfig
         for root in &config.allowed_roots {
             insert_path_value(&mut values, root);
         }
+        if let Some(path) = &config.browser.executable_path {
+            insert_path_value(&mut values, path);
+        }
         if let Some(endpoint) = &config.browser.external_cdp_url {
             values.insert(endpoint.as_str().to_owned());
         }

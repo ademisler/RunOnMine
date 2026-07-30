@@ -146,6 +146,12 @@ on restart/backoff and removed on process stop.
   remove stale disposable profiles and terminate only same-user Chromium
   processes whose token, exact profile, executable, PID, and start identity all
   match; ambiguous entries are left untouched and reported.
+  The local owner may choose an exact Chrome, Chromium, or Edge binary with
+  `runonmine browser executable set /absolute/path`, return to platform discovery
+  with `browser executable auto`, and inspect the resolved identity with
+  `browser executable show`. Missing or unsupported selections disable browser
+  tools without invalidating the rest of the configuration. External CDP remains
+  a separate loopback-only expert mode and never launches the selected binary.
 - Secrets use the operating-system credential store, with an explicit encrypted headless Linux fallback. The encrypted file backend uses an owner-only cross-process lock so CLI, desktop, and agent updates cannot overwrite one another.
 - Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. The core worker has a bounded 128-job queue, one-second enqueue backpressure, and overload metrics; dangerous authorization and audit paths fail closed when work cannot be admitted. Accepted jobs finish without an ambiguous reply timeout. Database directories are private, database/WAL/shared-memory files are owner-only, and worker threads are joined during shutdown. MCP authorization, approval, and audit paths use asynchronous worker replies.
 - OAuth clients, authorization state, codes, tokens, and refresh families are isolated by connector/issuer even when connectors share one local SQLite database.

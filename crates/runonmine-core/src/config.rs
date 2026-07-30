@@ -168,6 +168,8 @@ pub struct BrowserConfig {
     pub profile_name: String,
     #[serde(default)]
     pub profile_mode: BrowserProfileMode,
+    #[serde(default)]
+    pub executable_path: Option<PathBuf>,
     pub external_cdp_url: Option<Url>,
     #[serde(default)]
     pub allow_private_network: bool,
@@ -184,6 +186,7 @@ impl Default for BrowserConfig {
         Self {
             profile_name: "default".to_owned(),
             profile_mode: BrowserProfileMode::Ephemeral,
+            executable_path: None,
             external_cdp_url: None,
             allow_private_network: false,
             operation_timeout_seconds: default_browser_operation_timeout_seconds(),
@@ -577,6 +580,7 @@ fn validate_limits(limits: &LimitsConfig) -> Result<()> {
 }
 
 fn validate_browser(browser: &BrowserConfig) -> Result<()> {
+    validate_browser_executable_path(browser.executable_path.as_deref())?;
     if browser.operation_timeout_seconds == 0 || browser.operation_timeout_seconds > 300 {
         bail!("browser operation timeout must be between 1 and 300 seconds");
     }
@@ -602,6 +606,13 @@ fn validate_browser(browser: &BrowserConfig) -> Result<()> {
                 "external browser CDP endpoint must use credential-free loopback HTTP or WebSocket transport without query or fragment data"
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_browser_executable_path(path: Option<&Path>) -> Result<()> {
+    if path.is_some_and(|path| !path.is_absolute()) {
+        bail!("browser executable path must be absolute");
     }
     Ok(())
 }
@@ -1349,6 +1360,7 @@ mod tests {
     fn browser_operation_timeout_defaults_for_older_config_and_is_bounded() -> Result<()> {
         let browser: BrowserConfig = toml::from_str("profile_name = 'default'")?;
         assert_eq!(browser.operation_timeout_seconds, 45);
+        assert!(browser.executable_path.is_none());
 
         let mut config = AppConfig::default();
         config.browser.operation_timeout_seconds = 0;
@@ -1357,6 +1369,24 @@ mod tests {
         assert!(config.validate().is_err());
         config.browser.operation_timeout_seconds = 1;
         assert!(config.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_browser_executable_must_be_absolute_and_remain_recoverable() -> Result<()> {
+        let mut config = AppConfig::default();
+        config.browser.executable_path = Some(PathBuf::from("relative-browser"));
+        assert!(config.validate().is_err());
+
+        config.browser.executable_path = Some(std::env::current_exe()?);
+        assert!(config.validate().is_ok());
+
+        config.browser.executable_path =
+            Some(std::env::temp_dir().join(Uuid::new_v4().to_string()));
+        assert!(
+            config.validate().is_ok(),
+            "a missing explicit browser must remain recoverable through browser executable auto/set"
+        );
         Ok(())
     }
 

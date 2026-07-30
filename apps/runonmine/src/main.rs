@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use rand::RngCore;
+use runonmine_browser::{inspect_explicit_browser_executable, resolve_browser_executable};
 use runonmine_connectors::openai::{OpenAiMcpTarget, OpenAiTunnelProfile};
 use runonmine_connectors::{
     BinaryInstaller, BinaryKind, BinaryProbe, ExternalBinaryTrust, InstallReceipt, InstalledBinary,
@@ -313,10 +314,27 @@ enum BrowserCommand {
     Attach {
         loopback_cdp_url: Url,
     },
+    Executable {
+        #[command(subcommand)]
+        command: BrowserExecutableCommand,
+    },
     PrivateNetwork {
         #[arg(value_enum)]
         access: PrivateNetworkAccess,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum BrowserExecutableCommand {
+    /// Select one exact Chrome, Chromium, or Edge executable.
+    Set {
+        #[arg(value_name = "ABSOLUTE_FILE")]
+        path: PathBuf,
+    },
+    /// Return to platform auto-detection.
+    Auto,
+    /// Show the configured and currently resolved browser executable identity.
+    Show,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

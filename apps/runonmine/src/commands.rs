@@ -246,6 +246,9 @@ pub(super) fn browser(command: BrowserCommand) -> Result<()> {
                 "Configured expert CDP attachment. RunOnMine will not launch your daily profile."
             );
         }
+        BrowserCommand::Executable { command } => {
+            browser_executable(&config_path, command)?;
+        }
         BrowserCommand::PrivateNetwork { access } => {
             let allowed = AppConfig::update(&config_path, |config| {
                 config.browser.allow_private_network =
@@ -258,6 +261,72 @@ pub(super) fn browser(command: BrowserCommand) -> Result<()> {
                 );
             } else {
                 println!("Private-network browser access disabled.");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn browser_executable(config_path: &Path, command: BrowserExecutableCommand) -> Result<()> {
+    match command {
+        BrowserExecutableCommand::Set { path } => {
+            if !path.is_absolute() {
+                bail!("browser executable selection requires an absolute path");
+            }
+            let identity = inspect_explicit_browser_executable(&path)?;
+            let selected_path = identity.path.clone();
+            AppConfig::update(config_path, move |config| {
+                config.browser.executable_path = Some(selected_path);
+                Ok(())
+            })?;
+            println!(
+                "Selected {} executable at {} (explicit).",
+                identity.product,
+                identity.path.display()
+            );
+        }
+        BrowserExecutableCommand::Auto => {
+            AppConfig::update(config_path, |config| {
+                config.browser.executable_path = None;
+                Ok(())
+            })?;
+            match resolve_browser_executable(None) {
+                Ok(identity) => println!(
+                    "Enabled browser executable auto-detection: {} at {}.",
+                    identity.product,
+                    identity.path.display()
+                ),
+                Err(_) => println!(
+                    "Enabled browser executable auto-detection; no supported installation is currently available."
+                ),
+            }
+        }
+        BrowserExecutableCommand::Show => {
+            let config = AppConfig::load_or_create(config_path)?;
+            if let Some(endpoint) = &config.browser.external_cdp_url {
+                println!("Browser mode: external CDP attachment at {endpoint}");
+                println!(
+                    "Launch executable selection is retained but inactive in external CDP mode."
+                );
+            } else {
+                println!("Browser mode: isolated managed session");
+            }
+            match resolve_browser_executable(config.browser.executable_path.as_deref()) {
+                Ok(identity) => {
+                    println!("Executable source: {}", identity.source);
+                    println!("Executable product: {}", identity.product);
+                    println!("Executable path: {}", identity.path.display());
+                    println!("Executable status: available");
+                }
+                Err(error) => {
+                    let source = if config.browser.executable_path.is_some() {
+                        "explicit"
+                    } else {
+                        "auto-detected"
+                    };
+                    println!("Executable source: {source}");
+                    println!("Executable status: unavailable ({error})");
+                }
             }
         }
     }
@@ -748,6 +817,22 @@ pub(super) async fn doctor() -> Result<()> {
     );
     println!("Legacy MacMCP port 45799: reserved and untouched");
     let mut failures = 0_u32;
+    if config.browser.external_cdp_url.is_some() {
+        println!("Browser executable: inactive (external CDP attachment configured)");
+    } else {
+        match resolve_browser_executable(config.browser.executable_path.as_deref()) {
+            Ok(identity) => println!(
+                "Browser executable: {} ({}) at {}",
+                identity.product,
+                identity.source,
+                identity.path.display()
+            ),
+            Err(error) => {
+                println!("Browser executable: FAILED ({error})");
+                failures = failures.saturating_add(1);
+            }
+        }
+    }
     let state = StateStore::open(&paths.state_db())?;
     if !state.verify_audit_chain()? {
         println!("Audit chain: FAILED");

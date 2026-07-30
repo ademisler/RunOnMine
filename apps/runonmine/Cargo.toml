@@ -20,6 +20,7 @@ clap.workspace = true
 chrono.workspace = true
 rand.workspace = true
 rpassword.workspace = true
+runonmine-browser.workspace = true
 runonmine-core.workspace = true
 runonmine-connectors.workspace = true
 runonmine-mcp.workspace = true

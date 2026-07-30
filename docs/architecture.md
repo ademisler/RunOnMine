@@ -92,6 +92,19 @@ RunOnMine connection is quarantined and must be reattached on the next call.
 Recovery count and the last bounded operation category are available through
 browser profile diagnostics without exposing page content or JavaScript.
 
+Browser launch identity is explicit and revalidated. Configuration may retain one
+absolute executable selection; the local CLI accepts it only after canonicalizing
+a real executable whose identity is Chrome, Chromium, or Edge. Auto mode searches
+a fixed platform candidate list. Runtime resolves and validates the selection
+again before every owned launch, disables browser tools when no supported binary
+is available, and records the real post-launch executable in the crash lease.
+Local `browser executable show` may display the canonical path. MCP profile and
+support diagnostics expose only selection source, product family, availability,
+and executable basename so remote BrowserRead callers do not receive a user path.
+An unavailable retained selection remains loadable so the owner can recover with
+`browser executable auto` or a new `set`. External CDP bypasses launch selection
+entirely and retains all existing loopback, connector, and protected-mode gates.
+
 Owned Chromium launch is registered before process creation with a private,
 atomically replaced lease inside the exact profile directory. The lease binds a
 random launch token, profile mode/path, launcher identity, agent PID/start time,

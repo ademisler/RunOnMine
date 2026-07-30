@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use chrono::{DateTime, Utc};
+use runonmine_browser::resolve_browser_executable;
 use runonmine_core::{
     AppConfig, AppPaths, AuditOutcome, BrowserProfileMode, ConnectorConfig, ConnectorKind,
     PolicyPreset, QuickTunnelRuntimeStore, StateStore,
@@ -74,6 +75,9 @@ enum PublicEndpointStatus {
 #[derive(Debug, Serialize)]
 pub(super) struct BrowserSummary {
     profile_mode: BrowserProfileMode,
+    executable_selection: &'static str,
+    executable_product: Option<String>,
+    executable_available: bool,
     external_cdp_configured: bool,
     private_network_allowed: bool,
     operation_timeout_seconds: u64,
@@ -155,11 +159,24 @@ pub(super) fn config_report(paths: &AppPaths) -> (ConfigReport, Option<AppConfig
                 .map(|(index, connector)| connector_summary(index, connector, &quick_runtime))
                 .collect()
         },
-        browser: BrowserSummary {
-            profile_mode: config.browser.profile_mode,
-            external_cdp_configured: config.browser.external_cdp_url.is_some(),
-            private_network_allowed: config.browser.allow_private_network,
-            operation_timeout_seconds: config.browser.operation_timeout_seconds,
+        browser: {
+            let executable =
+                resolve_browser_executable(config.browser.executable_path.as_deref()).ok();
+            BrowserSummary {
+                profile_mode: config.browser.profile_mode,
+                executable_selection: if config.browser.executable_path.is_some() {
+                    "explicit"
+                } else {
+                    "automatic"
+                },
+                executable_product: executable
+                    .as_ref()
+                    .map(|identity| identity.product.to_string()),
+                executable_available: executable.is_some(),
+                external_cdp_configured: config.browser.external_cdp_url.is_some(),
+                private_network_allowed: config.browser.allow_private_network,
+                operation_timeout_seconds: config.browser.operation_timeout_seconds,
+            }
         },
         limits: LimitsSummary {
             approval_timeout_seconds: config.limits.approval_timeout_seconds,

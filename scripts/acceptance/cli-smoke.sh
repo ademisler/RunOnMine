@@ -30,6 +30,21 @@ setup_output=$(run_cli setup --root "$sandbox/project")
 printf '%s\n' "$setup_output" | grep -F 'RunOnMine is initialized.' >/dev/null
 printf '%s\n' "$setup_output" | grep -F 'Allowed roots: 1' >/dev/null
 run_cli policy show | grep -F 'AdminExec: Deny' >/dev/null
+
+fake_browser="$sandbox/chromium"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_browser"
+chmod 700 "$fake_browser"
+run_cli browser executable set "$fake_browser" | grep -F 'Selected Chromium executable' >/dev/null
+run_cli browser executable show | grep -F 'Executable source: explicit' >/dev/null
+run_cli browser attach http://127.0.0.1:9222 | grep -F 'Configured expert CDP attachment' >/dev/null
+run_cli browser executable show | grep -F 'Browser mode: external CDP attachment' >/dev/null
+run_cli browser executable set "$fake_browser" >/dev/null
+run_cli browser executable show | grep -F 'Browser mode: external CDP attachment' >/dev/null
+run_cli browser profile ephemeral --name default | grep -F 'Selected disposable browser profile mode.' >/dev/null
+rm -f "$fake_browser"
+run_cli browser executable show | grep -F 'Executable status: unavailable' >/dev/null
+run_cli browser executable auto | grep -F 'Enabled browser executable auto-detection' >/dev/null
+
 run_cli connect list | grep -F 'LocalHttp' >/dev/null
 credential_file="$sandbox/local-http.json"
 local_http_output=$(run_cli connect local-http enable --token-output "$credential_file")

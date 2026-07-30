@@ -170,6 +170,10 @@ impl BrowserLease {
         &self.record.profile_directory
     }
 
+    pub(crate) fn executable(&self) -> &Path {
+        &self.record.executable
+    }
+
     pub(crate) const fn ephemeral(&self) -> bool {
         self.record.ephemeral
     }

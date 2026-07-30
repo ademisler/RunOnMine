@@ -20,6 +20,35 @@ runonmine browser profile ephemeral --name default
 runonmine browser profile delete work
 ```
 
+## Browser executable selection and identity
+
+RunOnMine auto-detects supported Google Chrome, Chromium, or Microsoft Edge
+installations from a fixed platform list. The local owner can instead pin the
+launch choice explicitly:
+
+```console
+runonmine browser executable set /absolute/path/to/chrome
+runonmine browser executable show
+runonmine browser executable auto
+```
+
+`set` requires an absolute path, resolves it to a canonical real executable,
+checks the platform executable bit where applicable, and accepts only a known
+Chrome, Chromium, or Edge binary identity. The canonical path is stored in the
+owner-only atomic configuration. Runtime repeats executable availability and
+identity checks before each owned launch; the crash lease then records the real
+post-launch executable, which can differ from a small launcher wrapper. If an
+explicit binary is later removed or becomes unsupported, browser tools are
+unavailable but the rest of the configuration still loads, allowing the owner to
+recover with `auto` or another `set`.
+
+The local `show` command displays the full canonical path. MCP
+`browser_profile_info` and support bundles expose only automatic/explicit source,
+product family, availability, and executable basename—not the local path. Remote
+connectors cannot alter executable selection. Selecting a browser does not weaken
+external CDP rules: external attachment does not launch the configured binary,
+remains unavailable to remote connectors, and is rejected in protected mode.
+
 ## Expert CDP attachment
 
 RunOnMine never starts a daily Chrome profile with remote debugging enabled.
@@ -97,8 +126,9 @@ guard. Chromium processes launched by RunOnMine are force-terminated when needed
 ephemeral profile data is then removed. A later operation creates a fresh browser
 session lazily. For expert external CDP attachment, RunOnMine drops and quarantines
 its connection but never kills the independently owned browser process. Profile
-diagnostics expose only the configured deadline, recovery count, and last bounded
-operation category.
+diagnostics expose the configured deadline, recovery count, last bounded
+operation category, and bounded browser product/source/basename identity; local
+executable paths are not included.
 
 ## Crash leases and startup reconciliation
 

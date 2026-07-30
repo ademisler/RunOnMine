@@ -4568,6 +4568,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "rpassword",
+ "runonmine-browser",
  "runonmine-connectors",
  "runonmine-core",
  "runonmine-mcp",

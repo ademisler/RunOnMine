@@ -19,7 +19,7 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
 use runonmine_browser::{
-    BrowserProfile, BrowserSession, chromium_available, reap_orphaned_browser_sessions,
+    BrowserProfile, BrowserSession, browser_executable_available, reap_orphaned_browser_sessions,
 };
 use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::process::{ProcessRequest, execute_shell};
@@ -283,13 +283,14 @@ impl RunOnMineServer {
                 }
             }
         };
-        let browser_available =
-            matches!(browser_profile, BrowserProfile::ExternalCdp { .. }) || chromium_available();
-        let browser = Arc::new(BrowserSession::with_operation_timeout(
+        let browser_available = matches!(browser_profile, BrowserProfile::ExternalCdp { .. })
+            || browser_executable_available(app_config.browser.executable_path.as_deref());
+        let browser = Arc::new(BrowserSession::with_executable_and_operation_timeout(
             browser_profile,
             browser_should_be_headless(),
             app_config.browser.allow_private_network && !remote_connector,
             runtime.0.max_output_bytes,
+            app_config.browser.executable_path.clone(),
             Duration::from_secs(app_config.browser.operation_timeout_seconds),
         ));
         let engine = PolicyEngine;
