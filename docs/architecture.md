@@ -12,10 +12,12 @@ user's chosen AI service; tool calls execute on a machine the user owns.
 
 Shared crates isolate configuration and persistence, MCP routing, OAuth,
 connectors, Chromium automation, and operating-system adapters. Within
-`runonmine-mcp`, tool dispatch remains in the crate root, `http.rs` owns the
-loopback transport, connector authentication, public Host routing, and HTTP MCP
-session bindings, and `managed_connectors.rs` owns Cloudflare/OpenAI process
-supervision plus private connector artifacts. In the CLI, `connector_transactions.rs`
+`runonmine-mcp`, tool dispatch remains in the crate root, `audit.rs` owns audit
+event construction plus fail-closed persistence for dangerous capabilities,
+`http.rs` owns the loopback transport, connector authentication, public Host
+routing, and HTTP MCP session bindings, and `managed_connectors.rs` owns
+Cloudflare/OpenAI process supervision plus private connector artifacts. In the CLI,
+`connector_transactions.rs`
 coordinates connector config and credential changes separately from transport setup and
 user interaction in `connectors.rs`. The `desktop-control` feature contains capture and input
 dependencies. Linux/VPS builds with `--no-default-features` do not include those
