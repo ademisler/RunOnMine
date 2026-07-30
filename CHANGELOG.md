@@ -48,6 +48,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Maintenance
 
+- Extract MCP approval request creation, pending/decision/timeout transitions, and required audit handoff into a dedicated lifecycle module with direct approved, denied, expired, timeout, and audit-failure tests.
 - Extract MCP audit event construction, fail-closed persistence policy, and best-effort completion logging into a dedicated module with direct failure-path tests.
 - Add committed beta-v0 core-state and beta-v1 OAuth SQLite fixtures that verify safe schema upgrades, preservation of approvals, exact grants, clients, and sessions, and removal of legacy broad temporary grants.
 - Add property-based regression coverage for support-bundle redaction of known values, labeled credentials, URLs, email addresses, filesystem paths, IP addresses, and hostnames, including ANSI and NUL obfuscation.
