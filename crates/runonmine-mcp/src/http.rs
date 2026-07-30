@@ -100,6 +100,10 @@ struct HttpConnectorState {
 pub async fn serve_loopback() -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
+    let reconciled = super::connector_removal::reconcile_pending_connector_removals(&paths)?;
+    if reconciled > 0 {
+        tracing::info!(reconciled, "completed pending connector removals");
+    }
     let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
     let connector_state = Arc::new(build_http_connector_state(&paths, &config)?);
     let mut allowed_hosts = vec![

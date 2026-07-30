@@ -176,3 +176,21 @@ performed before reconciliation; if the service-manager restart itself fails,
 the connector remains disabled/removed in configuration, so subsequent runtime
 checks continue to deny access while the local error instructs the owner to
 repair the service before reconnecting.
+
+## Recoverable connector removal
+
+Removal records an owner-only journal entry before deleting configuration or
+credentials. The record binds the connector ID, kind and SHA-256 fingerprint of
+the exact connector configuration, then advances monotonically through
+configuration/secret deletion, approval and grant cleanup, connector-scoped
+OAuth cleanup, and local artifact-directory removal. Every phase is idempotent;
+a handled failure leaves the last completed phase on disk rather than reporting
+a partially removed connector as complete.
+
+Both loopback HTTP and stdio agent startup reconcile pending removals before
+loading connector configuration. The CLI also reconciles pending records before
+connector commands. A per-user inter-process lock serializes removal,
+reconciliation and connector creation, and a connector ID cannot be reused while
+a journal record remains. Repeating `connect remove` after successful cleanup is
+a successful no-op. Corrupt, symlinked, mismatched or unexpectedly large journal
+records fail closed.

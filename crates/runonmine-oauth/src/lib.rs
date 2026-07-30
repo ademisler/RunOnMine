@@ -28,4 +28,4 @@ pub use model::{
 };
 pub use scope::{Scope, ScopeSet};
 pub use service::{OAuthService, OAuthServiceConfig};
-pub use store::{OAuthStore, SqliteOAuthStore};
+pub use store::{OAuthConnectorCleanup, OAuthStore, SqliteOAuthStore};

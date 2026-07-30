@@ -19,11 +19,14 @@ pub(super) fn update_config_with_secrets<T>(
 
 pub(super) fn commit_new_connector(
     mut connector: ConnectorConfig,
+    paths: &AppPaths,
     config_path: &Path,
     secrets: &dyn runonmine_core::secrets::SecretStore,
     values: &[(String, SecretString)],
 ) -> Result<()> {
     let connector_id = connector.id.clone();
+    let _removal_lock = ConnectorRemovalLock::acquire(paths)?;
+    ConnectorRemovalJournal::new(paths).ensure_id_available(&connector_id)?;
     update_config_with_secrets(config_path, secrets, move |config, transaction| {
         if config.connector(&connector_id).is_some() {
             bail!("connector id already exists");
@@ -34,26 +37,6 @@ pub(super) fn commit_new_connector(
         connector.policy_preset = config.default_preset;
         config.connectors.push(connector);
         Ok(())
-    })
-}
-
-pub(super) fn remove_connector_transactionally(
-    config_path: &Path,
-    secrets: &dyn runonmine_core::secrets::SecretStore,
-    connector_id: &str,
-) -> Result<ConnectorConfig> {
-    update_config_with_secrets(config_path, secrets, |config, transaction| {
-        let index = config
-            .connectors
-            .iter()
-            .position(|connector| connector.id == connector_id)
-            .context("connector was not found")?;
-        let removed = config.connectors[index].clone();
-        for suffix in connector_secret_suffixes(removed.kind) {
-            transaction.delete(&format!("connector.{}.{suffix}", removed.id))?;
-        }
-        config.connectors.remove(index);
-        Ok(removed)
     })
 }
 
@@ -72,13 +55,17 @@ fn local_http_connector_index(config: &mut AppConfig) -> usize {
 }
 
 pub(super) fn enable_local_http_transactionally(
+    paths: &AppPaths,
     config_path: &Path,
     secrets: &dyn runonmine_core::secrets::SecretStore,
     token: &SecretString,
 ) -> Result<(String, u16)> {
+    let _removal_lock = ConnectorRemovalLock::acquire(paths)?;
+    let journal = ConnectorRemovalJournal::new(paths);
     update_config_with_secrets(config_path, secrets, |config, transaction| {
         let index = local_http_connector_index(config);
         let connector_id = config.connectors[index].id.clone();
+        journal.ensure_id_available(&connector_id)?;
         let port = config.port;
         config.connectors[index].enabled = true;
         config.connectors[index].policy_preset = config.default_preset;
@@ -88,31 +75,20 @@ pub(super) fn enable_local_http_transactionally(
 }
 
 pub(super) fn disable_local_http_transactionally(
+    paths: &AppPaths,
     config_path: &Path,
     secrets: &dyn runonmine_core::secrets::SecretStore,
 ) -> Result<String> {
+    let _removal_lock = ConnectorRemovalLock::acquire(paths)?;
+    let journal = ConnectorRemovalJournal::new(paths);
     update_config_with_secrets(config_path, secrets, |config, transaction| {
         let index = local_http_connector_index(config);
+        journal.ensure_id_available(&config.connectors[index].id)?;
         let connector_id = config.connectors[index].id.clone();
         config.connectors[index].enabled = false;
         transaction.delete(&local_http_secret_name(&connector_id))?;
         Ok(connector_id)
     })
-}
-
-pub(super) fn connector_secret_suffixes(kind: ConnectorKind) -> &'static [&'static str] {
-    match kind {
-        ConnectorKind::LocalStdio => &[],
-        ConnectorKind::LocalHttp => &["local_http_token"],
-        ConnectorKind::CloudflareQuick => &["path_secret"],
-        ConnectorKind::CloudflareOauth => &[
-            "github_client_id",
-            "github_client_secret",
-            "oauth_hash_key",
-            "oauth_registration_token",
-        ],
-        ConnectorKind::OpenAiTunnel => &["runtime_api_key"],
-    }
 }
 
 pub(super) fn ensure_connector_credentials(

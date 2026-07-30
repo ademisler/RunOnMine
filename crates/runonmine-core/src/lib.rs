@@ -5,6 +5,7 @@ mod atomic;
 pub mod audit;
 mod audit_mac;
 pub mod config;
+pub mod connector_removal;
 pub mod filesystem;
 pub mod paths;
 pub mod policy;
@@ -21,12 +22,17 @@ pub use config::{
     AppConfig, BrowserProfileMode, CloudflareNamedSettings, CloudflareQuickSettings,
     ConnectorConfig, ConnectorKind, OAuthOwnerSettings, OpenAiTunnelSettings,
 };
+pub use connector_removal::{
+    ConnectorRemovalJournal, ConnectorRemovalLock, ConnectorRemovalPhase, ConnectorRemovalRecord,
+    connector_secret_suffixes, remove_connector_authorization,
+    remove_connector_configuration_and_secrets, remove_connector_directories,
+};
 pub use paths::AppPaths;
 pub use policy::{
     Capability, DecisionSource, PolicyContext, PolicyDecision, PolicyEngine, PolicyMode,
     PolicyPreset, PolicyRule, PrincipalContext, PrincipalMatcher, ResourceContext, ResourceMatcher,
 };
-pub use storage::{AuditRecord, StateStore};
+pub use storage::{AuditRecord, ConnectorAuthorizationCleanup, StateStore};
 
 /// Product identifier used for OS integration and MCP metadata.
 pub const PRODUCT_NAME: &str = "RunOnMine";

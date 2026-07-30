@@ -118,6 +118,20 @@ pub struct AuditRecord {
     pub record_mac: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ConnectorAuthorizationCleanup {
+    pub approvals: usize,
+    pub temporary_grants: usize,
+    pub persistent_grants: usize,
+}
+
+impl ConnectorAuthorizationCleanup {
+    #[must_use]
+    pub const fn total(self) -> usize {
+        self.approvals + self.temporary_grants + self.persistent_grants
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StateStore {
     worker: Arc<SqliteWorker>,
@@ -321,6 +335,35 @@ impl StateStore {
                         .map_err(Into::into)
                 },
             )
+        })
+    }
+
+    pub fn clear_connector_authorization(
+        &self,
+        connector_id: &str,
+    ) -> Result<ConnectorAuthorizationCleanup> {
+        crate::connector_removal::validate_connector_id(connector_id)?;
+        let connector_id = connector_id.to_owned();
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let approvals = transaction.execute(
+                "DELETE FROM approvals WHERE connector_id = ?1",
+                [&connector_id],
+            )?;
+            let temporary_grants = transaction.execute(
+                "DELETE FROM temporary_grants WHERE connector_id = ?1",
+                [&connector_id],
+            )?;
+            let persistent_grants = transaction.execute(
+                "DELETE FROM persistent_grants WHERE connector_id = ?1",
+                [&connector_id],
+            )?;
+            transaction.commit()?;
+            Ok(ConnectorAuthorizationCleanup {
+                approvals,
+                temporary_grants,
+                persistent_grants,
+            })
         })
     }
 
@@ -1745,6 +1788,49 @@ mod tests {
         assert_eq!(unchanged.status, ApprovalStatus::Pending);
         assert_eq!(unchanged.resolved_at, None);
         assert_eq!(store.audit_tail(10)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn connector_authorization_cleanup_is_scoped_and_idempotent() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        for connector_id in ["remove-me", "keep-me"] {
+            let approval = ApprovalRequest::new(
+                connector_id,
+                ApprovalPrincipal::LocalStdio,
+                "shell_exec",
+                "run a command",
+                format!("{connector_id}-temporary"),
+                Utc::now() + Duration::seconds(90),
+            );
+            store.insert_approval(&approval)?;
+            assert!(store.resolve_approval(approval.id, ApprovalDecision::ForTenMinutes,)?);
+            let persistent = ApprovalRequest::new(
+                connector_id,
+                ApprovalPrincipal::LocalStdio,
+                "fs_write",
+                "write a file",
+                format!("{connector_id}-persistent"),
+                Utc::now() + Duration::seconds(90),
+            );
+            store.insert_approval(&persistent)?;
+            assert!(store.resolve_approval(persistent.id, ApprovalDecision::Always)?);
+        }
+
+        let removed = store.clear_connector_authorization("remove-me")?;
+        assert_eq!(removed.approvals, 2);
+        assert_eq!(removed.temporary_grants, 1);
+        assert_eq!(removed.persistent_grants, 1);
+        assert_eq!(removed.total(), 4);
+        assert_eq!(store.clear_connector_authorization("remove-me")?.total(), 0);
+        assert_eq!(store.pending_approvals()?.len(), 0);
+        assert_eq!(store.persistent_grants(Some("keep-me"))?.len(), 1);
+        assert!(store.temporary_grant_allows(
+            "keep-me",
+            &ApprovalPrincipal::LocalStdio,
+            "shell_exec",
+            "keep-me-temporary",
+        )?);
         Ok(())
     }
 

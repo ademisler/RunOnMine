@@ -3,9 +3,7 @@ use super::*;
 mod connector_transactions;
 mod connectors;
 #[cfg(test)]
-use connector_transactions::{
-    commit_new_connector, connector_secret_suffixes, remove_connector_transactionally,
-};
+use connector_transactions::commit_new_connector;
 use connector_transactions::{local_http_secret_name, update_config_with_secrets};
 pub(crate) use connectors::{connect, setup};
 use connectors::{
@@ -1302,7 +1300,9 @@ mod tests {
     #[test]
     fn connector_removal_deletes_credentials_and_preserves_unrelated_config() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let config_path = directory.path().join("config.toml");
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let config_path = paths.config_file();
         let root = directory.path().join("allowed");
         std::fs::create_dir(&root)?;
         let root = root.canonicalize()?;
@@ -1315,9 +1315,12 @@ mod tests {
         let store = MemorySecretStore::default();
         let name = "connector.quick-remove.path_secret".to_owned();
         store.set(&name, &SecretString::from("token".to_owned()))?;
-        let removed = remove_connector_transactionally(&config_path, &store, "quick-remove")?;
+        assert!(remove_connector_recoverably(
+            &paths,
+            &store,
+            "quick-remove"
+        )?);
 
-        assert_eq!(removed.id, "quick-remove");
         assert!(store.get(&name)?.is_none());
         let updated = AppConfig::load(&config_path)?;
         assert_eq!(updated.allowed_roots, vec![root]);
@@ -1391,7 +1394,9 @@ mod tests {
     #[test]
     fn failed_connector_commit_restores_overwritten_credential() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let config_path = directory.path().join("config.toml");
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let config_path = paths.config_file();
         let mut config = AppConfig::default();
         config.connectors.push(quick_connector("quick-existing"));
         config.save(&config_path)?;
@@ -1402,6 +1407,7 @@ mod tests {
         assert!(
             commit_new_connector(
                 quick_connector("quick-new"),
+                &paths,
                 &config_path,
                 &store,
                 &[(name.clone(), SecretString::from("replacement".to_owned()))],
@@ -1423,9 +1429,51 @@ mod tests {
     }
 
     #[test]
+    fn connector_commit_rejects_an_id_with_pending_removal() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let config_path = paths.config_file();
+        AppConfig::default().save(&config_path)?;
+        let connector = quick_connector("pending-id");
+        ConnectorRemovalJournal::new(&paths).begin(&connector)?;
+        let store = MemorySecretStore::default();
+        let secret_name = "connector.pending-id.path_secret".to_owned();
+        store.set(&secret_name, &SecretString::from("previous".to_owned()))?;
+
+        assert!(
+            commit_new_connector(
+                connector,
+                &paths,
+                &config_path,
+                &store,
+                &[(
+                    secret_name.clone(),
+                    SecretString::from("replacement".to_owned()),
+                )],
+            )
+            .is_err()
+        );
+        assert!(
+            AppConfig::load(&config_path)?
+                .connector("pending-id")
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .get(&secret_name)?
+                .map(|value| value.expose_secret().to_owned()),
+            Some("previous".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn connector_commit_uses_latest_preset_without_losing_other_updates() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let config_path = directory.path().join("config.toml");
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let config_path = paths.config_file();
         let root = directory.path().join("allowed");
         std::fs::create_dir(&root)?;
         let root = root.canonicalize()?;
@@ -1440,6 +1488,7 @@ mod tests {
         let store = MemorySecretStore::default();
         commit_new_connector(
             candidate,
+            &paths,
             &config_path,
             &store,
             &[(

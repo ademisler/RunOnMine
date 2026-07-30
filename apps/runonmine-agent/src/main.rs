@@ -31,7 +31,15 @@ async fn main() -> Result<()> {
         .init();
     match Cli::parse().command {
         AgentCommand::Run => runonmine_mcp::serve_loopback().await,
-        AgentCommand::Stdio { connector } => runonmine_mcp::serve_stdio(&connector).await,
+        AgentCommand::Stdio { connector } => {
+            let paths = runonmine_core::AppPaths::discover()?;
+            paths.ensure()?;
+            let reconciled = runonmine_mcp::reconcile_pending_connector_removals(&paths)?;
+            if reconciled > 0 {
+                tracing::info!(reconciled, "completed pending connector removals");
+            }
+            runonmine_mcp::serve_stdio(&connector).await
+        }
     }
 }
 

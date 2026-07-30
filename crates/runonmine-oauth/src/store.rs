@@ -150,6 +150,19 @@ pub trait OAuthStore: Send + Sync {
     ) -> Result<Option<AccessGrant>, StoreError>;
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OAuthConnectorCleanup {
+    pub registration_attempts: usize,
+    pub clients: usize,
+}
+
+impl OAuthConnectorCleanup {
+    #[must_use]
+    pub const fn total(self) -> usize {
+        self.registration_attempts + self.clients
+    }
+}
+
 pub struct SqliteOAuthStore {
     worker: Arc<SqliteWorker>,
     connector_id: Option<String>,
@@ -352,6 +365,27 @@ impl SqliteOAuthStore {
                    )",
                 params![family_id.to_string(), connector_id],
             )?)
+        })
+    }
+
+    pub fn remove_connector_data(&self) -> Result<OAuthConnectorCleanup, StoreError> {
+        let connector_id = self.scoped_connector_id()?.to_owned();
+        self.call(move |connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let registration_attempts = transaction.execute(
+                "DELETE FROM oauth_registration_attempts WHERE connector_id = ?1",
+                [&connector_id],
+            )?;
+            let clients = transaction.execute(
+                "DELETE FROM oauth_clients WHERE connector_id = ?1",
+                [&connector_id],
+            )?;
+            transaction.commit()?;
+            Ok(OAuthConnectorCleanup {
+                registration_attempts,
+                clients,
+            })
         })
     }
 
@@ -1297,6 +1331,79 @@ mod tests {
                 assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn connector_data_removal_is_scoped_cascading_and_idempotent() -> Result<(), StoreError> {
+        let store = SqliteOAuthStore::in_memory_scoped("remove-me")?;
+        let now = Utc::now().timestamp();
+        store.test_call(move |connection| {
+            for connector_id in ["remove-me", "keep-me"] {
+                let client_id = format!("client-{connector_id}");
+                connection.execute(
+                    "INSERT INTO oauth_registration_attempts (
+                        connector_id, source_key, attempted_at
+                     ) VALUES (?1, ?2, ?3)",
+                    params![connector_id, format!("source-{connector_id}"), now],
+                )?;
+                connection.execute(
+                    "INSERT INTO oauth_clients (
+                        client_id, connector_id, client_name, redirect_uris, scopes,
+                        issued_at, expires_at, last_used_at, registration_source_hash
+                     ) VALUES (?1, ?2, 'Client', '[]', 'machine:read', ?3, ?4, NULL, 'source')",
+                    params![client_id, connector_id, now, now + 3_600],
+                )?;
+                connection.execute(
+                    "INSERT INTO oauth_tokens (
+                        token_hash, token_kind, family_id, client_id, subject,
+                        scopes, issued_at, expires_at, status
+                     ) VALUES (?1, 'access', ?2, ?3, 'owner', 'machine:read', ?4, ?5, 'active')",
+                    params![
+                        vec![
+                            if connector_id == "remove-me" {
+                                1_u8
+                            } else {
+                                2_u8
+                            };
+                            32
+                        ],
+                        Uuid::new_v4().to_string(),
+                        format!("client-{connector_id}"),
+                        now,
+                        now + 3_600,
+                    ],
+                )?;
+            }
+            Ok(())
+        })?;
+
+        let removed = store.remove_connector_data()?;
+        assert_eq!(removed.registration_attempts, 1);
+        assert_eq!(removed.clients, 1);
+        assert_eq!(removed.total(), 2);
+        assert_eq!(store.remove_connector_data()?.total(), 0);
+        store.test_call(|connection| {
+            let keep_clients: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM oauth_clients WHERE connector_id = 'keep-me'",
+                [],
+                |row| row.get(0),
+            )?;
+            let remove_tokens: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE client_id = 'client-remove-me'",
+                [],
+                |row| row.get(0),
+            )?;
+            let keep_tokens: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE client_id = 'client-keep-me'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(keep_clients, 1);
+            assert_eq!(remove_tokens, 0);
+            assert_eq!(keep_tokens, 1);
+            Ok(())
+        })?;
         Ok(())
     }
 

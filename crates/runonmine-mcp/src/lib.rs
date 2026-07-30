@@ -39,6 +39,7 @@ use url::Url;
 
 mod approval_flow;
 mod audit;
+mod connector_removal;
 mod http;
 mod managed_connectors;
 mod rate_limit;
@@ -50,6 +51,10 @@ use rate_limit::PrincipalRateLimiter;
 use session::{IdleSessionManager, SessionPermit};
 
 pub const SERVER_NAME: &str = "runonmine";
+pub use connector_removal::{
+    ensure_connector_id_available, reconcile_pending_connector_removals,
+    remove_connector_recoverably,
+};
 const MAX_COMMAND_BYTES: usize = 256 * 1_024;
 const MAX_SCRIPT_BYTES: usize = 256 * 1_024;
 const MAX_TEXT_INPUT_BYTES: usize = 256 * 1_024;
@@ -1898,6 +1903,12 @@ const TOOL_CAPABILITIES: &[(&str, Capability)] = &[
 ];
 
 pub async fn serve_stdio(connector_id: &str) -> Result<()> {
+    let paths = AppPaths::discover()?;
+    paths.ensure()?;
+    let reconciled = connector_removal::reconcile_pending_connector_removals(&paths)?;
+    if reconciled > 0 {
+        tracing::info!(reconciled, "completed pending connector removals");
+    }
     let server = RunOnMineServer::new(Runtime::load(connector_id)?)?;
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

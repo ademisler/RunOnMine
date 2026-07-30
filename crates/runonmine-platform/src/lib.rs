@@ -507,6 +507,57 @@ impl UserService {
         }
     }
 
+    pub fn restart_if_running(&self) -> Result<bool> {
+        let current = self.status()?;
+        #[cfg(windows)]
+        let should_restart = current.installed;
+        #[cfg(not(windows))]
+        let should_restart = current.running;
+        if !should_restart {
+            return Ok(false);
+        }
+        let expectation =
+            AgentRestartExpectation::begin(agent_status_path()?, &self.agent_executable)?;
+        #[cfg(target_os = "macos")]
+        command_success(
+            Command::new("launchctl").args([
+                "kickstart",
+                "-k",
+                &format!("{}/dev.runonmine.agent", launch_domain()),
+            ]),
+            "failed to restart the LaunchAgent",
+        )?;
+        #[cfg(target_os = "linux")]
+        command_success(
+            Command::new("systemctl").args(["--user", "restart", "runonmine-agent.service"]),
+            "failed to restart the systemd user service",
+        )?;
+        #[cfg(windows)]
+        {
+            let _ignored = Command::new("schtasks.exe")
+                .args(["/End", "/TN", "RunOnMine Agent"])
+                .output();
+            command_success(
+                Command::new("schtasks.exe").args(["/Run", "/TN", "RunOnMine Agent"]),
+                "failed to restart the scheduled task",
+            )?;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        bail!("service restart is unsupported on this operating system");
+        #[cfg(not(windows))]
+        {
+            let restarted = self.status()?;
+            if !restarted.running {
+                bail!(
+                    "the agent service did not become active after restart: {}",
+                    restarted.detail
+                );
+            }
+        }
+        expectation.wait_blocking(Duration::from_secs(15))?;
+        Ok(true)
+    }
+
     pub fn stop(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {

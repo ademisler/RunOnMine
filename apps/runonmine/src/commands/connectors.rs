@@ -1,7 +1,6 @@
 use super::connector_transactions::{
     commit_new_connector, disable_local_http_transactionally, enable_local_http_transactionally,
-    ensure_connector_credentials, local_http_secret_name, remove_connector_transactionally,
-    update_config_with_secrets,
+    ensure_connector_credentials, local_http_secret_name, update_config_with_secrets,
 };
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -47,8 +46,12 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
     let config_path = paths.config_file();
-    let config = AppConfig::load_or_create(&config_path)?;
     let secrets = default_secret_store(&paths)?;
+    let reconciled = reconcile_pending_connector_removals(&paths)?;
+    if reconciled > 0 {
+        println!("Completed {reconciled} pending connector removal(s).");
+    }
+    let config = AppConfig::load_or_create(&config_path)?;
     match command {
         ConnectCommand::List => {
             if config.connectors.is_empty() {
@@ -72,6 +75,8 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(connector)?);
         }
         ConnectCommand::Enable { connector } => {
+            let _removal_lock = ConnectorRemovalLock::acquire(&paths)?;
+            ConnectorRemovalJournal::new(&paths).ensure_id_available(&connector)?;
             AppConfig::update(&config_path, |config| {
                 let item = config
                     .connector(&connector)
@@ -83,11 +88,12 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     .enabled = true;
                 Ok(())
             })?;
-            println!(
-                "Enabled connector {connector}. Restart the agent to apply transport changes."
-            );
+            println!("Enabled connector {connector}.");
+            reconcile_running_agent_after_connector_change()?;
         }
         ConnectCommand::Disable { connector } => {
+            let _removal_lock = ConnectorRemovalLock::acquire(&paths)?;
+            ConnectorRemovalJournal::new(&paths).ensure_id_available(&connector)?;
             AppConfig::update(&config_path, |config| {
                 config
                     .connector_mut(&connector)
@@ -95,53 +101,52 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     .enabled = false;
                 Ok(())
             })?;
-            println!(
-                "Disabled connector {connector}. Restart the agent to close live transport sessions."
-            );
+            println!("Disabled connector {connector}.");
+            reconcile_running_agent_after_connector_change()?;
         }
         ConnectCommand::Remove { connector, confirm } => {
             if confirm != "REMOVE" {
                 bail!("connector removal requires --confirm REMOVE");
             }
-            let removed =
-                remove_connector_transactionally(&config_path, secrets.as_ref(), &connector)?;
-            StateStore::open(&paths.state_db())?.clear_persistent_grants(Some(&removed.id))?;
-            if removed.kind == ConnectorKind::CloudflareOauth {
-                SqliteOAuthStore::open_scoped(&paths.state_db(), &removed.id)?
-                    .emergency_revoke_all()?;
+            if remove_connector_recoverably(&paths, secrets.as_ref(), &connector)? {
+                println!("Removed connector {connector} and reconciled all local state.");
+                reconcile_running_agent_after_connector_change()?;
+            } else {
+                println!("Connector {connector} is already absent and has no pending cleanup.");
             }
-            remove_connector_directories(&paths, &removed.id)?;
-            println!(
-                "Removed connector {} and its local credentials/state.",
-                removed.id
-            );
-            println!("Restart the agent to close any live transport process.");
         }
         ConnectCommand::LocalHttp { command } => match command {
             LocalHttpCommand::Enable { token_output } => {
                 validate_private_output_path(token_output.as_deref())?;
                 let token = generate_path_secret();
                 let secret = SecretString::from(token.clone());
-                let (connector_id, port) =
-                    enable_local_http_transactionally(&config_path, secrets.as_ref(), &secret)?;
+                let (connector_id, port) = enable_local_http_transactionally(
+                    &paths,
+                    &config_path,
+                    secrets.as_ref(),
+                    &secret,
+                )?;
                 report_local_http_credentials(
                     port,
                     &connector_id,
                     &token,
                     token_output.as_deref(),
                 )?;
+                reconcile_running_agent_after_connector_change()?;
             }
             LocalHttpCommand::Disable => {
                 let connector_id =
-                    disable_local_http_transactionally(&config_path, secrets.as_ref())?;
+                    disable_local_http_transactionally(&paths, &config_path, secrets.as_ref())?;
                 println!(
                     "Local HTTP connector {connector_id} is disabled and its token was deleted."
                 );
+                reconcile_running_agent_after_connector_change()?;
             }
             LocalHttpCommand::Rotate { token_output } => {
                 validate_private_output_path(token_output.as_deref())?;
                 let token = generate_path_secret();
                 let secret = SecretString::from(token.clone());
+                let _removal_lock = ConnectorRemovalLock::acquire(&paths)?;
                 let (connector_id, port) = update_config_with_secrets(
                     &config_path,
                     secrets.as_ref(),
@@ -251,6 +256,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             };
             commit_new_connector(
                 connector,
+                &paths,
                 &config_path,
                 secrets.as_ref(),
                 &[(
@@ -332,6 +338,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             };
             commit_new_connector(
                 connector,
+                &paths,
                 &config_path,
                 secrets.as_ref(),
                 &[
@@ -451,6 +458,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             };
             commit_new_connector(
                 connector,
+                &paths,
                 &config_path,
                 secrets.as_ref(),
                 &[(
@@ -464,47 +472,6 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn remove_connector_directories(paths: &AppPaths, connector_id: &str) -> Result<()> {
-    for directory in [
-        paths.data_dir.join("connectors").join(connector_id),
-        paths.state_dir.join("connectors").join(connector_id),
-    ] {
-        remove_real_directory_if_exists(&directory)?;
-    }
-    let profiles = paths.browser_profiles();
-    if profiles.is_dir() {
-        for entry in std::fs::read_dir(&profiles)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                remove_real_directory_if_exists(&entry.path().join(connector_id))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn remove_real_directory_if_exists(path: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!(
-                "refusing to remove symlinked connector directory: {}",
-                path.display()
-            );
-        }
-        Ok(metadata) if metadata.is_dir() => {
-            std::fs::remove_dir_all(path)
-                .with_context(|| format!("failed to remove {}", path.display()))?;
-        }
-        Ok(_) => bail!(
-            "connector state path is not a directory: {}",
-            path.display()
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
 #[derive(serde::Serialize)]
 struct LocalHttpCredentialExport<'a> {
     version: u8,
@@ -512,6 +479,14 @@ struct LocalHttpCredentialExport<'a> {
     endpoint: String,
     authorization_scheme: &'static str,
     bearer_token: &'a str,
+}
+
+fn reconcile_running_agent_after_connector_change() -> Result<()> {
+    let service = runonmine_platform::UserService::discover()?;
+    if service.restart_if_running()? {
+        println!("Running agent restarted; live sessions and managed transports were reconciled.");
+    }
+    Ok(())
 }
 
 fn report_local_http_credentials(

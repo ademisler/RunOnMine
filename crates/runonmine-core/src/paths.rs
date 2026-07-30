@@ -52,6 +52,10 @@ impl AppPaths {
         self.data_dir.join("browser").join("profiles")
     }
 
+    pub fn connector_removals_dir(&self) -> PathBuf {
+        self.state_dir.join("connector-removals")
+    }
+
     /// Create directories without following a pre-existing symlink.
     pub fn ensure(&self) -> Result<()> {
         for dir in [

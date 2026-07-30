@@ -106,6 +106,16 @@ Quick Tunnel URL discovery plus desktop, setup, browser, policy, and connector l
 
 The audit log is hash-chained. Retention pruning stores a chain anchor, so the remaining records continue to verify after the default 30-day/100-MiB retention window removes old records. State directories use owner-only permissions; SQLite database, WAL, and shared-memory files are restricted to the owning account. Dedicated database workers and connector supervisor tasks have explicit shutdown and join lifecycles.
 
+## Recoverable connector removal
+
+Connector deletion is a durable phase transaction. An owner-only journal records
+the exact connector fingerprint before desired configuration changes, and an
+inter-process lock serializes deletion, startup recovery and ID reuse. Cleanup
+then advances through configuration and secret removal, authorization rows,
+connector-scoped OAuth state and artifact directories. HTTP and stdio startup
+resume pending records before building any connector runtime; failed phases stay
+journaled for a later retry.
+
 ## Network ownership
 
 The MCP listener is fixed to `127.0.0.1:47821`; configuration validation rejects

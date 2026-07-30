@@ -44,7 +44,7 @@ Status markers:
 - [x] **P1-13 — Guarantee agent/helper service restart after reinstall.** Add version handshake, explicit restart, health validation and rollback.
 - [x] **P1-14 — Clarify and strengthen audit tamper resistance.** Include all query-visible fields in the authenticated payload, add keyed integrity/checkpoints where feasible and document the same-user threat boundary.
 - [x] **P1-15 — Reconcile connector enable/disable/remove at runtime.** Disabling or removing a connector must immediately stop live transports and sessions without a manual agent restart.
-- [ ] **P1-16 — Make connector removal recoverable and idempotent.** Use tombstones/journaling and startup reconciliation for partial cleanup.
+- [x] **P1-16 — Make connector removal recoverable and idempotent.** Use tombstones/journaling and startup reconciliation for partial cleanup.
 - [ ] **P1-17 — Remove pre-commit OpenAI connector side effects.** Implement prepare/validate/commit/activate with rollback guards.
 - [ ] **P1-18 — Allocate OpenAI health ports safely or enforce singleton behavior.** Avoid fixed-port collisions and side effects before validation.
 - [ ] **P1-19 — Isolate connector startup failures.** One failed connector must become degraded without taking healthy local or remote connectors down.

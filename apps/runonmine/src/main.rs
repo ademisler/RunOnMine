@@ -15,9 +15,11 @@ use runonmine_connectors::{
 use runonmine_core::secrets::{SecretTransaction, default_secret_store};
 use runonmine_core::{
     AppConfig, AppPaths, ApprovalDecision, BrowserProfileMode, Capability, CloudflareNamedSettings,
-    CloudflareQuickSettings, ConnectorConfig, ConnectorKind, OAuthOwnerSettings,
-    OpenAiTunnelSettings, PolicyMode, PolicyPreset, StateStore,
+    CloudflareQuickSettings, ConnectorConfig, ConnectorKind, ConnectorRemovalJournal,
+    ConnectorRemovalLock, OAuthOwnerSettings, OpenAiTunnelSettings, PolicyMode, PolicyPreset,
+    StateStore, connector_secret_suffixes,
 };
+use runonmine_mcp::{reconcile_pending_connector_removals, remove_connector_recoverably};
 use runonmine_oauth::SqliteOAuthStore;
 use runonmine_platform::{
     LinuxSystemService, UserService, current, helper::ProgramProfileDocument,
