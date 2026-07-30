@@ -40,15 +40,16 @@ impl AuditMacKey {
         loop {
             match load_key(&path) {
                 Ok(key) => return Ok(key),
-                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|io| {
-                    io.kind() == std::io::ErrorKind::NotFound
-                }) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {}
                 Err(error) => return Err(error),
             }
             let key = Self::generate()?;
             match create_key(&path, &key.0) {
                 Ok(()) => return Ok(key),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error).context("failed to create the audit MAC key"),
             }
         }
@@ -61,9 +62,8 @@ impl AuditMacKey {
         record_hash: &str,
         payload: &[u8],
     ) -> String {
-        let mut mac = match HmacSha256::new_from_slice(&self.0) {
-            Ok(mac) => mac,
-            Err(_) => return String::new(),
+        let Ok(mut mac) = HmacSha256::new_from_slice(&self.0) else {
+            return String::new();
         };
         mac.update(RECORD_DOMAIN);
         mac.update(&sequence.to_be_bytes());
@@ -75,15 +75,16 @@ impl AuditMacKey {
 
     pub(crate) fn tail_mac(
         &self,
+        anchor_hash: &str,
         sequence: u64,
         record_hash: &str,
         record_mac: &str,
     ) -> String {
-        let mut mac = match HmacSha256::new_from_slice(&self.0) {
-            Ok(mac) => mac,
-            Err(_) => return String::new(),
+        let Ok(mut mac) = HmacSha256::new_from_slice(&self.0) else {
+            return String::new();
         };
         mac.update(TAIL_DOMAIN);
+        update_length_prefixed(&mut mac, anchor_hash.as_bytes());
         mac.update(&sequence.to_be_bytes());
         update_length_prefixed(&mut mac, record_hash.as_bytes());
         update_length_prefixed(&mut mac, record_mac.as_bytes());
@@ -107,13 +108,14 @@ impl AuditMacKey {
     pub(crate) fn verifies_tail(
         &self,
         expected: &str,
+        anchor_hash: &str,
         sequence: u64,
         record_hash: &str,
         record_mac: &str,
     ) -> bool {
         constant_time_hex_eq(
             expected,
-            &self.tail_mac(sequence, record_hash, record_mac),
+            &self.tail_mac(anchor_hash, sequence, record_hash, record_mac),
         )
     }
 }
@@ -135,7 +137,10 @@ fn key_path(database: &Path) -> PathBuf {
 
 fn load_key(path: &Path) -> Result<AuditMacKey> {
     let metadata = path.symlink_metadata()?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != KEY_BYTES as u64 {
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != KEY_BYTES as u64
+    {
         bail!("audit MAC key is not a safe 256-bit regular file");
     }
     #[cfg(unix)]
@@ -199,9 +204,10 @@ mod tests {
         assert!(!key.verifies_record(&record, 7, "changed", "record", payload));
         assert!(!key.verifies_record(&record, 7, "previous", "changed", payload));
         assert!(!key.verifies_record(&record, 7, "previous", "record", b"changed"));
-        let tail = key.tail_mac(7, "record", &record);
-        assert!(key.verifies_tail(&tail, 7, "record", &record));
-        assert!(!key.verifies_tail(&tail, 6, "record", &record));
+        let tail = key.tail_mac("anchor", 7, "record", &record);
+        assert!(key.verifies_tail(&tail, "anchor", 7, "record", &record));
+        assert!(!key.verifies_tail(&tail, "changed", 7, "record", &record));
+        assert!(!key.verifies_tail(&tail, "anchor", 6, "record", &record));
         Ok(())
     }
 

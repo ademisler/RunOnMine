@@ -156,6 +156,12 @@ pub async fn serve_loopback() -> Result<()> {
     }
     let address = format!("{}:{}", config.bind_host, config.port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
+    let runtime_marker = runonmine_core::agent_status::AgentRuntimeMarker::publish()
+        .context("failed to publish the running agent version handshake")?;
+    tracing::debug!(
+        instance_id = %runtime_marker.status().instance_id,
+        "published running agent version handshake"
+    );
     let managed_connectors = start_external_connectors(&paths, &config).await?;
     tracing::info!(%address, "RunOnMine agent listening on loopback");
     let result = axum::serve(listener, router)
@@ -164,6 +170,7 @@ pub async fn serve_loopback() -> Result<()> {
     session_sweeper.abort();
     let _ignored = session_sweeper.await;
     managed_connectors.stop().await;
+    drop(runtime_marker);
     result.map_err(Into::into)
 }
 

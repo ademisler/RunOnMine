@@ -104,6 +104,15 @@ Flag values use the same schemas. A flag may be supplied as `--flag value` or
 `--flag=value`, but its normalized name, value type, and repeatability must match
 the profile exactly.
 
+## Running helper version handshake
+
+A successful service-manager start is not enough to commit an installation. The
+helper health response identifies its IPC protocol and compiled package version.
+The installer requires both to match the binary it is installing. If the old
+process remains alive, a restart silently fails, or a mismatched binary answers
+the socket, health validation fails and the transactional installation restores
+the previous executable, policy, service definition and running state.
+
 ## Transactional installation and rollback
 
 Installation prepares all three platform artifacts before touching the running

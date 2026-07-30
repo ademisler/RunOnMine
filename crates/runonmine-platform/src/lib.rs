@@ -8,12 +8,14 @@ pub mod native;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use directories::BaseDirs;
 #[cfg(target_os = "linux")]
 use directories::ProjectDirs;
+use runonmine_core::agent_status::{AgentRestartExpectation, agent_status_path};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -231,13 +233,18 @@ impl LinuxSystemService {
         reject_symlink(install_directory, "system binary directory")?;
         atomic_copy_executable(&self.agent_executable, Path::new(LINUX_SYSTEM_BINARY_PATH))?;
 
+        let status_path = linux_system_agent_status_path(&home);
         let home_environment = systemd_escape(&format!("HOME={}", home.display()));
         let xdg_config = systemd_escape(&format!("XDG_CONFIG_HOME={}/.config", home.display()));
         let xdg_data = systemd_escape(&format!("XDG_DATA_HOME={}/.local/share", home.display()));
+        let status_environment = systemd_escape(&format!(
+            "RUNONMINE_AGENT_STATUS_FILE={}",
+            status_path.display()
+        ));
         let unit = format!(
             "[Unit]\nDescription=RunOnMine headless MCP agent\nAfter=network-online.target\nWants=network-online.target\n\n\
              [Service]\nType=simple\nUser={run_as_user}\nExecStart={LINUX_SYSTEM_BINARY_PATH} run\n\
-             WorkingDirectory={}\nEnvironment={home_environment}\nEnvironment={xdg_config}\nEnvironment={xdg_data}\n\
+             WorkingDirectory={}\nEnvironment={home_environment}\nEnvironment={xdg_config}\nEnvironment={xdg_data}\nEnvironment={status_environment}\n\
              Restart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\
              PrivateDevices=true\nProtectSystem=full\nProtectKernelTunables=true\nProtectKernelModules=true\n\
              ProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nRestrictRealtime=true\n\
@@ -247,9 +254,24 @@ impl LinuxSystemService {
         atomic_write_mode(Path::new(LINUX_SYSTEM_UNIT_PATH), unit.as_bytes(), 0o644)?;
         linux_systemctl(&["daemon-reload"], "failed to reload systemd")?;
         linux_systemctl(
-            &["enable", "--now", LINUX_SYSTEM_SERVICE],
+            &["enable", LINUX_SYSTEM_SERVICE],
             "failed to enable the system service",
-        )
+        )?;
+        let expectation =
+            AgentRestartExpectation::begin(status_path, Path::new(LINUX_SYSTEM_BINARY_PATH))?;
+        linux_systemctl(
+            &["restart", LINUX_SYSTEM_SERVICE],
+            "failed to restart the system service",
+        )?;
+        let status = self.status()?;
+        if !status.running {
+            bail!(
+                "the installed system agent service is not active: {}",
+                status.detail
+            );
+        }
+        expectation.wait_blocking(Duration::from_secs(15))?;
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -277,6 +299,11 @@ const LINUX_SYSTEM_SERVICE: &str = "runonmine-agent.service";
 const LINUX_SYSTEM_UNIT_PATH: &str = "/etc/systemd/system/runonmine-agent.service";
 #[cfg(target_os = "linux")]
 const LINUX_SYSTEM_BINARY_PATH: &str = "/usr/local/libexec/runonmine/runonmine-agent";
+
+#[cfg(target_os = "linux")]
+fn linux_system_agent_status_path(home: &Path) -> PathBuf {
+    home.join(".local/state/runonmine/agent-runtime.json")
+}
 
 fn linux_systemctl(arguments: &[&str], context: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
@@ -383,25 +410,34 @@ impl UserService {
                 self.agent_executable.display()
             );
         }
+        let expectation =
+            AgentRestartExpectation::begin(agent_status_path()?, &self.agent_executable)?;
         #[cfg(target_os = "macos")]
         {
             let _ = allowed_roots;
-            self.install_macos()
+            self.install_macos()?;
         }
         #[cfg(target_os = "linux")]
-        {
-            self.install_linux(allowed_roots)
-        }
+        self.install_linux(allowed_roots)?;
         #[cfg(windows)]
         {
             let _ = allowed_roots;
-            self.install_windows()
+            self.install_windows()?;
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
-            let _ = allowed_roots;
-            bail!("service installation is unsupported on this operating system")
+            let _ = (allowed_roots, expectation);
+            bail!("service installation is unsupported on this operating system");
         }
+        let status = self.status()?;
+        if !status.running {
+            bail!(
+                "the installed agent service is not active: {}",
+                status.detail
+            );
+        }
+        expectation.wait_blocking(Duration::from_secs(15))?;
+        Ok(())
     }
 
     /// Re-render the installed user service with the current selected roots.
@@ -558,6 +594,14 @@ impl UserService {
         command_success(
             Command::new("launchctl").args(["bootstrap", &domain, path.to_string_lossy().as_ref()]),
             "failed to install the LaunchAgent",
+        )?;
+        command_success(
+            Command::new("launchctl").args([
+                "kickstart",
+                "-k",
+                &format!("{domain}/dev.runonmine.agent"),
+            ]),
+            "failed to restart the installed LaunchAgent",
         )
     }
 
@@ -654,6 +698,9 @@ impl UserService {
 
     #[cfg(windows)]
     fn install_windows(&self) -> Result<()> {
+        let _ignored = Command::new("schtasks.exe")
+            .args(["/End", "/TN", "RunOnMine Agent"])
+            .output();
         let action = format!("\"{}\" run", self.agent_executable.display());
         command_success(
             Command::new("schtasks.exe").args([
@@ -669,6 +716,10 @@ impl UserService {
                 &action,
             ]),
             "failed to create the logon scheduled task",
+        )?;
+        command_success(
+            Command::new("schtasks.exe").args(["/Run", "/TN", "RunOnMine Agent"]),
+            "failed to restart the installed logon scheduled task",
         )
     }
 

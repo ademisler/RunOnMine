@@ -376,12 +376,10 @@ async fn wait_for_helper_health(owner: OwnerIdentity) -> Result<()> {
     let mut last_error = None;
     for _ in 0..30 {
         match client.request(&HelperRequest::health()).await {
-            Ok(response) if matches!(response.result, HelperResult::Healthy { .. }) => {
-                return Ok(());
-            }
-            Ok(_) => {
-                last_error = Some("helper returned an unexpected health response".to_owned());
-            }
+            Ok(response) => match validate_helper_health(response.result) {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = Some(error.to_string()),
+            },
             Err(error) => last_error = Some(error.to_string()),
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -390,6 +388,24 @@ async fn wait_for_helper_health(owner: OwnerIdentity) -> Result<()> {
         "the helper service did not pass its health check: {}",
         last_error.unwrap_or_else(|| "no response".to_owned())
     )
+}
+
+fn validate_helper_health(result: HelperResult) -> Result<()> {
+    let HelperResult::Healthy {
+        protocol_version,
+        package_version,
+        ..
+    } = result
+    else {
+        bail!("helper returned an unexpected health response");
+    };
+    if protocol_version != super::PROTOCOL_VERSION {
+        bail!("running helper protocol version does not match the installer");
+    }
+    if package_version != super::HELPER_VERSION {
+        bail!("running helper package version does not match the installer");
+    }
+    Ok(())
 }
 
 fn remove_empty_parent(path: &Path) -> Result<()> {

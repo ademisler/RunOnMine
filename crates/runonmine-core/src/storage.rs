@@ -13,6 +13,7 @@ use crate::approval::{
     PersistentGrant,
 };
 use crate::audit::{AuditEvent, AuditOutcome};
+use crate::audit_mac::AuditMacKey;
 
 pub const AUDIT_RETENTION_DAYS: i64 = 30;
 pub const AUDIT_MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -114,11 +115,13 @@ pub struct AuditRecord {
     pub event: AuditEvent,
     pub previous_hash: String,
     pub record_hash: String,
+    pub record_mac: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct StateStore {
     worker: Arc<SqliteWorker>,
+    audit_mac: AuditMacKey,
 }
 
 impl StateStore {
@@ -136,22 +139,26 @@ impl StateStore {
             std::fs::create_dir_all(parent)?;
             restrict_directory(parent)?;
         }
+        let audit_mac = AuditMacKey::load_or_create(path)?;
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open state database at {}", path.display()))?;
         configure_connection(&connection)?;
-        migrate(&connection)?;
+        migrate(&connection, &audit_mac)?;
         restrict_sqlite_files(path)?;
         Ok(Self {
             worker: Arc::new(SqliteWorker::start(connection)?),
+            audit_mac,
         })
     }
 
     pub fn in_memory() -> Result<Self> {
+        let audit_mac = AuditMacKey::generate()?;
         let connection = Connection::open_in_memory()?;
         configure_connection(&connection)?;
-        migrate(&connection)?;
+        migrate(&connection, &audit_mac)?;
         Ok(Self {
             worker: Arc::new(SqliteWorker::start(connection)?),
+            audit_mac,
         })
     }
 
@@ -200,7 +207,10 @@ impl StateStore {
         event: &AuditEvent,
     ) -> Result<Option<ApprovalTimeoutResult>> {
         let event = event.clone();
-        self.call(move |connection| complete_approval_timeout_connection(connection, id, &event))
+        let audit_mac = self.audit_mac.clone();
+        self.call(move |connection| {
+            complete_approval_timeout_connection(connection, id, &event, &audit_mac)
+        })
     }
 
     pub async fn complete_approval_timeout_async(
@@ -208,8 +218,9 @@ impl StateStore {
         id: Uuid,
         event: AuditEvent,
     ) -> Result<Option<ApprovalTimeoutResult>> {
+        let audit_mac = self.audit_mac.clone();
         self.call_async(move |connection| {
-            complete_approval_timeout_connection(connection, id, &event)
+            complete_approval_timeout_connection(connection, id, &event, &audit_mac)
         })
         .await
     }
@@ -336,26 +347,31 @@ impl StateStore {
 
     pub fn append_audit(&self, event: &AuditEvent) -> Result<String> {
         let event = event.clone();
-        self.call(move |connection| append_audit_connection(connection, &event))
+        let audit_mac = self.audit_mac.clone();
+        self.call(move |connection| append_audit_connection(connection, &event, &audit_mac))
     }
 
     pub async fn append_audit_async(&self, event: AuditEvent) -> Result<String> {
-        self.call_async(move |connection| append_audit_connection(connection, &event))
+        let audit_mac = self.audit_mac.clone();
+        self.call_async(move |connection| append_audit_connection(connection, &event, &audit_mac))
             .await
     }
 
     pub fn prune_audit(&self) -> Result<usize> {
-        self.call(|connection| {
+        let audit_mac = self.audit_mac.clone();
+        self.call(move |connection| {
             prune_audit_connection(
                 connection,
                 chrono::Duration::days(AUDIT_RETENTION_DAYS),
                 AUDIT_MAX_BYTES,
+                &audit_mac,
             )
         })
     }
 
     pub fn verify_audit_chain(&self) -> Result<bool> {
-        self.call(verify_audit_chain_connection)
+        let audit_mac = self.audit_mac.clone();
+        self.call(move |connection| verify_audit_chain_connection(connection, &audit_mac))
     }
 
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditRecord>> {
@@ -456,6 +472,7 @@ fn complete_approval_timeout_connection(
     connection: &mut Connection,
     id: Uuid,
     event: &AuditEvent,
+    audit_mac: &AuditMacKey,
 ) -> Result<Option<ApprovalTimeoutResult>> {
     if event.outcome != AuditOutcome::TimedOut {
         bail!("approval timeout audit event must use the timed_out outcome");
@@ -500,13 +517,14 @@ fn complete_approval_timeout_connection(
     if changed != 1 {
         bail!("pending approval timeout transition did not update exactly one row");
     }
-    let (_, sequence) = append_audit_row(&transaction, event)?;
+    let (_, sequence) = append_audit_row(&transaction, event, audit_mac)?;
     transaction.commit()?;
     if sequence % 128 == 0 {
         let _ignored = prune_audit_connection(
             connection,
             chrono::Duration::days(AUDIT_RETENTION_DAYS),
             AUDIT_MAX_BYTES,
+            audit_mac,
         );
     }
     Ok(Some(ApprovalTimeoutResult::ExpiredNow))
@@ -624,19 +642,58 @@ fn pending_approvals_connection(connection: &mut Connection) -> Result<Vec<Appro
         .map_err(Into::into)
 }
 
-fn append_audit_connection(connection: &mut Connection, event: &AuditEvent) -> Result<String> {
-    let (record_hash, sequence) = append_audit_row(connection, event)?;
+#[derive(Debug)]
+struct StoredAuditRow {
+    sequence: u64,
+    id: String,
+    timestamp: String,
+    connector_id: String,
+    tool_name: String,
+    capability: String,
+    outcome: String,
+    argument_hash: String,
+    summary: String,
+    duration_ms: Option<i64>,
+    output_bytes: Option<i64>,
+    previous_hash: String,
+    record_hash: String,
+    payload: Vec<u8>,
+    record_mac: String,
+}
+
+#[derive(Debug)]
+struct AuditTailState {
+    anchor_hash: String,
+    sequence: u64,
+    record_hash: String,
+    record_mac: String,
+    tail_mac: String,
+}
+
+fn append_audit_connection(
+    connection: &mut Connection,
+    event: &AuditEvent,
+    audit_mac: &AuditMacKey,
+) -> Result<String> {
+    let transaction = connection.transaction()?;
+    let (record_hash, sequence) = append_audit_row(&transaction, event, audit_mac)?;
+    transaction.commit()?;
     if sequence % 128 == 0 {
         prune_audit_connection(
             connection,
             chrono::Duration::days(AUDIT_RETENTION_DAYS),
             AUDIT_MAX_BYTES,
+            audit_mac,
         )?;
     }
     Ok(record_hash)
 }
 
-fn append_audit_row(connection: &Connection, event: &AuditEvent) -> Result<(String, i64)> {
+fn append_audit_row(
+    connection: &Connection,
+    event: &AuditEvent,
+    audit_mac: &AuditMacKey,
+) -> Result<(String, i64)> {
     let previous: String = connection
         .query_row(
             "SELECT record_hash FROM audit_events ORDER BY sequence DESC LIMIT 1",
@@ -645,42 +702,230 @@ fn append_audit_row(connection: &Connection, event: &AuditEvent) -> Result<(Stri
         )
         .optional()?
         .unwrap_or(audit_anchor(connection)?);
+    let sequence = next_audit_sequence(connection)?;
     let payload = serde_json::to_vec(event)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(previous.as_bytes());
     hasher.update(&payload);
     let record_hash = hasher.finalize().to_hex().to_string();
-    connection.execute("INSERT INTO audit_events (id, timestamp, connector_id, tool_name, capability, outcome, argument_hash, summary, duration_ms, output_bytes, previous_hash, record_hash, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",params![event.id.to_string(),event.timestamp.to_rfc3339(),event.connector_id,event.tool_name,event.capability,serde_json::to_string(&event.outcome)?,event.argument_hash,event.summary,event.duration_ms.and_then(|v|i64::try_from(v).ok()),event.output_bytes.and_then(|v|i64::try_from(v).ok()),previous,record_hash,payload])?;
-    Ok((record_hash, connection.last_insert_rowid()))
+    let record_mac = audit_mac.record_mac(
+        u64::try_from(sequence).context("audit sequence is negative")?,
+        &previous,
+        &record_hash,
+        &payload,
+    );
+    let duration_ms = audit_optional_u64_to_i64(event.duration_ms, "duration")?;
+    let output_bytes = audit_optional_u64_to_i64(event.output_bytes, "output size")?;
+    connection.execute(
+        "INSERT INTO audit_events (
+            sequence, id, timestamp, connector_id, tool_name, capability, outcome,
+            argument_hash, summary, duration_ms, output_bytes, previous_hash,
+            record_hash, payload, record_mac
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            sequence,
+            event.id.to_string(),
+            event.timestamp.to_rfc3339(),
+            event.connector_id,
+            event.tool_name,
+            event.capability,
+            serde_json::to_string(&event.outcome)?,
+            event.argument_hash,
+            event.summary,
+            duration_ms,
+            output_bytes,
+            previous,
+            record_hash,
+            payload,
+            record_mac,
+        ],
+    )?;
+    update_audit_tail(
+        connection,
+        audit_mac,
+        u64::try_from(sequence).context("audit sequence is negative")?,
+        &record_hash,
+        &record_mac,
+    )?;
+    Ok((record_hash, sequence))
 }
 
-fn verify_audit_chain_connection(connection: &mut Connection) -> Result<bool> {
+fn verify_audit_chain_connection(
+    connection: &mut Connection,
+    audit_mac: &AuditMacKey,
+) -> Result<bool> {
+    let tail = audit_tail_state(connection)?;
     let mut statement = connection.prepare(
-        "SELECT previous_hash, record_hash, payload FROM audit_events ORDER BY sequence",
+        "SELECT sequence, id, timestamp, connector_id, tool_name, capability,
+                outcome, argument_hash, summary, duration_ms, output_bytes,
+                previous_hash, record_hash, payload, record_mac
+         FROM audit_events ORDER BY sequence",
     )?;
     let mut rows = statement.query([])?;
-    let mut expected = audit_anchor(connection)?;
+    let mut expected_previous = tail.anchor_hash.clone();
+    let mut last = None;
     while let Some(row) = rows.next()? {
-        let previous: String = row.get(0)?;
-        let record_hash: String = row.get(1)?;
-        let payload: Vec<u8> = row.get(2)?;
-        if previous != expected {
+        let stored = map_stored_audit_row(row)?;
+        if stored.previous_hash != expected_previous || !stored_audit_row_is_authentic(&stored)? {
             return Ok(false);
         }
         let mut hasher = blake3::Hasher::new();
-        hasher.update(previous.as_bytes());
-        hasher.update(&payload);
-        if hasher.finalize().to_hex().as_str() != record_hash {
+        hasher.update(stored.previous_hash.as_bytes());
+        hasher.update(&stored.payload);
+        if hasher.finalize().to_hex().as_str() != stored.record_hash
+            || !audit_mac.verifies_record(
+                &stored.record_mac,
+                stored.sequence,
+                &stored.previous_hash,
+                &stored.record_hash,
+                &stored.payload,
+            )
+        {
             return Ok(false);
         }
-        expected = record_hash;
+        expected_previous.clone_from(&stored.record_hash);
+        last = Some((stored.sequence, stored.record_hash, stored.record_mac));
     }
-    Ok(true)
+    match last {
+        Some((sequence, record_hash, record_mac)) => {
+            if tail.sequence != sequence
+                || tail.record_hash != record_hash
+                || tail.record_mac != record_mac
+            {
+                return Ok(false);
+            }
+        }
+        None => {
+            if tail.sequence != 0
+                || tail.record_hash != tail.anchor_hash
+                || !tail.record_mac.is_empty()
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(audit_mac.verifies_tail(
+        &tail.tail_mac,
+        &tail.anchor_hash,
+        tail.sequence,
+        &tail.record_hash,
+        &tail.record_mac,
+    ))
+}
+
+fn map_stored_audit_row(row: &rusqlite::Row<'_>) -> Result<StoredAuditRow> {
+    Ok(StoredAuditRow {
+        sequence: u64::try_from(row.get::<_, i64>(0)?).context("audit sequence is negative")?,
+        id: row.get(1)?,
+        timestamp: row.get(2)?,
+        connector_id: row.get(3)?,
+        tool_name: row.get(4)?,
+        capability: row.get(5)?,
+        outcome: row.get(6)?,
+        argument_hash: row.get(7)?,
+        summary: row.get(8)?,
+        duration_ms: row.get(9)?,
+        output_bytes: row.get(10)?,
+        previous_hash: row.get(11)?,
+        record_hash: row.get(12)?,
+        payload: row.get(13)?,
+        record_mac: row.get(14)?,
+    })
+}
+
+fn stored_audit_row_is_authentic(stored: &StoredAuditRow) -> Result<bool> {
+    let event: AuditEvent =
+        serde_json::from_slice(&stored.payload).context("audit payload is not a valid event")?;
+    let canonical = serde_json::to_vec(&event)?;
+    let duration_ms = audit_optional_u64_to_i64(event.duration_ms, "duration")?;
+    let output_bytes = audit_optional_u64_to_i64(event.output_bytes, "output size")?;
+    Ok(canonical == stored.payload
+        && stored.id == event.id.to_string()
+        && stored.timestamp == event.timestamp.to_rfc3339()
+        && stored.connector_id == event.connector_id
+        && stored.tool_name == event.tool_name
+        && stored.capability == event.capability
+        && stored.outcome == serde_json::to_string(&event.outcome)?
+        && stored.argument_hash == event.argument_hash
+        && stored.summary == event.summary
+        && stored.duration_ms == duration_ms
+        && stored.output_bytes == output_bytes)
+}
+
+fn audit_optional_u64_to_i64(value: Option<u64>, label: &str) -> Result<Option<i64>> {
+    value
+        .map(|value| i64::try_from(value).with_context(|| format!("audit {label} is too large")))
+        .transpose()
+}
+
+fn next_audit_sequence(connection: &Connection) -> Result<i64> {
+    connection
+        .query_row(
+            "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'audit_events'), 0) + 1",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to allocate the next audit sequence")
+}
+
+fn audit_tail_state(connection: &Connection) -> Result<AuditTailState> {
+    connection
+        .query_row(
+            "SELECT anchor_hash, tail_sequence, tail_hash, tail_record_mac, tail_mac
+             FROM audit_chain_state WHERE id = 1",
+            [],
+            |row| {
+                let sequence = u64::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(AuditTailState {
+                    anchor_hash: row.get(0)?,
+                    sequence,
+                    record_hash: row.get(2)?,
+                    record_mac: row.get(3)?,
+                    tail_mac: row.get(4)?,
+                })
+            },
+        )
+        .context("authenticated audit chain state is missing")
+}
+
+fn update_audit_tail(
+    connection: &Connection,
+    audit_mac: &AuditMacKey,
+    sequence: u64,
+    record_hash: &str,
+    record_mac: &str,
+) -> Result<()> {
+    let anchor = audit_anchor(connection)?;
+    let tail_mac = audit_mac.tail_mac(&anchor, sequence, record_hash, record_mac);
+    let changed = connection.execute(
+        "UPDATE audit_chain_state
+         SET tail_sequence = ?1, tail_hash = ?2, tail_record_mac = ?3, tail_mac = ?4
+         WHERE id = 1",
+        params![
+            i64::try_from(sequence).context("audit sequence is too large")?,
+            record_hash,
+            record_mac,
+            tail_mac,
+        ],
+    )?;
+    if changed != 1 {
+        bail!("authenticated audit chain state is missing");
+    }
+    Ok(())
 }
 
 fn audit_tail_connection(connection: &mut Connection, limit: usize) -> Result<Vec<AuditRecord>> {
     let limit = i64::try_from(limit.clamp(1, 10_000)).unwrap_or(10_000);
-    let mut statement=connection.prepare("SELECT sequence, payload, previous_hash, record_hash FROM audit_events ORDER BY sequence DESC LIMIT ?1")?;
+    let mut statement = connection.prepare(
+        "SELECT sequence, payload, previous_hash, record_hash, record_mac
+         FROM audit_events ORDER BY sequence DESC LIMIT ?1",
+    )?;
     let rows = statement.query_map([limit], |row| {
         let sequence = u64::try_from(row.get::<_, i64>(0)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -702,6 +947,7 @@ fn audit_tail_connection(connection: &mut Connection, limit: usize) -> Result<Ve
             event,
             previous_hash: row.get(2)?,
             record_hash: row.get(3)?,
+            record_mac: row.get(4)?,
         })
     })?;
     let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -717,7 +963,7 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate(connection: &Connection) -> Result<()> {
+fn migrate(connection: &Connection, audit_mac: &AuditMacKey) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     transaction.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_versions (
@@ -742,6 +988,11 @@ fn migrate(connection: &Connection) -> Result<()> {
     migrate_principal_bound_approvals(&transaction)?;
     remove_legacy_connector_wide_grants(&transaction)?;
     create_grant_and_audit_tables(&transaction)?;
+    if current < STATE_SCHEMA_VERSION {
+        migrate_audit_integrity_v3(&transaction, audit_mac)?;
+    } else {
+        validate_audit_integrity_v3_schema(&transaction)?;
+    }
     transaction.execute(
         "INSERT INTO schema_versions(component, version) VALUES ('core_state', ?1)
          ON CONFLICT(component) DO UPDATE SET version = excluded.version",
@@ -840,16 +1091,168 @@ fn create_grant_and_audit_tables(connection: &Connection) -> Result<()> {
             output_bytes INTEGER,
             previous_hash TEXT NOT NULL,
             record_hash TEXT NOT NULL UNIQUE,
-            payload BLOB NOT NULL
+            payload BLOB NOT NULL,
+            record_mac TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS audit_chain_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            anchor_hash TEXT NOT NULL
-        );
-        INSERT OR IGNORE INTO audit_chain_state (id, anchor_hash)
-            VALUES (1, 'GENESIS');",
+            anchor_hash TEXT NOT NULL,
+            tail_sequence INTEGER NOT NULL CHECK (tail_sequence >= 0),
+            tail_hash TEXT NOT NULL,
+            tail_record_mac TEXT NOT NULL,
+            tail_mac TEXT NOT NULL
+        );",
     )?;
     Ok(())
+}
+
+fn migrate_audit_integrity_v3(connection: &Connection, audit_mac: &AuditMacKey) -> Result<()> {
+    for (table, column, definition) in [
+        ("audit_events", "record_mac", "record_mac TEXT"),
+        (
+            "audit_chain_state",
+            "tail_sequence",
+            "tail_sequence INTEGER",
+        ),
+        ("audit_chain_state", "tail_hash", "tail_hash TEXT"),
+        (
+            "audit_chain_state",
+            "tail_record_mac",
+            "tail_record_mac TEXT",
+        ),
+        ("audit_chain_state", "tail_mac", "tail_mac TEXT"),
+    ] {
+        if !table_has_column(connection, table, column)? {
+            connection.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])?;
+        }
+    }
+    connection.execute(
+        "INSERT OR IGNORE INTO audit_chain_state (
+            id, anchor_hash, tail_sequence, tail_hash, tail_record_mac, tail_mac
+         ) VALUES (1, 'GENESIS', 0, 'GENESIS', '', '')",
+        [],
+    )?;
+    if !verify_legacy_audit_chain(connection)? {
+        bail!("legacy audit chain failed verification before MAC migration");
+    }
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT sequence, previous_hash, record_hash, payload
+             FROM audit_events ORDER BY sequence",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (sequence, previous_hash, record_hash, payload) in &rows {
+        let sequence_u64 = u64::try_from(*sequence).context("legacy audit sequence is negative")?;
+        let record_mac = audit_mac.record_mac(sequence_u64, previous_hash, record_hash, payload);
+        let changed = connection.execute(
+            "UPDATE audit_events SET record_mac = ?1 WHERE sequence = ?2",
+            params![record_mac, sequence],
+        )?;
+        if changed != 1 {
+            bail!("legacy audit MAC migration did not update exactly one row");
+        }
+    }
+    let anchor = audit_anchor(connection)?;
+    let (sequence, record_hash, record_mac) = match rows.last() {
+        Some((sequence, _, record_hash, _)) => {
+            let record_mac: String = connection.query_row(
+                "SELECT record_mac FROM audit_events WHERE sequence = ?1",
+                [sequence],
+                |row| row.get(0),
+            )?;
+            (
+                u64::try_from(*sequence).context("legacy audit tail sequence is negative")?,
+                record_hash.clone(),
+                record_mac,
+            )
+        }
+        None => (0, anchor.clone(), String::new()),
+    };
+    let tail_mac = audit_mac.tail_mac(&anchor, sequence, &record_hash, &record_mac);
+    let changed = connection.execute(
+        "UPDATE audit_chain_state
+         SET tail_sequence = ?1, tail_hash = ?2, tail_record_mac = ?3, tail_mac = ?4
+         WHERE id = 1",
+        params![
+            i64::try_from(sequence).context("legacy audit tail sequence is too large")?,
+            record_hash,
+            record_mac,
+            tail_mac,
+        ],
+    )?;
+    if changed != 1 {
+        bail!("legacy audit tail migration did not update exactly one row");
+    }
+    Ok(())
+}
+
+fn validate_audit_integrity_v3_schema(connection: &Connection) -> Result<()> {
+    for (table, column) in [
+        ("audit_events", "record_mac"),
+        ("audit_chain_state", "tail_sequence"),
+        ("audit_chain_state", "tail_hash"),
+        ("audit_chain_state", "tail_record_mac"),
+        ("audit_chain_state", "tail_mac"),
+    ] {
+        if !table_has_column(connection, table, column)? {
+            bail!("version-3 audit integrity column {table}.{column} is missing");
+        }
+    }
+    let invalid_records: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE record_mac IS NULL OR length(record_mac) != 64",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_records != 0 {
+        bail!("version-3 audit records contain missing or invalid MAC data");
+    }
+    let valid_state: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM audit_chain_state
+         WHERE id = 1 AND tail_sequence IS NOT NULL AND tail_sequence >= 0
+           AND tail_hash IS NOT NULL AND tail_record_mac IS NOT NULL
+           AND tail_mac IS NOT NULL AND length(tail_mac) = 64",
+        [],
+        |row| row.get(0),
+    )?;
+    if valid_state != 1 {
+        bail!("version-3 authenticated audit tail state is missing or invalid");
+    }
+    Ok(())
+}
+
+fn verify_legacy_audit_chain(connection: &Connection) -> Result<bool> {
+    let mut statement = connection.prepare(
+        "SELECT previous_hash, record_hash, payload FROM audit_events ORDER BY sequence",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut expected = audit_anchor(connection)?;
+    while let Some(row) = rows.next()? {
+        let previous: String = row.get(0)?;
+        let record_hash: String = row.get(1)?;
+        let payload: Vec<u8> = row.get(2)?;
+        if previous != expected {
+            return Ok(false);
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(previous.as_bytes());
+        hasher.update(&payload);
+        if hasher.finalize().to_hex().as_str() != record_hash {
+            return Ok(false);
+        }
+        expected = record_hash;
+    }
+    Ok(true)
 }
 
 fn create_approvals_table(connection: &Connection) -> Result<()> {
@@ -909,13 +1312,15 @@ fn prune_audit_connection(
     connection: &mut Connection,
     max_age: chrono::Duration,
     max_bytes: u64,
+    audit_mac: &AuditMacKey,
 ) -> Result<usize> {
     let rows = {
         let mut statement = connection.prepare(
-            "SELECT sequence, timestamp, record_hash,
+            "SELECT sequence, timestamp, record_hash, record_mac,
                     length(payload) + length(previous_hash) + length(record_hash) +
-                    length(connector_id) + length(tool_name) + length(capability) +
-                    length(outcome) + length(argument_hash) + length(summary) + 128
+                    length(record_mac) + length(connector_id) + length(tool_name) +
+                    length(capability) + length(outcome) + length(argument_hash) +
+                    length(summary) + 128
              FROM audit_events ORDER BY sequence",
         )?;
         statement
@@ -924,7 +1329,8 @@ fn prune_audit_connection(
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -935,7 +1341,7 @@ fn prune_audit_connection(
 
     let cutoff = Utc::now() - max_age;
     let mut delete_count = 0_usize;
-    for (_, timestamp, _, _) in &rows {
+    for (_, timestamp, _, _, _) in &rows {
         let parsed = DateTime::<Utc>::from_str(timestamp)
             .context("audit event contains an invalid timestamp")?;
         if parsed >= cutoff {
@@ -944,11 +1350,11 @@ fn prune_audit_connection(
         delete_count += 1;
     }
     let mut retained_bytes = rows[delete_count..].iter().try_fold(0_u64, |total, row| {
-        let bytes = u64::try_from(row.3).context("audit event size is invalid")?;
+        let bytes = u64::try_from(row.4).context("audit event size is invalid")?;
         Ok::<u64, anyhow::Error>(total.saturating_add(bytes))
     })?;
     while delete_count < rows.len() && retained_bytes > max_bytes {
-        let bytes = u64::try_from(rows[delete_count].3).context("audit event size is invalid")?;
+        let bytes = u64::try_from(rows[delete_count].4).context("audit event size is invalid")?;
         retained_bytes = retained_bytes.saturating_sub(bytes);
         delete_count += 1;
     }
@@ -956,16 +1362,42 @@ fn prune_audit_connection(
         return Ok(0);
     }
 
-    let (last_sequence, _, anchor_hash, _) = &rows[delete_count - 1];
+    let (last_sequence, _, anchor_hash, _, _) = &rows[delete_count - 1];
+    let (tail_sequence, tail_hash, tail_record_mac) = if delete_count == rows.len() {
+        (0_i64, anchor_hash.clone(), String::new())
+    } else {
+        let (sequence, _, record_hash, record_mac, _) = rows
+            .last()
+            .context("audit rows disappeared during pruning")?;
+        (*sequence, record_hash.clone(), record_mac.clone())
+    };
+    let tail_mac = audit_mac.tail_mac(
+        anchor_hash,
+        u64::try_from(tail_sequence).context("audit tail sequence is negative")?,
+        &tail_hash,
+        &tail_record_mac,
+    );
     let transaction = connection.transaction()?;
     transaction.execute(
         "DELETE FROM audit_events WHERE sequence <= ?1",
         [last_sequence],
     )?;
-    transaction.execute(
-        "UPDATE audit_chain_state SET anchor_hash = ?1 WHERE id = 1",
-        [anchor_hash],
+    let changed = transaction.execute(
+        "UPDATE audit_chain_state
+         SET anchor_hash = ?1, tail_sequence = ?2, tail_hash = ?3,
+             tail_record_mac = ?4, tail_mac = ?5
+         WHERE id = 1",
+        params![
+            anchor_hash,
+            tail_sequence,
+            tail_hash,
+            tail_record_mac,
+            tail_mac,
+        ],
     )?;
+    if changed != 1 {
+        bail!("authenticated audit chain state is missing during pruning");
+    }
     transaction.commit()?;
     Ok(delete_count)
 }
@@ -1396,11 +1828,13 @@ mod tests {
             "current event",
         );
         store.append_audit(&current)?;
-        let removed = store.test_call(|connection| {
+        let audit_mac = store.audit_mac.clone();
+        let removed = store.test_call(move |connection| {
             prune_audit_connection(
                 connection,
                 Duration::days(AUDIT_RETENTION_DAYS),
                 AUDIT_MAX_BYTES,
+                &audit_mac,
             )
         })?;
         assert_eq!(removed, 1);
@@ -1422,8 +1856,14 @@ mod tests {
                 "x".repeat(1_024),
             ))?;
         }
-        let removed = store.test_call(|connection| {
-            prune_audit_connection(connection, Duration::days(AUDIT_RETENTION_DAYS), 1_600)
+        let audit_mac = store.audit_mac.clone();
+        let removed = store.test_call(move |connection| {
+            prune_audit_connection(
+                connection,
+                Duration::days(AUDIT_RETENTION_DAYS),
+                1_600,
+                &audit_mac,
+            )
         })?;
         assert!(removed >= 2);
         assert!(store.verify_audit_chain()?);
@@ -1627,7 +2067,8 @@ mod tests {
     fn state_schema_version_is_recorded_and_future_versions_are_rejected() -> Result<()> {
         let connection = Connection::open_in_memory()?;
         configure_connection(&connection)?;
-        migrate(&connection)?;
+        let audit_mac = AuditMacKey::generate()?;
+        migrate(&connection, &audit_mac)?;
         let version: i64 = connection.query_row(
             "SELECT version FROM schema_versions WHERE component = 'core_state'",
             [],
@@ -1638,9 +2079,10 @@ mod tests {
             "UPDATE schema_versions SET version = 999 WHERE component = 'core_state'",
             [],
         )?;
-        assert!(migrate(&connection).is_err());
+        assert!(migrate(&connection, &audit_mac).is_err());
         Ok(())
-    }    fn test_audit_event(summary: &str) -> AuditEvent {
+    }
+    fn test_audit_event(summary: &str) -> AuditEvent {
         AuditEvent::new(
             "test-connector",
             "fs_write",
@@ -1721,6 +2163,4 @@ mod tests {
         assert!(!store.verify_audit_chain()?);
         Ok(())
     }
-
-
 }

@@ -40,6 +40,7 @@ pub use service::{
 };
 
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const POLICY_VERSION: u16 = 2;
 pub const PROGRAM_PROFILE_VERSION: u16 = 1;
 pub const MAX_PROGRAM_PROFILES: usize = 128;
@@ -355,6 +356,8 @@ impl HelperResponse {
             request_id,
             result: HelperResult::Healthy {
                 allowlisted_programs,
+                protocol_version: PROTOCOL_VERSION,
+                package_version: HELPER_VERSION.to_owned(),
             },
         }
     }
@@ -387,6 +390,8 @@ impl HelperResponse {
 pub enum HelperResult {
     Healthy {
         allowlisted_programs: usize,
+        protocol_version: u16,
+        package_version: String,
     },
     Completed {
         exit_code: Option<i32>,
