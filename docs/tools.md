@@ -52,3 +52,14 @@ Wayland session; input fails closed on unsupported Wayland configurations.
 AppleScript and PowerShell are passed on stdin to fixed system executables.
 Linux D-Bus calls use structured, validated `busctl --user call` arguments.
 These are execution capabilities, not safe data-query shortcuts.
+
+
+## Connector binary trust commands
+
+`runonmine connect list` includes the configured connector binary trust state.
+Use `runonmine connect pin-external-binaries` after reviewing an explicit
+external executable; later content or ownership/metadata changes fail before
+process start. `runonmine connect update-managed-binaries` updates only managed
+Cloudflare paths through immutable version preparation and rollback-aware
+activation. External paths and the compatibility-gated OpenAI tunnel-client path
+are not silently replaced.

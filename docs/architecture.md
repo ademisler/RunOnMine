@@ -101,6 +101,8 @@ client-supplied name remains explicitly unverified.
 - `state.db` contains approvals, sessions, OAuth token/source hashes, expiring registered-client metadata, and audit records.
 - platform credential storage contains connector paths, external API credentials, OAuth hash keys, and owner-controlled registration access tokens.
 - isolated Chromium profiles live below the per-user RunOnMine data directory.
+- immutable managed connector versions live below `data/managed-binaries/<executable>/versions/<sha256>/`, with an owner-only active manifest and receipt per version.
+- optional external connector pins live in an owner-only state document and contain only binary identity/metadata, never connector credentials.
 
 Cloudflare Quick Tunnel public URL discovery is runtime state rather than desired configuration. Each successful Quick process start creates a private generation-bound record below the state directory. Only the observer holding that generation may publish or clear the URL; restart/backoff clears it, process stop removes the record, startup replaces stale generations, and legacy Quick URLs are removed from `config.toml` under the configuration lock. The desktop, doctor, and support summary read this bounded state without exposing the URL through public health routes or support archives.
 
@@ -111,7 +113,11 @@ The audit log is hash-chained. Retention pruning stores a chain anchor, so the r
 ## Connector startup isolation
 
 Managed external connectors start behind a per-connector error boundary. Binary
-discovery, connector-specific directories and profiles, credential lookup,
+resolution first classifies the exact executable as a verified immutable managed
+version, pinned external path, or unpinned external path. Managed receipts and
+external pins are rechecked before process creation; a mismatch is retained as a
+connector-scoped degraded state. Binary discovery, connector-specific directories
+and profiles, credential lookup,
 health-command construction and supervisor startup may mark only that connector
 as degraded. The failure is retained in the in-memory managed-connector set and
 emitted as a structured log with connector ID, kind and a sanitized authentication/process stage.

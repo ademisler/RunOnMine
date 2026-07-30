@@ -121,6 +121,11 @@ on restart/backoff and removed on process stop.
   capabilities can require local approval but cannot be configured to auto-run;
   administrator execution remains denied.
 - Denied tools are omitted from MCP discovery and rejected if called directly.
+- Connector binaries have an explicit trust state. Managed versions are immutable
+  digest-addressed files with private receipts; external absolute paths are shown
+  as unpinned until the owner runs `runonmine connect pin-external-binaries`.
+  Pinned path, digest, ownership, mode, size, and modification time are verified
+  again before agent startup, and a changed pin degrades only that connector.
 - File operations use open directory capabilities and descriptor-relative traversal inside explicitly selected roots; path checks and file access are not separated by a canonicalize-then-open race.
 - The default browser profile is disposable and isolated from the user's daily
   browser profile. A browser-process-wide loopback proxy covers pages, popups,

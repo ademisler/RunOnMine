@@ -175,7 +175,7 @@ impl ExternalBinaryPinStore {
         if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
             bail!("external binary pin document exceeds the size limit");
         }
-        runonmine_core::atomic::write(&self.path, &bytes, 0o600)?;
+        atomic_write_private(&self.path, &bytes)?;
         restrict_file(&self.path)
     }
 }
@@ -215,7 +215,7 @@ fn inspect_pin(kind: BinaryKind, path: &Path) -> Result<ExternalBinaryPin> {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos());
     #[cfg(unix)]
-    let (unix_uid, unix_gid, unix_mode) = {
+    let (owner_user_id, owner_group_id, permissions_mode) = {
         use std::os::unix::fs::MetadataExt as _;
         (
             Some(metadata.uid()),
@@ -224,16 +224,16 @@ fn inspect_pin(kind: BinaryKind, path: &Path) -> Result<ExternalBinaryPin> {
         )
     };
     #[cfg(not(unix))]
-    let (unix_uid, unix_gid, unix_mode) = (None, None, None);
+    let (owner_user_id, owner_group_id, permissions_mode) = (None, None, None);
     let pin = ExternalBinaryPin {
         kind: kind_key(kind),
         canonical_path,
         sha256: sha256_file(path)?,
         size: metadata.len(),
         modified_nanos,
-        unix_uid,
-        unix_gid,
-        unix_mode,
+        unix_uid: owner_user_id,
+        unix_gid: owner_group_id,
+        unix_mode: permissions_mode,
     };
     validate_pin(&pin)?;
     Ok(pin)
@@ -266,7 +266,7 @@ fn kind_key(kind: BinaryKind) -> String {
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
@@ -279,6 +279,31 @@ fn sha256_file(path: &Path) -> Result<String> {
         write!(&mut encoded, "{byte:02x}")?;
     }
     Ok(encoded)
+}
+
+fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path.parent().context("pin document has no parent")?;
+    ensure_private_directory(parent)?;
+    reject_symlink_if_present(path, "external binary pin document")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .context("failed to atomically replace external binary pin document")?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 fn ensure_private_directory(path: &Path) -> Result<()> {

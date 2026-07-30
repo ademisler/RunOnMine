@@ -197,10 +197,25 @@ and Developer Mode access. RunOnMine does not claim or bypass those permissions.
 
 Managed `cloudflared` and `tunnel-client` downloads resolve through official
 GitHub releases, require HTTPS URLs on allowlisted hosts, verify release digests,
-reject archive path traversal, and install by atomic replacement. RunOnMine
-persists a private installation receipt and re-verifies the executable path and
-SHA-256 digest whenever the managed binary is loaded. Explicit user-supplied
-absolute paths remain an advanced local trust decision; PATH fallback is not used.
+and reject archive path traversal. New managed Cloudflare installs are stored in
+immutable SHA-256-addressed version directories with a private receipt. Connector
+startup accepts a managed version only when its exact path shape, receipt
+provider/path, and executable digest all verify. `runonmine connect
+update-managed-binaries` prepares and probes a new Cloudflare version before a
+single config/active-manifest/service-restart transaction; restart failure
+restores both the prior configuration and active version. OpenAI tunnel-client
+migration to this update path remains compatibility-gated and is not changed by
+that command yet.
+
+Explicit user-supplied absolute paths remain an advanced local trust decision;
+PATH fallback is not used. `runonmine connect list` reports
+`external_unpinned`, `external_pinned`, `managed_verified`, `missing`, or
+`invalid`. `runonmine connect pin-external-binaries` stores an owner-only pin for
+each configured external path, binding its canonical path, SHA-256 digest,
+platform ownership, Unix mode where available, size, and modification time.
+Agent startup verifies the pin before process creation. A mismatch degrades only
+the affected connector; an unpinned external binary remains allowed but produces
+an explicit warning.
 
 The desktop application includes guided setup for Quick Tunnel, Cloudflare OAuth, and OpenAI Secure MCP Tunnel. Secrets are passed to the local CLI over bounded standard input and stored in the operating-system credential store. Multi-value credential replacement rolls back if any write or follow-up revocation fails. Child output is bounded and redacted, and background commands are canceled and joined when the desktop exits. Connector lifecycle commands remain available without editing configuration files:
 
@@ -209,6 +224,8 @@ runonmine connect list
 runonmine connect show <id>
 runonmine connect enable <id>
 runonmine connect disable <id>
+runonmine connect update-managed-binaries
+runonmine connect pin-external-binaries
 runonmine connect remove <id> --confirm REMOVE
 ```
 

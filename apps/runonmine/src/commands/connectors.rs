@@ -63,11 +63,12 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             }
             for connector in &config.connectors {
                 println!(
-                    "{}  {:?}  enabled={}  preset={:?}  {}",
+                    "{}  {:?}  enabled={}  preset={:?}  binary_trust={}  {}",
                     connector.id,
                     connector.kind,
                     connector.enabled,
                     connector.policy_preset,
+                    connector_binary_trust_label(&paths, connector),
                     connector.name,
                 );
             }
@@ -389,6 +390,27 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 );
             }
         }
+        ConnectCommand::UpdateManagedBinaries => {
+            let updated = update_managed_cloudflared(&paths, &config_path).await?;
+            if updated == 0 {
+                println!("No managed Cloudflare connector paths required an update.");
+            } else {
+                println!("Updated {updated} managed Cloudflare connector path(s).");
+            }
+            if has_managed_openai_connector(&paths, &config)? {
+                println!(
+                    "OpenAI tunnel-client migration remains pending compatibility validation; its configured path was unchanged."
+                );
+            }
+        }
+        ConnectCommand::PinExternalBinaries => {
+            let pinned = pin_configured_external_binaries(&paths, &config)?;
+            if pinned == 0 {
+                println!("No unpinned external connector binaries were configured.");
+            } else {
+                println!("Pinned {pinned} external connector binary path(s).");
+            }
+        }
         ConnectCommand::Openai(args) => {
             validate_profile_name(&args.profile)?;
             let tunnel_id = value_or_prompt(args.tunnel_id, "OpenAI tunnel ID: ")?;
@@ -655,11 +677,38 @@ pub(super) async fn ensure_binary(
         return Ok(binary);
     }
 
-    let store_root = paths
-        .data_dir
-        .join("managed-binaries")
-        .join(kind.executable_name());
-    let store = runonmine_connectors::VersionedBinaryStore::new(store_root);
+    let store = managed_binary_store(&paths.data_dir, kind);
+    if let Some(active) = store.resolve_active()? {
+        let binary = InstalledBinary::from_verified_path(kind, &active.binary_path)?;
+        verify_managed_binary(&binary, provider, &active.receipt_path)?;
+        BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+        return Ok(binary);
+    }
+
+    println!("Downloading the latest verified official connector binary...");
+    let prepared = prepare_latest_managed_binary(paths, kind, provider).await?;
+    let activation = prepared.store.activate(&prepared.version)?;
+    if let Err(error) = BinaryProbe::run(&prepared.binary, std::time::Duration::from_secs(10)).await
+    {
+        prepared.store.rollback(activation)?;
+        return Err(error.context("managed binary probe failed and activation was rolled back"));
+    }
+    Ok(prepared.binary)
+}
+
+#[derive(Debug)]
+struct PreparedManagedBinary {
+    store: VersionedBinaryStore,
+    version: runonmine_connectors::ManagedBinaryVersion,
+    binary: InstalledBinary,
+}
+
+async fn prepare_latest_managed_binary(
+    paths: &AppPaths,
+    kind: BinaryKind,
+    provider: ReleaseProvider,
+) -> Result<PreparedManagedBinary> {
+    let store = managed_binary_store(&paths.data_dir, kind);
     let staging_parent = paths.data_dir.join("managed-binary-staging");
     ensure_private_directory(&staging_parent)?;
     let staging = tempfile::Builder::new()
@@ -674,31 +723,132 @@ pub(super) async fn ensure_binary(
         .await?;
     let staged = InstalledBinary::from_verified_path(kind, &staged_path)?;
     BinaryProbe::run(&staged, std::time::Duration::from_secs(10)).await?;
-
     let version_id = store.version_id_for_file(&staged_path)?;
-    let target = store.version(&version_id);
+    let target = store.version(&version_id)?;
     receipt.installed_path.clone_from(&target.binary_path);
-    let prepared = store.prepare(&staged_path, &serde_json::to_vec_pretty(&receipt)?)?;
-    let activation = store.activate(&prepared)?;
-    let binary = InstalledBinary::from_verified_path(kind, &prepared.binary_path);
-    let verified = binary.and_then(|binary| {
-        verify_managed_binary(&binary, provider, &prepared.receipt_path)?;
-        Ok(binary)
-    });
-    let binary = match verified {
-        Ok(binary) => binary,
-        Err(error) => {
-            store.rollback(activation)?;
-            return Err(error.context("managed binary activation failed and was rolled back"));
-        }
-    };
-    if let Err(error) = BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await {
-        store.rollback(activation)?;
-        return Err(error.context("managed binary probe failed and activation was rolled back"));
-    }
-    Ok(binary)
+    let version = store.prepare(&staged_path, &serde_json::to_vec_pretty(&receipt)?)?;
+    let binary = InstalledBinary::from_verified_path(kind, &version.binary_path)?;
+    verify_managed_binary(&binary, provider, &version.receipt_path)?;
+    BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+    Ok(PreparedManagedBinary {
+        store,
+        version,
+        binary,
+    })
 }
 
+#[derive(Debug)]
+struct ManagedUpdateState {
+    store: VersionedBinaryStore,
+    activation: Option<runonmine_connectors::ManagedBinaryActivation>,
+}
+
+async fn update_managed_cloudflared(paths: &AppPaths, config_path: &Path) -> Result<usize> {
+    let current = AppConfig::load_or_create(config_path)?;
+    let mut candidates = 0_usize;
+    for connector in &current.connectors {
+        let Some((kind, _provider, path)) = connector_binary_path(connector) else {
+            continue;
+        };
+        if kind == BinaryKind::Cloudflared
+            && is_managed_connector_binary(&paths.data_dir, kind, path)?
+        {
+            candidates = candidates.saturating_add(1);
+        }
+    }
+    if candidates == 0 {
+        return Ok(0);
+    }
+
+    let prepared =
+        prepare_latest_managed_binary(paths, BinaryKind::Cloudflared, ReleaseProvider::Cloudflared)
+            .await?;
+    let target_path = prepared.binary.path.clone();
+    let mut state = ManagedUpdateState {
+        store: prepared.store,
+        activation: None,
+    };
+    AppConfig::update_with_activation(
+        config_path,
+        &mut state,
+        |config, _state| rewrite_managed_cloudflare_paths(config, paths, &target_path),
+        |_updated, state| {
+            state.activation = Some(state.store.activate(&prepared.version)?);
+            reconcile_running_agent_after_connector_change()
+        },
+        |state| match state.activation.take() {
+            Some(activation) => state.store.rollback(activation),
+            None => Ok(()),
+        },
+    )
+}
+
+fn rewrite_managed_cloudflare_paths(
+    config: &mut AppConfig,
+    paths: &AppPaths,
+    target_path: &Path,
+) -> Result<usize> {
+    let mut updated = 0_usize;
+    for connector in &mut config.connectors {
+        let configured = match connector.kind {
+            ConnectorKind::CloudflareQuick => connector
+                .cloudflare_quick
+                .as_ref()
+                .and_then(|settings| settings.cloudflared_path.as_deref()),
+            ConnectorKind::CloudflareOauth => connector
+                .cloudflare_named
+                .as_ref()
+                .and_then(|settings| settings.cloudflared_path.as_deref()),
+            ConnectorKind::LocalStdio | ConnectorKind::LocalHttp | ConnectorKind::OpenAiTunnel => {
+                None
+            }
+        };
+        let Some(configured) = configured else {
+            continue;
+        };
+        if !is_managed_connector_binary(&paths.data_dir, BinaryKind::Cloudflared, configured)? {
+            continue;
+        }
+        match connector.kind {
+            ConnectorKind::CloudflareQuick => {
+                connector
+                    .cloudflare_quick
+                    .as_mut()
+                    .context("Cloudflare Quick settings are missing")?
+                    .cloudflared_path = Some(target_path.to_path_buf());
+            }
+            ConnectorKind::CloudflareOauth => {
+                connector
+                    .cloudflare_named
+                    .as_mut()
+                    .context("Cloudflare OAuth settings are missing")?
+                    .cloudflared_path = Some(target_path.to_path_buf());
+            }
+            ConnectorKind::LocalStdio | ConnectorKind::LocalHttp | ConnectorKind::OpenAiTunnel => {
+                unreachable!("filtered connector kind")
+            }
+        }
+        updated = updated.saturating_add(1);
+    }
+    Ok(updated)
+}
+
+fn has_managed_openai_connector(paths: &AppPaths, config: &AppConfig) -> Result<bool> {
+    for connector in &config.connectors {
+        let Some(settings) = &connector.openai_tunnel else {
+            continue;
+        };
+        let Some(path) = settings.tunnel_client_path.as_deref() else {
+            continue;
+        };
+        if is_managed_connector_binary(&paths.data_dir, BinaryKind::OpenAiTunnelClient, path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
 fn existing_managed_binary(
     kind: BinaryKind,
     provider: ReleaseProvider,
@@ -725,6 +875,7 @@ fn existing_managed_binary(
     }
 }
 
+#[cfg(test)]
 fn safe_regular_file_presence(path: &Path, description: &str) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -738,11 +889,6 @@ fn safe_regular_file_presence(path: &Path, description: &str) -> Result<bool> {
 
 pub(super) fn managed_receipt_path(directory: &Path, kind: BinaryKind) -> PathBuf {
     directory.join(format!("{}.receipt.json", kind.executable_name()))
-}
-
-pub(super) fn write_install_receipt(path: &Path, receipt: &InstallReceipt) -> Result<()> {
-    atomic_write(path, &serde_json::to_vec_pretty(receipt)?)?;
-    restrict_private_file(path)
 }
 
 pub(super) fn read_install_receipt(path: &Path) -> Result<InstallReceipt> {
@@ -782,38 +928,96 @@ pub(super) fn load_connector_binary(
     provider: ReleaseProvider,
     configured_path: Option<&Path>,
 ) -> Result<Option<InstalledBinary>> {
-    let managed_directory = paths.data_dir.join("bin");
-    let candidate = configured_path.map_or_else(
-        || managed_directory.join(kind.executable_name()),
-        Path::to_path_buf,
-    );
-    if !candidate.exists() {
+    let Some(resolved) = resolve_connector_binary(
+        &paths.data_dir,
+        &paths.state_dir,
+        kind,
+        provider,
+        configured_path,
+    )?
+    else {
         return Ok(None);
+    };
+    if resolved.trust == ExternalBinaryTrust::ExternalUnpinned {
+        tracing::warn!(
+            binary_path = %resolved.binary.path.display(),
+            ?kind,
+            "connector uses an unpinned external binary; run `runonmine connect pin-external-binaries`"
+        );
     }
-    let managed = managed_directory
-        .canonicalize()
-        .unwrap_or(managed_directory.clone());
-    let candidate_parent = candidate
-        .parent()
-        .and_then(|parent| parent.canonicalize().ok());
-    let is_managed_candidate = candidate_parent.as_deref() == Some(managed.as_path())
-        && candidate.file_name() == Some(std::ffi::OsStr::new(kind.executable_name()));
-    if is_managed_candidate
-        && std::fs::symlink_metadata(&candidate)?
-            .file_type()
-            .is_symlink()
-    {
-        bail!("managed connector binary must not be a symlink");
+    Ok(Some(resolved.binary))
+}
+
+fn connector_binary_path(
+    connector: &ConnectorConfig,
+) -> Option<(BinaryKind, ReleaseProvider, &Path)> {
+    match connector.kind {
+        ConnectorKind::CloudflareQuick => connector
+            .cloudflare_quick
+            .as_ref()
+            .and_then(|settings| settings.cloudflared_path.as_deref())
+            .map(|path| (BinaryKind::Cloudflared, ReleaseProvider::Cloudflared, path)),
+        ConnectorKind::CloudflareOauth => connector
+            .cloudflare_named
+            .as_ref()
+            .and_then(|settings| settings.cloudflared_path.as_deref())
+            .map(|path| (BinaryKind::Cloudflared, ReleaseProvider::Cloudflared, path)),
+        ConnectorKind::OpenAiTunnel => connector
+            .openai_tunnel
+            .as_ref()
+            .and_then(|settings| settings.tunnel_client_path.as_deref())
+            .map(|path| {
+                (
+                    BinaryKind::OpenAiTunnelClient,
+                    ReleaseProvider::OpenAiTunnelClient,
+                    path,
+                )
+            }),
+        ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => None,
     }
-    let binary = InstalledBinary::from_verified_path(kind, &candidate)?;
-    if is_managed_candidate {
-        verify_managed_binary(
-            &binary,
-            provider,
-            &managed_receipt_path(&managed_directory, kind),
-        )?;
+}
+
+fn connector_binary_trust_label(paths: &AppPaths, connector: &ConnectorConfig) -> &'static str {
+    let Some((kind, provider, path)) = connector_binary_path(connector) else {
+        return "not_applicable";
+    };
+    match resolve_connector_binary(
+        &paths.data_dir,
+        &paths.state_dir,
+        kind,
+        provider,
+        Some(path),
+    ) {
+        Ok(Some(resolved)) => match resolved.trust {
+            ExternalBinaryTrust::ManagedVersioned => "managed_verified",
+            ExternalBinaryTrust::ExternalPinned => "external_pinned",
+            ExternalBinaryTrust::ExternalUnpinned => "external_unpinned",
+        },
+        Ok(None) => "missing",
+        Err(_) => "invalid",
     }
-    Ok(Some(binary))
+}
+
+fn pin_configured_external_binaries(paths: &AppPaths, config: &AppConfig) -> Result<usize> {
+    let pins = external_binary_pin_store(&paths.state_dir);
+    let mut pinned = 0_usize;
+    let mut seen = std::collections::BTreeSet::new();
+    for connector in &config.connectors {
+        let Some((kind, _provider, path)) = connector_binary_path(connector) else {
+            continue;
+        };
+        let canonical = path.canonicalize().with_context(|| {
+            format!("configured connector binary is missing: {}", path.display())
+        })?;
+        if is_managed_connector_binary(&paths.data_dir, kind, &canonical)? {
+            continue;
+        }
+        if seen.insert((kind.executable_name().to_owned(), canonical.clone())) {
+            pins.pin(kind, &canonical)?;
+            pinned = pinned.saturating_add(1);
+        }
+    }
+    Ok(pinned)
 }
 
 pub(super) fn ensure_private_directory(path: &Path) -> Result<()> {
@@ -909,6 +1113,99 @@ mod tests {
         );
         assert_eq!(std::fs::read(&destination)?, b"orphan managed bytes");
         assert!(!receipt_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_cloudflare_rewrite_preserves_external_paths() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path());
+        paths.ensure()?;
+        let legacy_directory = paths.data_dir.join("bin");
+        ensure_private_directory(&legacy_directory)?;
+        let managed = legacy_directory.join(BinaryKind::Cloudflared.executable_name());
+        std::fs::write(&managed, b"managed")?;
+        let external = temporary.path().join("external-cloudflared");
+        std::fs::write(&external, b"external")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let target = temporary.path().join("new-version");
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "quick".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings {
+            cloudflared_path: Some(managed),
+            ..CloudflareQuickSettings::default()
+        });
+        let mut oauth = ConnectorConfig::local_default();
+        oauth.id = "oauth".to_owned();
+        oauth.kind = ConnectorKind::CloudflareOauth;
+        oauth.cloudflare_named = Some(CloudflareNamedSettings {
+            tunnel_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+            credentials_file: temporary.path().join("credentials.json"),
+            hostname: "mcp.example.com".to_owned(),
+            cloudflared_path: Some(external.clone()),
+            metrics_port: 47_824,
+        });
+        let mut config = AppConfig {
+            connectors: vec![quick, oauth],
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            rewrite_managed_cloudflare_paths(&mut config, &paths, &target)?,
+            1
+        );
+        assert_eq!(
+            config.connectors[0]
+                .cloudflare_quick
+                .as_ref()
+                .and_then(|settings| settings.cloudflared_path.as_deref()),
+            Some(target.as_path())
+        );
+        assert_eq!(
+            config.connectors[1]
+                .cloudflare_named
+                .as_ref()
+                .and_then(|settings| settings.cloudflared_path.as_deref()),
+            Some(external.as_path())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pin_command_deduplicates_external_binary_paths() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path());
+        paths.ensure()?;
+        let external = temporary.path().join("external-cloudflared");
+        std::fs::write(&external, b"external")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let mut first = ConnectorConfig::local_default();
+        first.id = "first".to_owned();
+        first.kind = ConnectorKind::CloudflareQuick;
+        first.cloudflare_quick = Some(CloudflareQuickSettings {
+            cloudflared_path: Some(external.clone()),
+            ..CloudflareQuickSettings::default()
+        });
+        let mut second = first.clone();
+        second.id = "second".to_owned();
+        let config = AppConfig {
+            connectors: vec![first, second],
+            ..AppConfig::default()
+        };
+        assert_eq!(pin_configured_external_binaries(&paths, &config)?, 1);
+        assert_eq!(
+            connector_binary_trust_label(&paths, &config.connectors[0]),
+            "external_pinned"
+        );
         Ok(())
     }
 

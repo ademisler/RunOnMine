@@ -7,6 +7,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Route connector startup, CLI loading, doctor/list trust reporting, and external pinning through one binary trust resolver: immutable managed versions require matching private receipts, pinned external binaries require canonical path/digest/ownership/metadata continuity, changed pins fail before process start, and unpinned external binaries remain visible with an explicit warning.
+- Add `connect update-managed-binaries` for managed Cloudflare connectors: stage and verify a new immutable version, atomically rewrite only managed config paths, activate the manifest, restart the running agent, and restore both config and active version on restart failure. OpenAI tunnel-client migration remains blocked on compatibility validation.
 - Preserve invalid or incomplete managed Cloudflare binary/receipt pairs and fail closed instead of deleting them implicitly during connector setup; repair and rollback now require an explicit managed-binary operation.
 - Generate the GitHub OAuth owner-verifier User-Agent from the workspace package version so network diagnostics cannot drift from the running build.
 - Move Cloudflare Quick Tunnel public URL discovery out of durable configuration into a private generation-bound runtime store; clear legacy/stale URLs, reject stale observer writes, clear discovery during restart/backoff, remove state on stop, and keep corrupt runtime artifacts scoped to the affected connector.

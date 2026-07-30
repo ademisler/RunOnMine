@@ -9,8 +9,10 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use rand::RngCore;
 use runonmine_connectors::openai::{OpenAiMcpTarget, OpenAiTunnelProfile};
 use runonmine_connectors::{
-    BinaryInstaller, BinaryKind, BinaryProbe, GitHubReleaseResolver, InstallReceipt,
-    InstalledBinary, ReleaseChannel, ReleaseProvider, SecretValue, run_once,
+    BinaryInstaller, BinaryKind, BinaryProbe, ExternalBinaryTrust, GitHubReleaseResolver,
+    InstallReceipt, InstalledBinary, ReleaseChannel, ReleaseProvider, SecretValue,
+    VersionedBinaryStore, external_binary_pin_store, is_managed_connector_binary,
+    managed_binary_store, resolve_connector_binary, run_once,
 };
 use runonmine_core::secrets::{SecretTransaction, default_secret_store};
 use runonmine_core::{

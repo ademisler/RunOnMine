@@ -12,8 +12,9 @@ use runonmine_connectors::cloudflare::{
 };
 use runonmine_connectors::openai::{OpenAiMcpTarget, OpenAiTunnelProfile};
 use runonmine_connectors::{
-    BinaryDiscovery, BinaryKind, ProcessEvent, ProcessState, ProcessSupervisor, RestartPolicy,
-    SecretValue, SupervisorHandle, run_once,
+    BinaryKind, ExternalBinaryTrust, ProcessEvent, ProcessState, ProcessSupervisor,
+    ReleaseProvider, RestartPolicy, SecretValue, SupervisorHandle, resolve_connector_binary,
+    run_once,
 };
 use runonmine_core::{
     AppConfig, AppPaths, ConnectorConfig, ConnectorKind, QuickTunnelGeneration,
@@ -398,7 +399,6 @@ async fn start_external_connectors_inner(
     managed: &mut ManagedConnectors,
     pending_observers: &mut Vec<PendingQuickObserver>,
 ) -> Result<()> {
-    let discovery = BinaryDiscovery::new(vec![paths.data_dir.join("bin")]);
     let supervisor = ProcessSupervisor;
     let origin = Url::parse(&format!("http://127.0.0.1:{}", config.port))?;
     let quick_runtime = QuickTunnelRuntimeStore::new(paths);
@@ -431,12 +431,16 @@ async fn start_external_connectors_inner(
                         .cloudflare_quick
                         .as_ref()
                         .context("Cloudflare Quick settings are missing")?;
-                    let binary = discovery
-                        .discover(
-                            BinaryKind::Cloudflared,
-                            settings.cloudflared_path.as_deref(),
-                        )?
-                        .context("cloudflared is not installed; run the connector setup again")?;
+                    let resolved = resolve_connector_binary(
+                        &paths.data_dir,
+                        &paths.state_dir,
+                        BinaryKind::Cloudflared,
+                        ReleaseProvider::Cloudflared,
+                        settings.cloudflared_path.as_deref(),
+                    )?
+                    .context("cloudflared is not installed; run the connector setup again")?;
+                    warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
+                    let binary = resolved.binary;
                     let tunnel = QuickTunnelConfig::builder(origin.clone())
                         .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
                         .build()?;
@@ -467,12 +471,16 @@ async fn start_external_connectors_inner(
                         .cloudflare_named
                         .as_ref()
                         .context("Cloudflare Named Tunnel settings are missing")?;
-                    let binary = discovery
-                        .discover(
-                            BinaryKind::Cloudflared,
-                            settings.cloudflared_path.as_deref(),
-                        )?
-                        .context("cloudflared is not installed; run the connector setup again")?;
+                    let resolved = resolve_connector_binary(
+                        &paths.data_dir,
+                        &paths.state_dir,
+                        BinaryKind::Cloudflared,
+                        ReleaseProvider::Cloudflared,
+                        settings.cloudflared_path.as_deref(),
+                    )?
+                    .context("cloudflared is not installed; run the connector setup again")?;
+                    warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
+                    let binary = resolved.binary;
                     let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
                     ensure_private_directory(&connector_dir)?;
                     let tunnel = NamedTunnelConfig::builder(
@@ -728,6 +736,16 @@ fn apply_openai_runtime_event(
     false
 }
 
+fn warn_unpinned_binary(connector_id: &str, trust: ExternalBinaryTrust, path: &std::path::Path) {
+    if trust == ExternalBinaryTrust::ExternalUnpinned {
+        tracing::warn!(
+            connector_id,
+            binary_path = %path.display(),
+            "connector is using an unpinned external binary"
+        );
+    }
+}
+
 fn mark_openai_degraded(
     runtime: &ConnectorRuntimeRegistry,
     connector_id: &str,
@@ -748,13 +766,16 @@ async fn prepare_openai_activation(
         .openai_tunnel
         .as_ref()
         .context("OpenAI tunnel settings are missing")?;
-    let discovery = BinaryDiscovery::new(vec![paths.data_dir.join("bin")]);
-    let binary = discovery
-        .discover(
-            BinaryKind::OpenAiTunnelClient,
-            settings.tunnel_client_path.as_deref(),
-        )?
-        .context("tunnel-client is not installed; run the connector setup again")?;
+    let resolved = resolve_connector_binary(
+        &paths.data_dir,
+        &paths.state_dir,
+        BinaryKind::OpenAiTunnelClient,
+        ReleaseProvider::OpenAiTunnelClient,
+        settings.tunnel_client_path.as_deref(),
+    )?
+    .context("tunnel-client is not installed; run the connector setup again")?;
+    warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
+    let binary = resolved.binary;
     let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
     let profile_directory = connector_dir.join("openai-profiles");
     let health_directory = paths.state_dir.join("connectors").join(&connector.id);
@@ -1140,6 +1161,64 @@ while :; do /bin/sleep 1; done
                 && status.kind == ConnectorKind::OpenAiTunnel
                 && status.stage == Some(ConnectorStartupStage::Preparation)
         }));
+        managed.stop().await;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_pinned_external_binary_degrades_only_its_connector() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        let cloudflared = temporary.path().join("external-cloudflared");
+        std::fs::write(
+            &cloudflared,
+            b"#!/bin/sh
+printf '%s\n' 'https://pinned.trycloudflare.com'
+",
+        )?;
+        std::fs::set_permissions(&cloudflared, std::fs::Permissions::from_mode(0o700))?;
+        runonmine_connectors::external_binary_pin_store(&paths.state_dir)
+            .pin(BinaryKind::Cloudflared, &cloudflared)?;
+        std::fs::write(
+            &cloudflared,
+            b"#!/bin/sh
+exit 1
+",
+        )?;
+        std::fs::set_permissions(&cloudflared, std::fs::Permissions::from_mode(0o700))?;
+
+        let mut local = ConnectorConfig::local_http_default();
+        local.enabled = true;
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "changed-pinned-quick".to_owned();
+        quick.name = "Changed pinned Quick".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.enabled = true;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings {
+            cloudflared_path: Some(cloudflared),
+            ..CloudflareQuickSettings::default()
+        });
+        let config = AppConfig {
+            connectors: vec![local, quick],
+            ..AppConfig::default()
+        };
+        config.validate()?;
+
+        let runtime = ConnectorRuntimeRegistry::default();
+        let managed =
+            start_external_connectors(&paths, &config, Vec::new(), runtime.clone()).await?;
+        assert!(managed.handles.is_empty());
+        assert_eq!(managed.degraded.len(), 1);
+        assert_eq!(managed.degraded[0].connector_id, "changed-pinned-quick");
+        assert_runtime_phase(
+            &runtime,
+            "changed-pinned-quick",
+            ConnectorRuntimePhase::Degraded,
+        )?;
         managed.stop().await;
         Ok(())
     }

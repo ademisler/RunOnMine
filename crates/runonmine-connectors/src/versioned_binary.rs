@@ -63,6 +63,46 @@ impl VersionedBinaryStore {
         &self.root
     }
 
+    pub fn version_id_for_file(&self, path: &Path) -> Result<String> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("managed binary source must be a regular non-symlink file");
+        }
+        sha256_file(path)
+    }
+
+    pub fn version(&self, version_id: &str) -> Result<ManagedBinaryVersion> {
+        validate_version_id(version_id)?;
+        let directory = self.root.join(VERSIONS_DIRECTORY).join(version_id);
+        Ok(ManagedBinaryVersion {
+            version_id: version_id.to_owned(),
+            binary_path: directory.join(BINARY_FILE),
+            receipt_path: directory.join(RECEIPT_FILE),
+        })
+    }
+
+    pub fn version_for_binary_path(&self, path: &Path) -> Result<ManagedBinaryVersion> {
+        let canonical = path.canonicalize()?;
+        let versions = self.root.join(VERSIONS_DIRECTORY).canonicalize()?;
+        let relative = canonical
+            .strip_prefix(&versions)
+            .context("binary path is outside the managed version store")?;
+        let components = relative.components().collect::<Vec<_>>();
+        if components.len() != 2 || components[1].as_os_str() != BINARY_FILE {
+            bail!("managed binary path does not identify an immutable version");
+        }
+        let version_id = components[0]
+            .as_os_str()
+            .to_str()
+            .context("managed binary version identity is not UTF-8")?;
+        let version = self.version(version_id)?;
+        Self::verify_version_files(&version)?;
+        if version.binary_path.canonicalize()? != canonical {
+            bail!("managed binary path does not match its immutable version");
+        }
+        Ok(version)
+    }
+
     pub fn prepare(
         &self,
         source_binary: &Path,
@@ -224,16 +264,6 @@ impl VersionedBinaryStore {
         };
         self.write_active_manifest_locked(&current)?;
         Ok(ManagedBinaryActivation { previous, current })
-    }
-
-    fn version(&self, version_id: &str) -> Result<ManagedBinaryVersion> {
-        validate_version_id(version_id)?;
-        let directory = self.root.join(VERSIONS_DIRECTORY).join(version_id);
-        Ok(ManagedBinaryVersion {
-            version_id: version_id.to_owned(),
-            binary_path: directory.join(BINARY_FILE),
-            receipt_path: directory.join(RECEIPT_FILE),
-        })
     }
 
     fn ensure_layout(&self) -> Result<()> {
