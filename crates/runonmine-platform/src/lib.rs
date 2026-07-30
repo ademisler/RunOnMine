@@ -1,5 +1,7 @@
 //! Operating-system capability detection and service integration.
 
+mod output;
+
 pub mod agent_status;
 pub mod desktop;
 pub mod helper;

@@ -5,12 +5,14 @@ use std::path::Path;
 #[cfg(any(target_os = "linux", windows))]
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::output::{SharedOutputBudget, read_with_shared_budget};
 use anyhow::{Context, Result, bail};
 use command_group::AsyncCommandGroup as _;
 use serde::Serialize;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
 #[cfg(any(target_os = "macos", windows, test))]
@@ -320,9 +322,9 @@ async fn run_bounded(
         stdin.write_all(&input).await?;
         stdin.shutdown().await
     });
-    let capture_limit = u64::try_from(max_output_bytes.saturating_add(1)).unwrap_or(u64::MAX);
-    let stdout_task = tokio::spawn(read_limited(stdout, capture_limit));
-    let stderr_task = tokio::spawn(read_limited(stderr, capture_limit));
+    let output_budget = Arc::new(SharedOutputBudget::new(max_output_bytes));
+    let stdout_task = tokio::spawn(read_with_shared_budget(stdout, Arc::clone(&output_budget)));
+    let stderr_task = tokio::spawn(read_with_shared_budget(stderr, Arc::clone(&output_budget)));
     let (status, timed_out) = if let Ok(status) = tokio::time::timeout(timeout, child.wait()).await
     {
         (Some(status?), false)
@@ -335,11 +337,9 @@ async fn run_bounded(
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
         Err(error) => return Err(error).context("failed to write platform stdin"),
     }
-    let mut stdout = stdout_task.await.context("platform stdout task failed")??;
-    let mut stderr = stderr_task.await.context("platform stderr task failed")??;
-    let truncated = stdout.len() > max_output_bytes || stderr.len() > max_output_bytes;
-    stdout.truncate(max_output_bytes);
-    stderr.truncate(max_output_bytes);
+    let stdout = stdout_task.await.context("platform stdout task failed")??;
+    let stderr = stderr_task.await.context("platform stderr task failed")??;
+    let truncated = output_budget.truncated();
     Ok(NativeCommandOutput {
         exit_code: status.and_then(|status| status.code()),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
@@ -347,15 +347,6 @@ async fn run_bounded(
         truncated,
         timed_out,
     })
-}
-
-async fn read_limited<R>(reader: R, limit: u64) -> io::Result<Vec<u8>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut bytes = Vec::new();
-    reader.take(limit).read_to_end(&mut bytes).await?;
-    Ok(bytes)
 }
 
 #[cfg(test)]

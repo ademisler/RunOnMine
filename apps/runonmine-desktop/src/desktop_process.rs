@@ -2,7 +2,7 @@ use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -100,8 +100,11 @@ fn run_cli_cancellable(
         .stderr
         .take()
         .context("failed to capture CLI errors")?;
-    let stdout_reader = std::thread::spawn(move || read_bounded(stdout));
-    let stderr_reader = std::thread::spawn(move || read_bounded(stderr));
+    let output_budget = Arc::new(SharedOutputBudget::new(MAX_COMMAND_OUTPUT_BYTES));
+    let stdout_budget = Arc::clone(&output_budget);
+    let stderr_budget = Arc::clone(&output_budget);
+    let stdout_reader = std::thread::spawn(move || read_bounded(stdout, &stdout_budget));
+    let stderr_reader = std::thread::spawn(move || read_bounded(stderr, &stderr_budget));
     if let Some(secret) = secret {
         let mut stdin = child
             .inner()
@@ -134,14 +137,14 @@ fn run_cli_cancellable(
     let stderr = stderr_reader
         .join()
         .map_err(|_| anyhow::anyhow!("CLI error reader panicked"))??;
-    let mut output = String::from_utf8_lossy(&stdout.bytes).into_owned();
-    if !stderr.bytes.is_empty() {
+    let mut output = String::from_utf8_lossy(&stdout).into_owned();
+    if !stderr.is_empty() {
         if !output.is_empty() && !output.ends_with('\n') {
             output.push('\n');
         }
-        output.push_str(&String::from_utf8_lossy(&stderr.bytes));
+        output.push_str(&String::from_utf8_lossy(&stderr));
     }
-    if stdout.truncated || stderr.truncated {
+    if output_budget.truncated() {
         output.push_str("\n[output truncated by RunOnMine Desktop]");
     }
     let output = sanitize_output(&output, secret);
@@ -169,26 +172,62 @@ enum Termination {
     TimedOut,
 }
 
-struct BoundedBytes {
-    bytes: Vec<u8>,
-    truncated: bool,
+#[derive(Debug)]
+struct SharedOutputBudget {
+    remaining: AtomicUsize,
+    truncated: AtomicBool,
 }
 
-fn read_bounded(mut reader: impl Read) -> Result<BoundedBytes> {
-    let mut bytes = Vec::with_capacity(MAX_COMMAND_OUTPUT_BYTES.min(8 * 1024));
-    let mut truncated = false;
+impl SharedOutputBudget {
+    const fn new(maximum: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(maximum),
+            truncated: AtomicBool::new(false),
+        }
+    }
+
+    fn reserve(&self, requested: usize) -> usize {
+        let mut remaining = self.remaining.load(Ordering::Acquire);
+        loop {
+            if remaining == 0 {
+                self.truncated.store(true, Ordering::Release);
+                return 0;
+            }
+            let accepted = requested.min(remaining);
+            match self.remaining.compare_exchange_weak(
+                remaining,
+                remaining - accepted,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if accepted < requested {
+                        self.truncated.store(true, Ordering::Release);
+                    }
+                    return accepted;
+                }
+                Err(actual) => remaining = actual,
+            }
+        }
+    }
+
+    fn truncated(&self) -> bool {
+        self.truncated.load(Ordering::Acquire)
+    }
+}
+
+fn read_bounded(mut reader: impl Read, budget: &SharedOutputBudget) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
     let mut buffer = [0_u8; 8 * 1024];
     loop {
         let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
-        let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(bytes.len());
-        let retained = read.min(remaining);
+        let retained = budget.reserve(read);
         bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
     }
-    Ok(BoundedBytes { bytes, truncated })
+    Ok(bytes)
 }
 
 fn sanitize_output<'a>(input: &str, secrets: impl IntoIterator<Item = &'a str>) -> String {
@@ -245,11 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn bounded_reader_drains_but_retains_only_the_limit() -> Result<()> {
-        let input = vec![b'x'; MAX_COMMAND_OUTPUT_BYTES + 512];
-        let result = read_bounded(input.as_slice())?;
-        assert_eq!(result.bytes.len(), MAX_COMMAND_OUTPUT_BYTES);
-        assert!(result.truncated);
+    fn stdout_and_stderr_readers_share_one_desktop_limit() -> Result<()> {
+        let budget = SharedOutputBudget::new(MAX_COMMAND_OUTPUT_BYTES);
+        let stdout = read_bounded(vec![b'x'; MAX_COMMAND_OUTPUT_BYTES / 2].as_slice(), &budget)?;
+        let stderr = read_bounded(vec![b'y'; MAX_COMMAND_OUTPUT_BYTES].as_slice(), &budget)?;
+        assert_eq!(stdout.len() + stderr.len(), MAX_COMMAND_OUTPUT_BYTES);
+        assert!(budget.truncated());
         Ok(())
     }
 

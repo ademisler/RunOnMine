@@ -66,8 +66,8 @@ Status markers:
 - [ ] **P2-07 — Replace approval polling with notifications.** Retain polling only as a recovery fallback.
 - [ ] **P2-08 — Preserve sanitized internal error diagnostics.** Keep generic remote errors while logging request/connector/audit references and categories.
 - [ ] **P2-09 — Replace silent `.ok()` fallbacks with typed degraded states.** Distinguish missing, disabled, corrupt, unavailable and permission-denied conditions.
-- [ ] **P2-10 — Include canonical shell working directory in authorization identity.** Grants and policy decisions must bind command plus `cwd`.
-- [ ] **P2-11 — Enforce one combined process-output limit.** stdout and stderr must share a total response/memory budget.
+- [x] **P2-10 — Include canonical shell working directory in authorization identity.** Grants and policy decisions bind the command plus the canonical effective `cwd`.
+- [x] **P2-11 — Enforce one combined process-output limit.** stdout and stderr share one total response/memory budget while both pipes continue draining.
 - [ ] **P2-12 — Add browser operation deadlines and stuck-session recovery.** Avoid one call blocking the entire session indefinitely.
 - [ ] **P2-13 — Reap orphan browser processes and profiles.** Inventory and clean leftovers on startup.
 - [ ] **P2-14 — Support explicit browser executable selection and identity display.** Keep external CDP restrictions intact.

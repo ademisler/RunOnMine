@@ -36,6 +36,13 @@ impl OwnedPolicyResources {
         Self(vec![OwnedPolicyResource::Browser(url)])
     }
 
+    pub(super) fn shell(command: String, cwd: PathBuf) -> Self {
+        Self(vec![
+            OwnedPolicyResource::Command(command),
+            OwnedPolicyResource::Filesystem(cwd),
+        ])
+    }
+
     pub(super) fn contexts(&self) -> impl Iterator<Item = ResourceContext<'_>> + '_ {
         self.0.iter().map(OwnedPolicyResource::as_context)
     }
@@ -75,6 +82,23 @@ pub(super) fn browser_policy_origin(url: &Url) -> String {
 
 pub(super) fn same_browser_policy_origin(left: &Url, right: &Url) -> bool {
     browser_policy_origin(left) == browser_policy_origin(right)
+}
+
+pub(super) fn canonical_shell_working_directory(cwd: Option<&Path>) -> Result<PathBuf> {
+    let requested = match cwd {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let canonical = requested.canonicalize().with_context(|| {
+        format!(
+            "shell working directory does not exist or cannot be resolved: {}",
+            requested.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        anyhow::bail!("shell working directory is not a directory");
+    }
+    Ok(canonical)
 }
 
 pub(super) fn browser_authorization_arguments(
@@ -153,9 +177,12 @@ pub(super) fn policy_resources<T: Serialize>(
             .map(|url| vec![OwnedPolicyResource::Browser(url)])
             .unwrap_or_default()
     } else if tool_name == "shell_exec" {
-        string("command")
-            .map(|command| vec![OwnedPolicyResource::Command(command.to_owned())])
-            .unwrap_or_default()
+        let command = string("command").unwrap_or_default().to_owned();
+        let cwd = canonical_shell_working_directory(string("cwd").map(Path::new))?;
+        vec![
+            OwnedPolicyResource::Command(command),
+            OwnedPolicyResource::Filesystem(cwd),
+        ]
     } else if tool_name == "admin_exec" {
         string("program")
             .map(|program| {
@@ -239,6 +266,102 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(paths, vec![root.path().join("private/file.txt")]);
+        Ok(())
+    }
+
+    #[test]
+    fn shell_working_directory_is_canonical_and_bound_to_the_grant_hash() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested)?;
+        let equivalent = nested.join("..");
+        let other = tempfile::tempdir()?;
+        let command = "printf ok".to_owned();
+
+        let canonical = canonical_shell_working_directory(Some(&equivalent))?;
+        assert_eq!(canonical, root.path().canonicalize()?);
+        let first_arguments = json!({
+            "command": command,
+            "cwd": canonical,
+            "timeout_seconds": 30
+        });
+        let first_resources =
+            OwnedPolicyResources::shell("printf ok".to_owned(), root.path().canonicalize()?);
+        let same_arguments = json!({
+            "command": "printf ok",
+            "cwd": root.path().canonicalize()?,
+            "timeout_seconds": 30
+        });
+        let same_resources =
+            OwnedPolicyResources::shell("printf ok".to_owned(), root.path().canonicalize()?);
+        let other_arguments = json!({
+            "command": "printf ok",
+            "cwd": other.path().canonicalize()?,
+            "timeout_seconds": 30
+        });
+        let other_resources =
+            OwnedPolicyResources::shell("printf ok".to_owned(), other.path().canonicalize()?);
+
+        assert_eq!(
+            first_resources.authorization_hash(&first_arguments)?,
+            same_resources.authorization_hash(&same_arguments)?
+        );
+        assert_ne!(
+            first_resources.authorization_hash(&first_arguments)?,
+            other_resources.authorization_hash(&other_arguments)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shell_working_directory_must_exist_and_be_a_directory() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let file = root.path().join("file");
+        std::fs::write(&file, b"not a directory")?;
+        assert!(canonical_shell_working_directory(Some(&file)).is_err());
+        assert!(canonical_shell_working_directory(Some(&root.path().join("missing"))).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn shell_cwd_filesystem_rule_is_evaluated_with_the_command_rule() -> Result<()> {
+        use runonmine_core::{
+            Capability, ConnectorConfig, PolicyContext, PolicyEngine, PolicyMode, PolicyRule,
+            PrincipalContext, PrincipalMatcher, ResourceMatcher,
+        };
+
+        let root = tempfile::tempdir()?;
+        let canonical = root.path().canonicalize()?;
+        let resources = OwnedPolicyResources::shell("cargo test".to_owned(), canonical.clone());
+        let mut connector = ConnectorConfig::local_default();
+        connector.policy_rules.push(PolicyRule {
+            mode: PolicyMode::Deny,
+            principal: PrincipalMatcher::Any,
+            resource: ResourceMatcher::FilesystemPrefix { path: canonical },
+            tool: Some("shell_exec".to_owned()),
+            capability: Some(Capability::ShellExec),
+        });
+        let modes = resources
+            .contexts()
+            .map(|resource| {
+                PolicyEngine
+                    .evaluate_context(
+                        &connector,
+                        "shell_exec",
+                        Capability::ShellExec,
+                        &PolicyContext {
+                            principal: PrincipalContext::Local,
+                            resource,
+                        },
+                    )
+                    .mode
+            })
+            .collect::<Vec<_>>();
+        assert!(modes.contains(&PolicyMode::Deny));
+        assert_eq!(
+            pre_approval_decision(modes, false),
+            PreApprovalDecision::Deny
+        );
         Ok(())
     }
 

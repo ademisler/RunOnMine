@@ -18,8 +18,11 @@ are bounded. Writes use atomic replacement where an overwrite is intended.
 - `admin_exec`
 
 Shell timeouts terminate the process tree through Unix process groups or a
-Windows Job Object. Output is bounded and environment values are not returned
-in errors. `admin_exec` appears only when the optional helper is healthy and
+Windows Job Object. The canonical effective working directory is part of policy
+and exact-grant identity. stdout and stderr share one configured retained-output
+budget; both pipes continue draining after that budget is exhausted so a noisy
+child cannot deadlock on a full pipe. Environment values are not returned in
+errors. `admin_exec` appears only when the optional helper is healthy and
 has at least one allowlisted, hash-pinned executable. The helper additionally
 requires the complete argument vector to match an installed command profile;
 executable-only compatibility entries accept no arguments.

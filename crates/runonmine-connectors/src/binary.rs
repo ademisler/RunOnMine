@@ -2,12 +2,13 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::output::{SharedOutputBudget, read_with_shared_budget};
 use anyhow::{Context, Result, bail};
 use command_group::AsyncCommandGroup;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 const PROBE_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -206,8 +207,9 @@ async fn run_limited(
         .take()
         .context("failed to capture probe stderr")?;
 
-    let stdout_task = tokio::spawn(read_capped(stdout, PROBE_OUTPUT_LIMIT));
-    let stderr_task = tokio::spawn(read_capped(stderr, PROBE_OUTPUT_LIMIT));
+    let output_budget = Arc::new(SharedOutputBudget::new(PROBE_OUTPUT_LIMIT));
+    let stdout_task = tokio::spawn(read_with_shared_budget(stdout, Arc::clone(&output_budget)));
+    let stderr_task = tokio::spawn(read_with_shared_budget(stderr, Arc::clone(&output_budget)));
     let deadline = tokio::time::Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -227,24 +229,15 @@ async fn run_limited(
     };
     let stdout = stdout_task.await.context("probe stdout task failed")??;
     let stderr = stderr_task.await.context("probe stderr task failed")??;
+    if output_budget.truncated() {
+        bail!("connector binary probe output exceeded the combined size limit");
+    }
     Ok(Capture {
         success: status.success(),
         exit_code: status.code(),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
-}
-
-async fn read_capped<R>(reader: R, limit: usize) -> std::io::Result<Vec<u8>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut output = Vec::new();
-    reader
-        .take(u64::try_from(limit).unwrap_or(u64::MAX))
-        .read_to_end(&mut output)
-        .await?;
-    Ok(output)
 }
 
 fn validate_executable(path: &Path) -> Result<PathBuf> {

@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use command_group::AsyncCommandGroup;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,23 +60,9 @@ pub async fn execute_shell(request: &ProcessRequest) -> Result<ProcessResult> {
         .stderr
         .take()
         .context("failed to capture stderr")?;
-    let cap = request.max_output_bytes.saturating_add(1) as u64;
-    let stdout_task = tokio::spawn(async move {
-        let mut output = Vec::new();
-        stdout
-            .take(cap)
-            .read_to_end(&mut output)
-            .await
-            .map(|_| output)
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut output = Vec::new();
-        stderr
-            .take(cap)
-            .read_to_end(&mut output)
-            .await
-            .map(|_| output)
-    });
+    let output_budget = Arc::new(SharedOutputBudget::new(request.max_output_bytes));
+    let stdout_task = tokio::spawn(read_with_shared_budget(stdout, Arc::clone(&output_budget)));
+    let stderr_task = tokio::spawn(read_with_shared_budget(stderr, Arc::clone(&output_budget)));
 
     let (status, timed_out) =
         if let Ok(result) = tokio::time::timeout(request.timeout, child.wait()).await {
@@ -85,12 +73,9 @@ pub async fn execute_shell(request: &ProcessRequest) -> Result<ProcessResult> {
             (status, true)
         };
 
-    let mut stdout = stdout_task.await.context("stdout task failed")??;
-    let mut stderr = stderr_task.await.context("stderr task failed")??;
-    let truncated =
-        stdout.len() > request.max_output_bytes || stderr.len() > request.max_output_bytes;
-    stdout.truncate(request.max_output_bytes);
-    stderr.truncate(request.max_output_bytes);
+    let stdout = stdout_task.await.context("stdout task failed")??;
+    let stderr = stderr_task.await.context("stderr task failed")??;
+    let truncated = output_budget.truncated();
 
     #[cfg(unix)]
     let signal = {
@@ -112,6 +97,70 @@ pub async fn execute_shell(request: &ProcessRequest) -> Result<ProcessResult> {
         timed_out,
         duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
+}
+
+#[derive(Debug)]
+struct SharedOutputBudget {
+    remaining: AtomicUsize,
+    truncated: AtomicBool,
+}
+
+impl SharedOutputBudget {
+    const fn new(maximum: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(maximum),
+            truncated: AtomicBool::new(false),
+        }
+    }
+
+    fn reserve(&self, requested: usize) -> usize {
+        let mut remaining = self.remaining.load(Ordering::Acquire);
+        loop {
+            if remaining == 0 {
+                self.truncated.store(true, Ordering::Release);
+                return 0;
+            }
+            let accepted = requested.min(remaining);
+            match self.remaining.compare_exchange_weak(
+                remaining,
+                remaining - accepted,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if accepted < requested {
+                        self.truncated.store(true, Ordering::Release);
+                    }
+                    return accepted;
+                }
+                Err(actual) => remaining = actual,
+            }
+        }
+    }
+
+    fn truncated(&self) -> bool {
+        self.truncated.load(Ordering::Acquire)
+    }
+}
+
+async fn read_with_shared_budget<R>(
+    mut reader: R,
+    budget: Arc<SharedOutputBudget>,
+) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let accepted = budget.reserve(count);
+        output.extend_from_slice(&buffer[..accepted]);
+    }
+    Ok(output)
 }
 
 fn configure_safe_environment(command: &mut Command) {
@@ -175,6 +224,36 @@ mod tests {
         .await?;
         assert_eq!(result.stdout, "hello");
         assert_eq!(result.exit_code, Some(0));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdout_and_stderr_share_one_output_budget() -> Result<()> {
+        let result = execute_shell(&ProcessRequest {
+            command: "printf '%0800d' 0; printf '%0800d' 0 >&2".to_owned(),
+            cwd: None,
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 1_024,
+        })
+        .await?;
+        assert!(result.truncated);
+        assert!(result.stdout.len() + result.stderr.len() <= 1_024);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn output_below_the_combined_budget_is_not_truncated() -> Result<()> {
+        let result = execute_shell(&ProcessRequest {
+            command: "printf out; printf err >&2".to_owned(),
+            cwd: None,
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 1_024,
+        })
+        .await?;
+        assert_eq!(result.stdout, "out");
+        assert_eq!(result.stderr, "err");
+        assert!(!result.truncated);
         Ok(())
     }
 

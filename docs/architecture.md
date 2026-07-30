@@ -53,6 +53,16 @@ rows carry a domain-separated fingerprint for local stdio, local HTTP, Quick
 Tunnel, or an exact OAuth client/subject pair. State-schema migration does not
 preserve grants that predate that identity boundary.
 
+For `shell_exec`, the effective working directory is resolved before
+authorization. A supplied path or the process current directory must exist and
+canonicalize to a directory. The command and canonical directory are evaluated
+as separate policy resources; the same normalized arguments and resources form
+the exact-action hash and are then passed to execution. Process capture uses a
+single atomic retained-byte budget shared by stdout and stderr. Readers continue
+draining after the budget reaches zero, avoiding both double allocation and
+pipe-backpressure deadlocks. The same combined-budget primitive protects
+connector one-shot/probe, platform-native, helper, and desktop CLI processes.
+
 Current-page browser operations add the normalized active origin to both policy
 context and the exact-action authorization identity. An inactive session uses
 `about:blank` without starting Chromium. The origin is read again after any local

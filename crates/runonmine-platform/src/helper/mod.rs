@@ -7,11 +7,12 @@
 //! authenticates the operating-system identity of every peer.
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::output::{SharedOutputBudget, read_with_shared_budget};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -645,17 +646,9 @@ async fn execute_program(
         .stderr
         .take()
         .context("failed to capture admin stderr")?;
-    let capture_limit = u64::try_from(MAX_CAPTURE_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
-    let stdout_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        stdout.take(capture_limit).read_to_end(&mut bytes).await?;
-        io::Result::Ok(bytes)
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        stderr.take(capture_limit).read_to_end(&mut bytes).await?;
-        io::Result::Ok(bytes)
-    });
+    let output_budget = Arc::new(SharedOutputBudget::new(MAX_CAPTURE_BYTES));
+    let stdout_task = tokio::spawn(read_with_shared_budget(stdout, Arc::clone(&output_budget)));
+    let stderr_task = tokio::spawn(read_with_shared_budget(stderr, Arc::clone(&output_budget)));
 
     let (status, timed_out) = if let Ok(result) =
         tokio::time::timeout(Duration::from_millis(execution.timeout_ms), child.wait()).await
@@ -665,11 +658,9 @@ async fn execute_program(
         let _ignored = child.kill().await;
         (child.wait().await.ok(), true)
     };
-    let mut stdout = stdout_task.await.context("admin stdout task failed")??;
-    let mut stderr = stderr_task.await.context("admin stderr task failed")??;
-    let truncated = stdout.len() > MAX_CAPTURE_BYTES || stderr.len() > MAX_CAPTURE_BYTES;
-    stdout.truncate(MAX_CAPTURE_BYTES);
-    stderr.truncate(MAX_CAPTURE_BYTES);
+    let stdout = stdout_task.await.context("admin stdout task failed")??;
+    let stderr = stderr_task.await.context("admin stderr task failed")??;
+    let truncated = output_budget.truncated();
     Ok(ExecutionOutput {
         exit_code: status.and_then(|status| status.code()),
         stdout,

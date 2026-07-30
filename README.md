@@ -142,8 +142,11 @@ on restart/backoff and removed on process stop.
 - Audit records form a tamper-evident chain and retain 30 days or 100 MiB by default.
 - Shell execution is not a sandbox; when allowed, it has the full authority of
   the account running the agent, but starts from a cleared environment so agent
-  secrets are not inherited automatically. Command-prefix rules reject shell
-  composition, pipelines, redirection, substitution, and multiline payloads.
+  secrets are not inherited automatically. The canonical effective working
+  directory is bound to policy and exact-action grants, and stdout plus stderr
+  share one retained-output budget while both pipes continue draining.
+  Command-prefix rules reject shell composition, pipelines, redirection,
+  substitution, and multiline payloads.
 
 Read [permissions](docs/permissions.md), the [threat model](docs/threat-model.md),
 and [browser security](docs/browser-security.md) before enabling write or

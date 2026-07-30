@@ -645,8 +645,9 @@ impl RunOnMineServer {
 
 mod authorization;
 use authorization::{
-    OwnedPolicyResources, PreApprovalDecision, browser_authorization_arguments, policy_resources,
-    pre_approval_decision, same_browser_policy_origin,
+    OwnedPolicyResources, PreApprovalDecision, browser_authorization_arguments,
+    canonical_shell_working_directory, policy_resources, pre_approval_decision,
+    same_browser_policy_origin,
 };
 
 mod arguments;
@@ -1004,13 +1005,21 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<ShellArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let mut arguments = arguments;
         validate_nonempty_text(&arguments.command, "Shell command", MAX_COMMAND_BYTES)?;
         validate_optional_path(arguments.cwd.as_deref(), "Shell working directory")?;
-        self.authorize(
+        let canonical_cwd =
+            canonical_shell_working_directory(arguments.cwd.as_deref()).map_err(|error| {
+                tracing::warn!(%error, "rejected invalid shell working directory");
+                McpError::invalid_params("Shell working directory is unavailable", None)
+            })?;
+        arguments.cwd = Some(canonical_cwd.clone());
+        self.authorize_with_resources(
             "shell_exec",
             Capability::ShellExec,
             "run a user shell command (content withheld)",
             &arguments,
+            OwnedPolicyResources::shell(arguments.command.clone(), canonical_cwd),
         )
         .await?;
         let requested = arguments

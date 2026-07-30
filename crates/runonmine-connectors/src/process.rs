@@ -12,6 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use zeroize::Zeroize;
 
+use crate::output::SharedOutputBudget;
+
 const MAX_SECRET_BYTES: usize = 16 * 1024;
 const MAX_PROCESS_VALUE_BYTES: usize = 64 * 1024;
 const REDACTED: &[u8] = b"[REDACTED]";
@@ -165,12 +167,17 @@ pub async fn run_once(
         .stderr
         .take()
         .context("connector process stderr is unavailable")?;
+    let output_budget = Arc::new(SharedOutputBudget::new(maximum_output_bytes));
     let stdout_task = tokio::spawn(read_redacted_capped(
         stdout,
         Arc::clone(&redactor),
-        maximum_output_bytes,
+        Arc::clone(&output_budget),
     ));
-    let stderr_task = tokio::spawn(read_redacted_capped(stderr, redactor, maximum_output_bytes));
+    let stderr_task = tokio::spawn(read_redacted_capped(
+        stderr,
+        redactor,
+        Arc::clone(&output_budget),
+    ));
     let (status, timed_out) = if let Ok(status) = tokio::time::timeout(timeout, child.wait()).await
     {
         (Some(status?), false)
@@ -178,8 +185,8 @@ pub async fn run_once(
         let _ignored = child.start_kill();
         (child.wait().await.ok(), true)
     };
-    let (stdout, stdout_truncated) = stdout_task.await.context("stdout reader stopped")??;
-    let (stderr, stderr_truncated) = stderr_task.await.context("stderr reader stopped")??;
+    let stdout = stdout_task.await.context("stdout reader stopped")??;
+    let stderr = stderr_task.await.context("stderr reader stopped")??;
     Ok(OneShotOutput {
         success: status
             .as_ref()
@@ -188,7 +195,7 @@ pub async fn run_once(
         exit_code: status.and_then(|value| value.code()),
         stdout,
         stderr,
-        output_truncated: stdout_truncated || stderr_truncated,
+        output_truncated: output_budget.truncated(),
         timed_out,
     })
 }
@@ -396,15 +403,14 @@ fn validate_environment_name(name: &str) -> Result<()> {
 async fn read_redacted_capped<R>(
     mut reader: R,
     redactor: Arc<Redactor>,
-    maximum: usize,
-) -> std::io::Result<(String, bool)>
+    budget: Arc<SharedOutputBudget>,
+) -> std::io::Result<String>
 where
     R: AsyncRead + Unpin,
 {
     let overlap = redactor.overlap_len();
     let mut pending = Vec::with_capacity(ONE_SHOT_READ_BYTES + overlap);
-    let mut output = Vec::with_capacity(maximum.min(64 * 1024));
-    let mut truncated = false;
+    let mut output = Vec::new();
     let mut buffer = [0_u8; ONE_SHOT_READ_BYTES];
     loop {
         let read = reader.read(&mut buffer).await?;
@@ -412,7 +418,7 @@ where
             if !pending.is_empty() {
                 let pending_len = pending.len();
                 let (text, consumed) = redactor.redact_prefix(&pending, pending_len);
-                append_capped(&mut output, text.as_bytes(), maximum, &mut truncated);
+                append_shared(&mut output, text.as_bytes(), &budget);
                 pending.drain(..consumed);
             }
             break;
@@ -420,18 +426,16 @@ where
         pending.extend_from_slice(&buffer[..read]);
         while pending.len() > ONE_SHOT_READ_BYTES.saturating_add(overlap) {
             let (text, consumed) = redactor.redact_prefix(&pending, ONE_SHOT_READ_BYTES);
-            append_capped(&mut output, text.as_bytes(), maximum, &mut truncated);
+            append_shared(&mut output, text.as_bytes(), &budget);
             pending.drain(..consumed);
         }
     }
-    Ok((String::from_utf8_lossy(&output).into_owned(), truncated))
+    Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
-fn append_capped(output: &mut Vec<u8>, value: &[u8], maximum: usize, truncated: &mut bool) {
-    let remaining = maximum.saturating_sub(output.len());
-    let take = remaining.min(value.len());
-    output.extend_from_slice(&value[..take]);
-    *truncated |= take < value.len();
+fn append_shared(output: &mut Vec<u8>, value: &[u8], budget: &SharedOutputBudget) {
+    let accepted = budget.reserve(value.len());
+    output.extend_from_slice(&value[..accepted]);
 }
 
 #[cfg(test)]
@@ -478,6 +482,18 @@ mod tests {
         let output = format!("{first}{second}");
         assert_eq!(output, "prefix [REDACTED] suffix");
         assert!(!output.contains("cross-boundary-secret"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_shot_stdout_and_stderr_share_one_budget() -> Result<()> {
+        let command = CommandSpec::new("combined output", PathBuf::from("/bin/sh"))?
+            .arg("-c")?
+            .arg("printf '%0800d' 0; printf '%0800d' 0 >&2")?;
+        let output = run_once(command, Duration::from_secs(5), 1_024).await?;
+        assert!(output.output_truncated);
+        assert!(output.stdout.len() + output.stderr.len() <= 1_024);
         Ok(())
     }
 

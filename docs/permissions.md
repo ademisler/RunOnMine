@@ -115,10 +115,16 @@ window. `fs_delete` moves entries into a private `.runonmine-trash` directory
 inside the same selected root so the move remains descriptor-relative.
 
 `shell_exec` is not a sandbox. When approved, it can run any command available
-to the agent's user account. A `CommandPrefix` policy rule matches only a simple
-single shell command. Shell composition, pipelines, redirection, command
-substitution, backticks, and multiline input are rejected from prefix matching;
-use `ask` for complex shell text. `admin_exec` is not a root shell: the helper accepts
+to the agent's user account. Before policy evaluation, RunOnMine resolves either
+the requested `cwd` or the process's effective current directory to one existing
+canonical directory. The command and that directory are separate policy
+resources and both are included in the exact-action grant identity, approval
+preview, audit arguments, and executed request. Equivalent path spellings share
+one identity; changing directories cannot reuse an earlier grant. A
+`CommandPrefix` policy rule matches only a simple single shell command. Shell
+composition, pipelines, redirection, command substitution, backticks, and
+multiline input are rejected from prefix matching; use `ask` for complex shell
+text. `admin_exec` is not a root shell: the helper accepts
 only explicitly installed, hash-pinned absolute program paths. Before policy
 evaluation, the requested program passes through the same root/SYSTEM ownership,
 non-symlink, regular-file, and canonical path resolver used when installing the

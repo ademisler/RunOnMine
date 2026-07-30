@@ -10,6 +10,7 @@ mod external_binary;
 pub mod health;
 pub mod installer;
 pub mod openai;
+mod output;
 pub mod process;
 pub mod supervisor;
 mod trusted_binary;
