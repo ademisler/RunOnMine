@@ -75,7 +75,11 @@ bearer credential and registration payload before entering one SQLite
 `IMMEDIATE` transaction that prunes expired clients, enforces source/global
 windows plus total capacity, records the attempt, and inserts the client.
 Unsuccessful validation consumes no slot. Client expiry is refreshed on real
-authorization use rather than registration polling.
+authorization use rather than registration polling. After owner authentication,
+the consent challenge reloads the registered client and derives display identity
+from server-held state: a stable client-ID fingerprint, registration timestamp,
+requested redirect origin, and the deduplicated registered-origin set. The
+client-supplied name remains explicitly unverified.
 
 ## Local data
 

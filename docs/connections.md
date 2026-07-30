@@ -90,14 +90,23 @@ registration that omits `scope` receives only `machine:read`; clients must name
 each additional capability explicitly and can never request a scope later that
 was absent from their registered set. Platform-native automation uses the
 separate `platform:exec` scope rather than inheriting `shell:exec`, and the local
-consent page explains that it covers AppleScript, PowerShell, or D-Bus. Authorized valid registrations are
-committed atomically with a SQLite-backed limit of five registrations per
+consent page explains that it covers AppleScript, PowerShell, or D-Bus.
+Authorized valid registrations are committed atomically with a SQLite-backed
+limit of five registrations per
 Cloudflare source per minute, twenty globally per minute, and 256 live clients.
 These limits survive agent restarts. Unused
 clients expire after 24 hours; the first and subsequent authorization use records
 `last_used_at` and extends the client lifetime to at least 90 days. Expired
 clients without active tokens are pruned before the capacity check so abandoned
 registrations return quota automatically.
+
+A dynamic client's `client_name` is self-asserted metadata, not a verified
+publisher identity. The local consent page therefore labels it unverified and
+also shows a stable SHA-256 client-ID fingerprint, the UTC registration time,
+the redirect origin selected by the current request, and every distinct origin
+registered for that client. Invisible, line-breaking, and bidirectional-control
+characters are rejected from client names. Review the fingerprint and origins,
+not the claimed name alone, before allowing access.
 
 Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days;
 reuse revokes the token family. Only keyed, domain-separated token and source
@@ -140,7 +149,3 @@ runonmine connect enable <id>
 runonmine connect disable <id>
 runonmine connect remove <id> --confirm REMOVE
 ```
-
-## OAuth consent identity
-
-Dynamic OAuth client names are unverified display text and are never treated as an identity signal. The local consent page labels the claimed name as unverified and also shows a stable client-ID fingerprint, registration time, the redirect origin used by the current request, and every redirect origin registered by that client. Invisible and bidirectional control characters are rejected from client names so a client cannot visually impersonate another application.

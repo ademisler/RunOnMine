@@ -36,6 +36,7 @@ const ACTIVE_CLIENT_TTL: Duration = Duration::days(90);
 
 #[derive(Clone, Debug)]
 pub struct OAuthServiceConfig {
+    pub connector_id: String,
     pub issuer: Url,
     pub protected_resource: Url,
     pub github_client_id: String,
@@ -44,6 +45,12 @@ pub struct OAuthServiceConfig {
 
 impl OAuthServiceConfig {
     pub fn validate(&self) -> Result<(), OAuthError> {
+        if self.connector_id.trim().is_empty()
+            || self.connector_id.len() > 128
+            || self.connector_id.chars().any(char::is_control)
+        {
+            return Err(OAuthError::configuration());
+        }
         validate_public_url(&self.issuer, false)?;
         validate_public_url(&self.protected_resource, true)?;
         validate_public_url(&self.github_callback_url, true)?;
@@ -228,13 +235,15 @@ impl OAuthService {
             return Err(OAuthError::invalid_request());
         }
         let client_id_secret = generate_secret()?;
-        let client_id = format!("rom_{}", client_id_secret.expose_secret());
+        let connector_key = connector_namespace_key(&self.config.connector_id);
+        let client_id = format!("rom_{connector_key}_{}", client_id_secret.expose_secret());
         let issued_at = Utc::now();
         let registration_source_hash = self
             .hasher
             .hash(HashPurpose::RegistrationSource, registration_source)
             .storage_key();
         let client = RegisteredClient {
+            connector_id: self.config.connector_id.clone(),
             client_id: client_id.clone(),
             client_name: client_name.clone(),
             redirect_uris: request.redirect_uris.clone(),
@@ -580,6 +589,11 @@ fn unsafe_display_character(character: char) -> bool {
                 | '\u{2060}'..='\u{2069}'
                 | '\u{feff}'
         )
+}
+
+fn connector_namespace_key(connector_id: &str) -> String {
+    let digest = Sha256::digest(connector_id.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..8])
 }
 
 fn client_id_fingerprint(client_id: &str) -> String {

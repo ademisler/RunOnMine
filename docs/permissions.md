@@ -100,6 +100,11 @@ appear as operating-system automation on the local consent page. Existing OAuth
 clients or sessions that contain only `shell:exec` do not gain `platform:exec`;
 they must register and authorize that scope explicitly.
 
+Dynamic OAuth client names are not identities. Consent marks the name
+unverified and presents the server-derived client fingerprint, registration
+time, requested redirect origin, and all registered redirect origins before the
+Allow button.
+
 ## Important boundaries
 
 File roots are opened once as directory capabilities. Reads, listings, searches,

@@ -172,6 +172,7 @@ pub struct AccessGrant {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RegisteredClient {
+    pub connector_id: String,
     pub client_id: String,
     pub client_name: String,
     pub redirect_uris: Vec<Url>,
@@ -202,6 +203,7 @@ pub enum RegistrationOutcome {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct OAuthSession {
+    pub connector_id: String,
     pub family_id: Uuid,
     pub client_id: String,
     pub subject: String,
