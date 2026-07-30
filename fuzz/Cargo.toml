@@ -10,6 +10,11 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 runonmine-core = { path = "../crates/runonmine-core" }
+url.workspace = true
+serde_json.workspace = true
+runonmine-platform = { path = "../crates/runonmine-platform" }
+runonmine-browser = { path = "../crates/runonmine-browser" }
+runonmine-oauth = { path = "../crates/runonmine-oauth" }
 serde_json = "1.0"
 toml = "0.9"
 url = "2.5"
@@ -30,3 +35,24 @@ bench = false
 
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "oauth_models"
+path = "fuzz_targets/oauth_models.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "browser_urls"
+path = "fuzz_targets/browser_urls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "helper_frames"
+path = "fuzz_targets/helper_frames.rs"
+test = false
+doc = false
+bench = false

@@ -9,6 +9,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Make macOS, Windows and ARM platform CI unconditional for relevant pull requests and replace unsupported Rust-toolchain action inputs with a checked-in exact `rustup` installer.
+- Add global/critical/changed-line coverage ratchets, three additional fuzz targets, a 64-concurrent-call admission soak test, an observable MCP process epoch, and per-source OAuth registration limits.
 - Replace release-target substring matching with an exact six-target allowlist and validate per-target CycloneDX 1.6 SBOM provenance before upload.
 - Add clean-install evidence validation, duplicate-dependency ratcheting, branch-protection automation, public-release signing-material gates, and explicit application/connector/database/helper rollback policy.
 - Type connector supervisor failures and cleanup outcomes; uncertain process-group termination now reports orphan risk and blocks restart rather than claiming a clean stop.

@@ -92,15 +92,15 @@ Status markers:
 
 ## P2 — Test and quality gates
 
-- [ ] **P2-T01 — Raise effective line coverage.** Move global headless baseline from 45% toward 70%, changed lines to 80% and policy/auth/storage to 90%.
-- [ ] **P2-T02 — Enable real platform CI on relevant pull requests.** macOS, Windows and ARM jobs must not silently skip security-sensitive changes.
-- [ ] **P2-T03 — Fix `dtolnay/rust-toolchain` workflow inputs.** Remove unsupported `toolchain` input and keep exact pinning.
-- [ ] **P2-T04 — Expand fuzz targets.** Cover OAuth models/state, MCP headers/sessions, filesystem resolution, archives, redaction, helper frames, approval transitions and browser URL/IP validation.
-- [ ] **P2-T05 — Add real MCP protocol end-to-end tests.** Cover initialize, list/call, sessions, expiry/refresh, disable, rate limit, approval, disconnect and malformed transport.
-- [ ] **P2-T06 — Add adversarial real-Chromium tests.** Cover private redirects, rebinding, popup, iframe, workers, WebSocket, downloads, file URLs and IPv6 variants.
-- [ ] **P2-T07 — Add real helper OS-security acceptance tests.** Cover second users, UID/SID/ACL, replacement races, restart identity and rollback.
-- [ ] **P2-T08 — Add soak and performance tests.** Large audit/OAuth/approval state, 64 concurrent calls, crash loops, long desktop/browser sessions and output streams.
-- [ ] **P2-T09 — Add mutation/state-machine testing.** Focus policy precedence, OAuth rotation, approval resolve-once, connector lifecycle, emergency lock and migrations.
+- [!] **P2-T01 — Raise effective line coverage.** PR and scheduled coverage now enforce a 50% global ratchet, 70% for policy/auth/storage/approval-critical modules, and 80% for changed executable lines. The long-term 70% global and 90% critical targets remain open and cannot be claimed until measured reports reach them.
+- [x] **P2-T02 — Enable real platform CI on relevant pull requests.** macOS, Windows and ARM jobs no longer depend on a repository-variable skip guard and run for the existing security-sensitive path filters.
+- [x] **P2-T03 — Fix `dtolnay/rust-toolchain` workflow inputs.** Workflows use a checked-in `rustup` installer with exact toolchain/component/target pins; unsupported action inputs were removed from every workflow.
+- [!] **P2-T04 — Expand fuzz targets.** Nightly fuzzing now covers config, filesystem resolution, policy, redaction, OAuth request models, browser URL policy, and helper request frames. MCP session/header state machines, archive parsing and approval transitions still need dedicated long-running corpora.
+- [!] **P2-T05 — Add real MCP protocol end-to-end tests.** Router-level tests cover initialize/version negotiation, session lifecycle/expiry, malformed transport, origin/auth/rate limits and concurrent admission. A packaged external-client matrix covering every list/call/approval/disconnect sequence remains open.
+- [!] **P2-T06 — Add adversarial real-Chromium tests.** Existing real-Chromium coverage includes operation timeout recovery, crash leases/orphan reaping and restricted navigation. Redirect rebinding, popup/iframe/worker/WebSocket/download/file-URL and full IPv6 adversarial cases remain open.
+- [!] **P2-T07 — Add real helper OS-security acceptance tests.** The repository retains helper protocol/policy tests and platform service checks, but second-user UID/SID/ACL and replacement-race evidence still require real macOS/Windows/Linux test hosts.
+- [!] **P2-T08 — Add soak and performance tests.** A deterministic 64-concurrent-call admission soak test and bounded StateStore/process-output tests are enforced. Multi-hour desktop/browser sessions, very large audit/OAuth/approval datasets and repeated crash-loop campaigns remain open.
+- [!] **P2-T09 — Add mutation/state-machine testing.** Existing property tests cover policy and approval invariants and new concurrency tests cover OAuth registration/session buckets. Mutation testing and broader connector/emergency-lock/migration model checking remain open.
 
 ## P2 — CI, release and supply chain
 
@@ -116,8 +116,8 @@ Status markers:
 
 - [x] **P3-01 — Preserve detailed supervisor failure categories.** Supervisor state carries typed spawn, process-exit/status, readiness, shutdown and cleanup categories plus retryability and bounded detail.
 - [x] **P3-02 — Report incomplete supervisor cleanup/orphan risk.** Terminal state includes `not_required`, `complete`, or `uncertain` cleanup; uncertain process-group termination sets orphan risk and blocks restart instead of reporting stopped.
-- [ ] **P3-03 — Document and instrument in-memory rate/session reset behavior.** Add metrics and restart semantics.
-- [ ] **P3-04 — Partition OAuth registration limits by source.** One bad client must not consume all legitimate capacity.
+- [x] **P3-03 — Instrument and document in-memory session/rate-limit restart resets.** HTTP health exposes a per-process epoch, active-session count and explicit reset semantics; startup logs require clients to reinitialize after restart.
+- [x] **P3-04 — Partition OAuth registration limits by source.** Dynamic registration keeps the global cap and adds a transactionally enforced 32-client cap per connector registration source, preventing one source from exhausting every slot.
 - [x] **P3-05 — Improve consent recovery after transient GitHub errors.** Completed by P2-16 with code-bound callback claims and bounded provider retry.
 - [x] **P3-06 — Show requester identity in approval UI.** Include principal type, client ID/name and subject after principal-bound storage lands.
 - [ ] **P3-07 — Make approval redaction limitations explicit.** Require owner review of the complete effective action.
