@@ -955,8 +955,41 @@ fn harden_windows_file_acl(path: &Path, _executable: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
+
+    #[test]
+    fn helper_health_requires_matching_protocol_and_package_versions() {
+        assert!(
+            validate_helper_health(HelperResult::Healthy {
+                allowlisted_programs: 1,
+                protocol_version: super::super::PROTOCOL_VERSION,
+                package_version: super::super::HELPER_VERSION.to_owned(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_helper_health(HelperResult::Healthy {
+                allowlisted_programs: 1,
+                protocol_version: super::super::PROTOCOL_VERSION.saturating_add(1),
+                package_version: super::super::HELPER_VERSION.to_owned(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_helper_health(HelperResult::Healthy {
+                allowlisted_programs: 1,
+                protocol_version: super::super::PROTOCOL_VERSION,
+                package_version: "stale-helper".to_owned(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_helper_health(HelperResult::Failed {
+                message: "not healthy".to_owned(),
+            })
+            .is_err()
+        );
+    }
 
     #[cfg(unix)]
     #[test]
