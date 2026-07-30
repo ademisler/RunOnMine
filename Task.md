@@ -74,7 +74,7 @@ Status markers:
 - [ ] **P2-15 — Use immutable GitHub numeric ID as owner authority.** Treat login as display data and migrate safe renames.
 - [ ] **P2-16 — Improve transient OAuth provider failure recovery.** Preserve safe retry semantics without permitting replay.
 - [ ] **P2-17 — Decide and document OAuth issuer subpath support.** Either support path-based issuers or explicitly enforce/document root-only deployment.
-- [ ] **P2-18 — Generate the GitHub User-Agent from package version.** Remove hard-coded version drift.
+- [x] **P2-18 — Generate the GitHub User-Agent from package version.** Remove hard-coded version drift.
 - [ ] **P2-19 — Use real redaction for service-manager output or rename it accurately.** Do not imply truncation is sanitization.
 - [ ] **P2-20 — Record skipped/truncated support-bundle inputs in the manifest.** Make incomplete diagnostics visible.
 - [ ] **P2-21 — Enforce robust connector IDs.** Raise minimum length/use UUIDs and apply exact identity redaction.

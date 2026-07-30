@@ -177,8 +177,10 @@ An existing managed binary is reused only when both its private receipt and
 SHA-256 identity verify and its version probe succeeds. A symlink, incomplete
 binary/receipt pair, or integrity-invalid existing installation is left untouched
 and fails closed with a repair/removal error; setup never deletes or replaces it
-before the connector commit. Explicit absolute user-supplied binaries are
-verified and probed but never modified.
+before the connector commit. Repair, update, and rollback are explicit managed-
+binary operations so forensic evidence and the last known state are preserved.
+Explicit absolute user-supplied binaries are verified and probed but never
+modified.
 
 The current beta uses a singleton local tunnel-client profile and fixed loopback
 health endpoint, so it supports only one **configured** OpenAI Secure MCP Tunnel

@@ -659,21 +659,9 @@ pub(super) async fn ensure_binary(
 
     let destination = managed_directory.join(kind.executable_name());
     let receipt_path = managed_receipt_path(&managed_directory, kind);
-    if destination.exists() {
-        let binary = InstalledBinary::from_verified_path(kind, &destination)?;
-        match verify_managed_binary(&binary, provider, &receipt_path) {
-            Ok(()) => {
-                BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
-                return Ok(binary);
-            }
-            Err(error) => {
-                tracing::warn!(%error, path = %destination.display(), "managed connector binary failed integrity verification and will be replaced");
-                std::fs::remove_file(&destination)?;
-                if receipt_path.exists() {
-                    std::fs::remove_file(&receipt_path)?;
-                }
-            }
-        }
+    if let Some(binary) = existing_managed_binary(kind, provider, &destination, &receipt_path)? {
+        BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+        return Ok(binary);
     }
 
     println!("Downloading the latest verified official connector binary...");
@@ -688,6 +676,43 @@ pub(super) async fn ensure_binary(
     verify_managed_binary(&binary, provider, &receipt_path)?;
     BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
     Ok(binary)
+}
+
+fn existing_managed_binary(
+    kind: BinaryKind,
+    provider: ReleaseProvider,
+    destination: &Path,
+    receipt_path: &Path,
+) -> Result<Option<InstalledBinary>> {
+    let binary_present = safe_regular_file_presence(destination, "managed connector binary")?;
+    let receipt_present = safe_regular_file_presence(receipt_path, "managed connector receipt")?;
+    match (binary_present, receipt_present) {
+        (false, false) => Ok(None),
+        (true, true) => {
+            let binary = InstalledBinary::from_verified_path(kind, destination)?;
+            verify_managed_binary(&binary, provider, receipt_path).with_context(|| {
+                format!(
+                    "existing managed {} failed integrity verification; it was preserved for explicit repair or rollback",
+                    kind.executable_name()
+                )
+            })?;
+            Ok(Some(binary))
+        }
+        _ => bail!(
+            "managed connector installation is incomplete; the existing binary or receipt was preserved for explicit repair"
+        ),
+    }
+}
+
+fn safe_regular_file_presence(path: &Path, description: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("{description} must be a regular non-symlink file")
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {description}")),
+    }
 }
 
 pub(super) fn managed_receipt_path(directory: &Path, kind: BinaryKind) -> PathBuf {
@@ -808,6 +833,63 @@ pub(super) fn generate_path_secret() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_invalid_managed_binary_is_preserved_fail_closed() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let destination = temporary
+            .path()
+            .join(BinaryKind::Cloudflared.executable_name());
+        let receipt_path = managed_receipt_path(temporary.path(), BinaryKind::Cloudflared);
+        std::fs::write(&destination, b"untrusted managed bytes")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700))?;
+        }
+        std::fs::write(&receipt_path, b"invalid receipt")?;
+
+        assert!(
+            existing_managed_binary(
+                BinaryKind::Cloudflared,
+                ReleaseProvider::Cloudflared,
+                &destination,
+                &receipt_path,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&destination)?, b"untrusted managed bytes");
+        assert_eq!(std::fs::read(&receipt_path)?, b"invalid receipt");
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_managed_binary_pair_is_preserved_fail_closed() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let destination = temporary
+            .path()
+            .join(BinaryKind::Cloudflared.executable_name());
+        let receipt_path = managed_receipt_path(temporary.path(), BinaryKind::Cloudflared);
+        std::fs::write(&destination, b"orphan managed bytes")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700))?;
+        }
+
+        assert!(
+            existing_managed_binary(
+                BinaryKind::Cloudflared,
+                ReleaseProvider::Cloudflared,
+                &destination,
+                &receipt_path,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&destination)?, b"orphan managed bytes");
+        assert!(!receipt_path.exists());
+        Ok(())
+    }
 
     #[test]
     fn local_http_credentials_use_private_no_overwrite_output() -> Result<()> {

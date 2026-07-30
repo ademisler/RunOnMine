@@ -4,6 +4,11 @@ use serde::Deserialize;
 use url::Url;
 
 const MAX_GITHUB_RESPONSE_BYTES: usize = 256 * 1_024;
+const GITHUB_USER_AGENT: &str = concat!(
+    "RunOnMine/",
+    env!("CARGO_PKG_VERSION"),
+    " OAuth owner verifier"
+);
 
 use crate::OAuthError;
 
@@ -65,7 +70,7 @@ impl GitHubApiOwnerVerifier {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("RunOnMine/0.1 OAuth owner verifier")
+            .user_agent(GITHUB_USER_AGENT)
             .build()
             .map_err(|_| OAuthError::configuration())?;
         Ok(Self {
@@ -165,4 +170,21 @@ async fn bounded_json<T: serde::de::DeserializeOwned>(
         return Err(OAuthError::access_denied());
     }
     serde_json::from_slice(&bytes).map_err(|_| OAuthError::access_denied())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_user_agent_tracks_the_package_version() {
+        assert_eq!(
+            GITHUB_USER_AGENT,
+            format!(
+                "RunOnMine/{} OAuth owner verifier",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert!(!GITHUB_USER_AGENT.contains("RunOnMine/0.1 "));
+    }
 }

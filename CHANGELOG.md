@@ -7,6 +7,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Preserve invalid or incomplete managed Cloudflare binary/receipt pairs and fail closed instead of deleting them implicitly during connector setup; repair and rollback now require an explicit managed-binary operation.
+- Generate the GitHub OAuth owner-verifier User-Agent from the workspace package version so network diagnostics cannot drift from the running build.
 - Move Cloudflare Quick Tunnel public URL discovery out of durable configuration into a private generation-bound runtime store; clear legacy/stale URLs, reject stale observer writes, clear discovery during restart/backoff, remove state on stop, and keep corrupt runtime artifacts scoped to the affected connector.
 - Move OpenAI tunnel-client `init` and `doctor` out of blocking agent startup: after the loopback listener binds, each OpenAI connector activates in an owned background task with a 75-second preparation deadline and a separate 30-second readiness deadline; runtime phases (`starting`, `backoff`, `ready`, `degraded`, `stopped`) are exposed only through the direct-loopback `/healthz/connectors` endpoint, while forwarded or public Host requests receive `404`.
 - Enforce OpenAI Secure MCP Tunnel as an explicit configured singleton while it uses the fixed loopback health endpoint; a second OpenAI connector is rejected during pure configuration validation even when configured with a different auxiliary port, before binary/profile staging, credential writes, `init`, or `doctor` can run.
