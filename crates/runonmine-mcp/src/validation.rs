@@ -6,126 +6,195 @@ use serde::Serialize;
 use crate::arguments::DbusCallArgs;
 use crate::{MAX_ARGUMENT_BYTES, MAX_ARGUMENT_ITEMS};
 
-pub(super) fn approval_preview(tool_name: &str, arguments: &impl Serialize) -> String {
-    let value = serde_json::to_value(arguments).unwrap_or(serde_json::Value::Null);
-    let string = |name: &str| {
-        value
+struct PreviewValue(serde_json::Value);
+
+impl PreviewValue {
+    fn string(&self, name: &str) -> &str {
+        self.0
             .get(name)
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
-    };
-    let path = |name: &str| string(name);
-    let preview = match tool_name {
-        "fs_list" | "fs_read" | "fs_delete" => format!("Path: {}", path("path")),
-        "fs_search" => format!(
-            "Root: {}\nQuery: {}",
-            path("root"),
-            redact_preview_text(string("query"))
-        ),
-        "fs_write" => format!(
-            "Path: {}\nNew content: {} bytes\nPreview: {}",
-            path("path"),
-            string("content").len(),
-            redact_preview_text(string("content"))
-        ),
-        "fs_patch" => format!(
-            "Path: {}\nExpected replacements: {}\nReplace: {}\nWith: {}",
-            path("path"),
+    }
+
+    fn value(&self, name: &str) -> &serde_json::Value {
+        self.0.get(name).unwrap_or(&serde_json::Value::Null)
+    }
+
+    fn joined_strings(&self, name: &str) -> String {
+        self.0
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn filesystem_preview(tool_name: &str, value: &PreviewValue) -> Option<String> {
+    match tool_name {
+        "fs_list" | "fs_read" | "fs_delete" => Some(format!("Path: {}", value.string("path"))),
+        "fs_search" => Some(format!(
+            "Root: {}
+Query: {}",
+            value.string("root"),
+            redact_preview_text(value.string("query"))
+        )),
+        "fs_write" => Some(format!(
+            "Path: {}
+New content: {} bytes
+Preview: {}",
+            value.string("path"),
+            value.string("content").len(),
+            redact_preview_text(value.string("content"))
+        )),
+        "fs_patch" => Some(format!(
+            "Path: {}
+Expected replacements: {}
+Replace: {}
+With: {}",
+            value.string("path"),
             value
+                .0
                 .get("expected_replacements")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1),
-            redact_preview_text(string("old_text")),
-            redact_preview_text(string("new_text"))
-        ),
-        "fs_move" => format!("From: {}\nTo: {}", path("from"), path("to")),
-        "shell_exec" => format!(
-            "Command: {}\nWorking directory: {}",
-            redact_preview_text(string("command")),
+            redact_preview_text(value.string("old_text")),
+            redact_preview_text(value.string("new_text"))
+        )),
+        "fs_move" => Some(format!(
+            "From: {}
+To: {}",
+            value.string("from"),
+            value.string("to")
+        )),
+        _ => None,
+    }
+}
+
+fn process_preview(tool_name: &str, value: &PreviewValue) -> Option<String> {
+    match tool_name {
+        "shell_exec" => Some(format!(
+            "Command: {}
+Working directory: {}",
+            redact_preview_text(value.string("command")),
             value
+                .0
                 .get("cwd")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("current directory")
-        ),
-        "admin_exec" => format!(
-            "Privileged program: {}\nArguments: {}",
-            path("program"),
-            redact_preview_text(
-                &value
-                    .get("args")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .unwrap_or_default()
-            )
-        ),
-        "desktop_focus_window" => format!("Window ID: {}", value["window_id"]),
-        "desktop_screenshot" => format!(
-            "Capture screenshot\nMonitor: {}\nWindow: {}",
-            value.get("monitor_id").unwrap_or(&serde_json::Value::Null),
-            value.get("window_id").unwrap_or(&serde_json::Value::Null)
-        ),
-        "desktop_click" => format!(
+        )),
+        "admin_exec" => Some(format!(
+            "Privileged program: {}
+Arguments: {}",
+            value.string("program"),
+            redact_preview_text(&value.joined_strings("args"))
+        )),
+        _ => None,
+    }
+}
+
+fn desktop_preview(tool_name: &str, value: &PreviewValue) -> Option<String> {
+    match tool_name {
+        "desktop_focus_window" => Some(format!("Window ID: {}", value.value("window_id"))),
+        "desktop_screenshot" => Some(format!(
+            "Capture screenshot
+Monitor: {}
+Window: {}",
+            value.value("monitor_id"),
+            value.value("window_id")
+        )),
+        "desktop_click" => Some(format!(
             "Click at ({}, {}) with {} button",
-            value["x"],
-            value["y"],
-            string("button")
-        ),
-        "desktop_type" => format!(
-            "Type {} characters\nText: {}",
-            string("text").chars().count(),
-            redact_preview_text(string("text"))
-        ),
-        "desktop_key" => format!("Key: {}", string("key")),
-        "browser_press" => format!(
-            "Origin: {}\nKey: {}",
-            string("current_origin"),
-            string("key")
-        ),
-        "macos_applescript" | "windows_powershell" => format!(
-            "Script ({} characters):\n{}",
-            string("script").chars().count(),
-            redact_preview_text(string("script"))
-        ),
-        "linux_dbus_call" => format!(
+            value.value("x"),
+            value.value("y"),
+            value.string("button")
+        )),
+        "desktop_type" => Some(format!(
+            "Type {} characters
+Text: {}",
+            value.string("text").chars().count(),
+            redact_preview_text(value.string("text"))
+        )),
+        "desktop_key" => Some(format!("Key: {}", value.string("key"))),
+        _ => None,
+    }
+}
+
+fn platform_preview(tool_name: &str, value: &PreviewValue) -> Option<String> {
+    match tool_name {
+        "macos_applescript" | "windows_powershell" => Some(format!(
+            "Script ({} characters):
+{}",
+            value.string("script").chars().count(),
+            redact_preview_text(value.string("script"))
+        )),
+        "linux_dbus_call" => Some(format!(
             "D-Bus: {} {}.{} on {}",
-            string("destination"),
-            string("interface"),
-            string("method"),
-            string("object_path")
-        ),
-        "browser_open" | "browser_navigate" => format!("URL: {}", string("url")),
+            value.string("destination"),
+            value.string("interface"),
+            value.string("method"),
+            value.string("object_path")
+        )),
+        _ => None,
+    }
+}
+
+fn browser_preview(tool_name: &str, value: &PreviewValue) -> Option<String> {
+    match tool_name {
+        "browser_open" | "browser_navigate" => Some(format!("URL: {}", value.string("url"))),
         "browser_get_url"
         | "browser_get_text"
         | "browser_snapshot"
         | "browser_screenshot"
         | "browser_close"
-        | "browser_profile_info" => format!("Origin: {}", string("current_origin")),
-        "browser_click" => format!(
-            "Origin: {}\nSelector: {}",
-            string("current_origin"),
-            string("selector")
-        ),
-        "browser_type" => format!(
-            "Origin: {}\nSelector: {}\nType {} characters\nText: {}",
-            string("current_origin"),
-            string("selector"),
-            string("text").chars().count(),
-            redact_preview_text(string("text"))
-        ),
-        "browser_evaluate" => format!(
-            "Origin: {}\nJavaScript ({} characters):\n{}",
-            string("current_origin"),
-            string("expression").chars().count(),
-            redact_preview_text(string("expression"))
-        ),
-        _ => tool_name.replace('_', " "),
-    };
+        | "browser_profile_info" => Some(format!("Origin: {}", value.string("current_origin"))),
+        "browser_click" => Some(format!(
+            "Origin: {}
+Selector: {}",
+            value.string("current_origin"),
+            value.string("selector")
+        )),
+        "browser_type" => Some(format!(
+            "Origin: {}
+Selector: {}
+Type {} characters
+Text: {}",
+            value.string("current_origin"),
+            value.string("selector"),
+            value.string("text").chars().count(),
+            redact_preview_text(value.string("text"))
+        )),
+        "browser_press" => Some(format!(
+            "Origin: {}
+Key: {}",
+            value.string("current_origin"),
+            value.string("key")
+        )),
+        "browser_evaluate" => Some(format!(
+            "Origin: {}
+JavaScript ({} characters):
+{}",
+            value.string("current_origin"),
+            value.string("expression").chars().count(),
+            redact_preview_text(value.string("expression"))
+        )),
+        _ => None,
+    }
+}
+
+pub(super) fn approval_preview(tool_name: &str, arguments: &impl Serialize) -> String {
+    let value = PreviewValue(serde_json::to_value(arguments).unwrap_or(serde_json::Value::Null));
+    let preview = filesystem_preview(tool_name, &value)
+        .or_else(|| process_preview(tool_name, &value))
+        .or_else(|| desktop_preview(tool_name, &value))
+        .or_else(|| platform_preview(tool_name, &value))
+        .or_else(|| browser_preview(tool_name, &value))
+        .unwrap_or_else(|| tool_name.replace('_', " "));
     truncate_preview(&preview, 1_500)
 }
 

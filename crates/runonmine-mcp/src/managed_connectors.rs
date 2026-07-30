@@ -392,7 +392,122 @@ pub(super) async fn start_external_connectors(
     Ok(managed)
 }
 
-#[allow(clippy::too_many_lines)]
+struct ExternalConnectorStartContext<'a> {
+    paths: &'a AppPaths,
+    origin: &'a Url,
+    supervisor: &'a ProcessSupervisor,
+    quick_runtime: &'a QuickTunnelRuntimeStore,
+}
+
+async fn start_quick_connector(
+    context: &ExternalConnectorStartContext<'_>,
+    connector: &ConnectorConfig,
+    managed: &mut ManagedConnectors,
+    pending_observers: &mut Vec<PendingQuickObserver>,
+) -> Result<()> {
+    context.quick_runtime.clear_connector(&connector.id)?;
+    let settings = connector
+        .cloudflare_quick
+        .as_ref()
+        .context("Cloudflare Quick settings are missing")?;
+    let resolved = resolve_connector_binary(
+        &context.paths.data_dir,
+        &context.paths.state_dir,
+        BinaryKind::Cloudflared,
+        ReleaseProvider::Cloudflared,
+        settings.cloudflared_path.as_deref(),
+    )?
+    .context("cloudflared is not installed; run the connector setup again")?;
+    warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
+    let binary = resolved.binary;
+    BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
+    let tunnel = QuickTunnelConfig::builder(context.origin.clone())
+        .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
+        .build()?;
+    let mut handle = context.supervisor.start(
+        tunnel.command(&binary)?,
+        tunnel.health_check()?,
+        RestartPolicy::default(),
+    )?;
+    let generation = match context.quick_runtime.begin(&connector.id) {
+        Ok(generation) => generation,
+        Err(error) => {
+            let _ignored = handle.stop().await;
+            return Err(error);
+        }
+    };
+    let events = handle
+        .take_initial_events()
+        .unwrap_or_else(|| handle.subscribe());
+    pending_observers.push(PendingQuickObserver {
+        events,
+        store: context.quick_runtime.clone(),
+        generation,
+    });
+    managed.handles.push(handle);
+    Ok(())
+}
+
+async fn start_named_connector(
+    context: &ExternalConnectorStartContext<'_>,
+    connector: &ConnectorConfig,
+    managed: &mut ManagedConnectors,
+) -> Result<()> {
+    let settings = connector
+        .cloudflare_named
+        .as_ref()
+        .context("Cloudflare Named Tunnel settings are missing")?;
+    let resolved = resolve_connector_binary(
+        &context.paths.data_dir,
+        &context.paths.state_dir,
+        BinaryKind::Cloudflared,
+        ReleaseProvider::Cloudflared,
+        settings.cloudflared_path.as_deref(),
+    )?
+    .context("cloudflared is not installed; run the connector setup again")?;
+    warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
+    let binary = resolved.binary;
+    BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
+    let connector_dir = context
+        .paths
+        .data_dir
+        .join("connectors")
+        .join(&connector.id);
+    ensure_private_directory(&connector_dir)?;
+    let tunnel = NamedTunnelConfig::builder(
+        &settings.tunnel_id,
+        settings.credentials_file.clone(),
+        &settings.hostname,
+        context.origin.join("mcp")?,
+        connector_dir.join("cloudflared.yml"),
+    )
+    .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
+    .build()?;
+    tunnel.write_config()?;
+    managed.handles.push(context.supervisor.start(
+        tunnel.command(&binary)?,
+        tunnel.health_check()?,
+        RestartPolicy::default(),
+    )?);
+    Ok(())
+}
+
+async fn start_synchronous_connector(
+    context: &ExternalConnectorStartContext<'_>,
+    connector: &ConnectorConfig,
+    managed: &mut ManagedConnectors,
+    pending_observers: &mut Vec<PendingQuickObserver>,
+) -> Result<()> {
+    match connector.kind {
+        ConnectorKind::CloudflareQuick => {
+            start_quick_connector(context, connector, managed, pending_observers).await
+        }
+        ConnectorKind::CloudflareOauth => start_named_connector(context, connector, managed).await,
+        ConnectorKind::OpenAiTunnel => unreachable!("OpenAI activation is asynchronous"),
+        ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => Ok(()),
+    }
+}
+
 async fn start_external_connectors_inner(
     paths: &AppPaths,
     config: &AppConfig,
@@ -402,6 +517,12 @@ async fn start_external_connectors_inner(
     let supervisor = ProcessSupervisor;
     let origin = Url::parse(&format!("http://127.0.0.1:{}", config.port))?;
     let quick_runtime = QuickTunnelRuntimeStore::new(paths);
+    let context = ExternalConnectorStartContext {
+        paths,
+        origin: &origin,
+        supervisor: &supervisor,
+        quick_runtime: &quick_runtime,
+    };
     let blocked = managed.blocked_connector_ids();
     for connector in config
         .connectors
@@ -423,91 +544,10 @@ async fn start_external_connectors_inner(
                 ConnectorStartupStage::Process,
             );
         }
-        let startup = async {
-            match connector.kind {
-                ConnectorKind::CloudflareQuick => {
-                    quick_runtime.clear_connector(&connector.id)?;
-                    let settings = connector
-                        .cloudflare_quick
-                        .as_ref()
-                        .context("Cloudflare Quick settings are missing")?;
-                    let resolved = resolve_connector_binary(
-                        &paths.data_dir,
-                        &paths.state_dir,
-                        BinaryKind::Cloudflared,
-                        ReleaseProvider::Cloudflared,
-                        settings.cloudflared_path.as_deref(),
-                    )?
-                    .context("cloudflared is not installed; run the connector setup again")?;
-                    warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
-                    let binary = resolved.binary;
-                    BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
-                    let tunnel = QuickTunnelConfig::builder(origin.clone())
-                        .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
-                        .build()?;
-                    let mut handle = supervisor.start(
-                        tunnel.command(&binary)?,
-                        tunnel.health_check()?,
-                        RestartPolicy::default(),
-                    )?;
-                    let generation = match quick_runtime.begin(&connector.id) {
-                        Ok(generation) => generation,
-                        Err(error) => {
-                            let _ignored = handle.stop().await;
-                            return Err(error);
-                        }
-                    };
-                    let events = handle
-                        .take_initial_events()
-                        .unwrap_or_else(|| handle.subscribe());
-                    pending_observers.push(PendingQuickObserver {
-                        events,
-                        store: quick_runtime.clone(),
-                        generation,
-                    });
-                    managed.handles.push(handle);
-                }
-                ConnectorKind::CloudflareOauth => {
-                    let settings = connector
-                        .cloudflare_named
-                        .as_ref()
-                        .context("Cloudflare Named Tunnel settings are missing")?;
-                    let resolved = resolve_connector_binary(
-                        &paths.data_dir,
-                        &paths.state_dir,
-                        BinaryKind::Cloudflared,
-                        ReleaseProvider::Cloudflared,
-                        settings.cloudflared_path.as_deref(),
-                    )?
-                    .context("cloudflared is not installed; run the connector setup again")?;
-                    warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
-                    let binary = resolved.binary;
-                    BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
-                    let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
-                    ensure_private_directory(&connector_dir)?;
-                    let tunnel = NamedTunnelConfig::builder(
-                        &settings.tunnel_id,
-                        settings.credentials_file.clone(),
-                        &settings.hostname,
-                        origin.join("mcp")?,
-                        connector_dir.join("cloudflared.yml"),
-                    )
-                    .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
-                    .build()?;
-                    tunnel.write_config()?;
-                    managed.handles.push(supervisor.start(
-                        tunnel.command(&binary)?,
-                        tunnel.health_check()?,
-                        RestartPolicy::default(),
-                    )?);
-                }
-                ConnectorKind::OpenAiTunnel => unreachable!("OpenAI activation is asynchronous"),
-                ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => {}
-            }
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
-        if startup.is_err() {
+        if start_synchronous_connector(&context, connector, managed, pending_observers)
+            .await
+            .is_err()
+        {
             managed.record_degraded(
                 &connector.id,
                 connector.kind,

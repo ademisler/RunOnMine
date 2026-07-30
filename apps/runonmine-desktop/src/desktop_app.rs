@@ -556,7 +556,6 @@ impl RunOnMineDesktop {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn apply_result(&mut self, result: Result<()>) {
         match result {
             Ok(()) => self.error = None,
@@ -578,7 +577,6 @@ impl eframe::App for RunOnMineDesktop {
         context.request_repaint_after(Duration::from_millis(500));
     }
 
-    #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.render_ui(ui, frame);
     }

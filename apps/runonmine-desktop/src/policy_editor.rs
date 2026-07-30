@@ -54,7 +54,6 @@ pub(crate) enum PolicyEditorAction {
 }
 
 impl PolicyEditorState {
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,

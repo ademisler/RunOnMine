@@ -57,8 +57,8 @@ Status markers:
 
 ## P2 — Architecture, reliability and maintainability
 
-- [!] **P2-01 — Split oversized modules.** The 2,400-line desktop entrypoint is now a 27-line bootstrap with separate model, update/orchestration, effects/snapshot and views modules; connector transactions, credential updates, support bundles and doctor are also separated. A few legacy MCP/storage/view modules remain large and continue to be tracked rather than hidden.
-- [!] **P2-02 — Break down very long functions.** New security/reliability paths and helper acceptance code use typed handlers and small transitions without new suppressions. Some legacy view, storage and MCP dispatch functions remain long and require incremental extraction with regression coverage.
+- [x] **P2-01 — Split oversized modules.** Desktop rendering is split into a shell plus per-screen view modules; StateStore keeps its public worker/approval surface separate from audit/checkpoint logic, schema migration and tests; MCP keeps the macro-bound tool router separate from runtime identity, server authorization/bootstrap and tests. The connector CLI now routes through typed command-family handlers instead of one monolithic dispatcher.
+- [x] **P2-02 — Break down very long functions.** Desktop rendering, MCP authorization, connector startup, approval-preview formatting and CLI connector setup now use typed requests and focused helpers. The repository contains no `clippy::too_many_lines` suppression, and workspace plus headless-desktop Clippy pass with warnings denied.
 - [x] **P2-03 — Separate desktop model/update/effects/views.** Desktop bootstrap, state model, update/orchestration, background snapshot effects and views live in separate modules; credential and process effects remain outside rendering.
 - [x] **P2-04 — Move desktop refresh work off the UI thread.** Config/secret recovery, SQLite/OAuth reads, incremental audit verification, Quick runtime discovery and bounded connector-health HTTP run in one non-overlapping background snapshot; audit history is incrementally paged to 10,000 records.
 - [x] **P2-05 — Zeroize desktop credential inputs.** Every desktop field whose identity denotes a secret, token, password, API key or credential now uses `Zeroizing<String>`; existing submit/cancel/reset paths perform explicit zeroization and drop wipes remaining capacity.
@@ -127,9 +127,9 @@ Status markers:
 
 ## Final gate
 
-- [ ] All tasks that are implementable in-repository are complete.
-- [ ] External blockers are explicitly marked `[!]` with owner/platform requirements.
-- [ ] Full headless verification passes.
-- [ ] CLI acceptance passes.
-- [ ] Required platform acceptance evidence is attached.
-- [ ] `Task.md`, `CHANGELOG.md`, architecture, connections, threat model and platform docs match the implementation.
+- [x] All tasks that are implementable in-repository are complete.
+- [x] External blockers are explicitly marked `[!]` with owner/platform requirements.
+- [x] Full headless verification passes.
+- [x] CLI and real Streamable HTTP MCP acceptance pass.
+- [!] Required rebooted, signed/notarized macOS and Windows platform evidence remains an external release gate and is not fabricated by repository CI.
+- [x] `Task.md`, `CHANGELOG.md`, architecture, connections, threat model and platform docs match the implementation.

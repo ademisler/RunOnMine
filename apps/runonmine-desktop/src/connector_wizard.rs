@@ -33,7 +33,6 @@ pub(crate) struct ConnectorCommand {
 }
 
 impl ConnectorWizardState {
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn show(
         &mut self,
         context: &egui::Context,

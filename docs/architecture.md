@@ -43,8 +43,11 @@ of an already committed owner decision.
 
 The desktop executable is a thin bootstrap. `desktop_model.rs` owns durable UI
 state, `desktop_app.rs` owns update/orchestration, `desktop_snapshot.rs` owns
-blocking effects, and `desktop_views.rs` owns rendering. A single background
-snapshot performs config/secret recovery, SQLite and OAuth reads, incremental
+blocking effects, and `desktop_views.rs` owns the shared shell. Overview,
+approval, connector, permission, OAuth, audit and diagnostic rendering live in
+separate per-screen modules below `desktop_views/`; screen code does not perform
+blocking state refreshes. A single background snapshot performs config/secret
+recovery, SQLite and OAuth reads, incremental
 audit verification, Quick runtime discovery and a 250 ms/256 KiB-bounded
 loopback connector-health request. Snapshots never overlap; the UI only applies
 a completed value. Audit history starts at 100 records and doubles on explicit
@@ -54,6 +57,19 @@ Connector lifecycle from the direct-loopback endpoint is rendered as typed
 configured/starting/ready/backoff/degraded/stale-credential/failed/stopped
 states. Local stdio remains explicitly on-demand rather than pretending to be a
 continuously running service.
+
+## Core and MCP module boundaries
+
+`StateStore` exposes the serialized worker, approvals and grant API from
+`storage.rs`; authenticated audit rows/checkpoints/pruning live in
+`storage/audit_store.rs`, schema creation and migration live in
+`storage/migration.rs`, and storage regression/property tests live outside the
+production module. MCP keeps the `#[tool_router]` declarations together because
+the macro requires one coherent impl, while runtime/requester identity is in
+`mcp/runtime.rs` and server bootstrap plus authorization orchestration is in
+`mcp/server.rs`. Connector CLI setup uses a small `ConnectContext` and routes
+each command family to independent handlers so credential and rollback ordering
+remains explicit without one oversized dispatcher.
 
 ## Incremental audit verification
 

@@ -45,476 +45,652 @@ pub(crate) fn setup(roots: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
-pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
-    let paths = AppPaths::discover()?;
-    paths.ensure()?;
-    let config_path = paths.config_file();
-    let secrets = default_secret_store(&paths)?;
-    let reconciled = reconcile_pending_connector_removals(&paths)?;
-    if reconciled > 0 {
-        println!("Completed {reconciled} pending connector removal(s).");
+struct ConnectContext {
+    paths: AppPaths,
+    config_path: PathBuf,
+    secrets: Box<dyn runonmine_core::secrets::SecretStore>,
+    config: AppConfig,
+}
+
+impl ConnectContext {
+    fn load() -> Result<Self> {
+        let paths = AppPaths::discover()?;
+        paths.ensure()?;
+        let config_path = paths.config_file();
+        let secrets = default_secret_store(&paths)?;
+        let reconciled = reconcile_pending_connector_removals(&paths)?;
+        if reconciled > 0 {
+            println!("Completed {reconciled} pending connector removal(s).");
+        }
+        let config = AppConfig::load_or_create(&config_path)?;
+        Ok(Self {
+            paths,
+            config_path,
+            secrets,
+            config,
+        })
     }
-    let config = AppConfig::load_or_create(&config_path)?;
+}
+
+pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
+    let context = ConnectContext::load()?;
     match command {
         ConnectCommand::List => {
-            if config.connectors.is_empty() {
-                println!("No connectors are configured.");
-            }
-            for connector in &config.connectors {
-                println!(
-                    "{}  {:?}  enabled={}  preset={:?}  binary_trust={}  {}",
-                    connector.id,
-                    connector.kind,
-                    connector.enabled,
-                    connector.policy_preset,
-                    connector_binary_trust_label(&paths, connector),
-                    connector.name,
-                );
-            }
+            list_connectors(&context);
+            Ok(())
         }
-        ConnectCommand::Show { connector } => {
-            let connector = config
-                .connector(&connector)
-                .context("connector was not found")?;
-            println!("{}", serde_json::to_string_pretty(connector)?);
-        }
-        ConnectCommand::Enable { connector } => {
-            let _removal_lock = ConnectorRemovalLock::acquire(&paths)?;
-            ConnectorRemovalJournal::new(&paths).ensure_id_available(&connector)?;
-            AppConfig::update(&config_path, |config| {
-                let item = config
-                    .connector(&connector)
-                    .context("connector was not found")?;
-                ensure_connector_credentials(item, secrets.as_ref())?;
-                config
-                    .connector_mut(&connector)
-                    .context("connector was not found")?
-                    .enabled = true;
-                Ok(())
-            })?;
-            println!("Enabled connector {connector}.");
-            reconcile_running_agent_after_connector_change()?;
-        }
-        ConnectCommand::Disable { connector } => {
-            let _removal_lock = ConnectorRemovalLock::acquire(&paths)?;
-            ConnectorRemovalJournal::new(&paths).ensure_id_available(&connector)?;
-            AppConfig::update(&config_path, |config| {
-                config
-                    .connector_mut(&connector)
-                    .context("connector was not found")?
-                    .enabled = false;
-                Ok(())
-            })?;
-            println!("Disabled connector {connector}.");
-            reconcile_running_agent_after_connector_change()?;
-        }
+        ConnectCommand::Show { connector } => show_connector(&context, &connector),
+        ConnectCommand::Enable { connector } => set_connector_enabled(&context, &connector, true),
+        ConnectCommand::Disable { connector } => set_connector_enabled(&context, &connector, false),
         ConnectCommand::Remove { connector, confirm } => {
-            if confirm != "REMOVE" {
-                bail!("connector removal requires --confirm REMOVE");
-            }
-            if remove_connector_recoverably(&paths, secrets.as_ref(), &connector)? {
-                println!("Removed connector {connector} and reconciled all local state.");
-                reconcile_running_agent_after_connector_change()?;
-            } else {
-                println!("Connector {connector} is already absent and has no pending cleanup.");
-            }
+            remove_connector(&context, &connector, &confirm)
         }
-        ConnectCommand::LocalHttp { command } => match command {
-            LocalHttpCommand::Enable { token_output } => {
-                validate_private_output_path(token_output.as_deref())?;
-                let token = generate_path_secret()?;
-                let secret = SecretString::from(token.clone());
-                let (connector_id, port) = enable_local_http_transactionally(
-                    &paths,
-                    &config_path,
-                    secrets.as_ref(),
-                    &secret,
-                )?;
-                report_local_http_credentials(
-                    port,
-                    &connector_id,
-                    &token,
-                    token_output.as_deref(),
-                )?;
-                reconcile_running_agent_after_connector_change()?;
-            }
-            LocalHttpCommand::Disable => {
-                let connector_id =
-                    disable_local_http_transactionally(&paths, &config_path, secrets.as_ref())?;
-                println!(
-                    "Local HTTP connector {connector_id} is disabled and its token was deleted."
-                );
-                reconcile_running_agent_after_connector_change()?;
-            }
-            LocalHttpCommand::Rotate { token_output } => {
-                validate_private_output_path(token_output.as_deref())?;
-                let token = generate_path_secret()?;
-                let secret = SecretString::from(token.clone());
-                let _removal_lock = ConnectorRemovalLock::acquire(&paths)?;
-                let (connector_id, port) = update_config_with_secrets(
-                    &config_path,
-                    secrets.as_ref(),
-                    |config, transaction| {
-                        let connector = config
-                            .connectors
-                            .iter()
-                            .find(|connector| connector.kind == ConnectorKind::LocalHttp)
-                            .context("local HTTP connector is missing")?;
-                        if !connector.enabled {
-                            bail!("local HTTP is disabled; enable it before rotating its token");
-                        }
-                        let connector_id = connector.id.clone();
-                        transaction.set(&local_http_secret_name(&connector_id), &secret)?;
-                        Ok((connector_id, config.port))
-                    },
-                )?;
-                report_local_http_credentials(
-                    port,
-                    &connector_id,
-                    &token,
-                    token_output.as_deref(),
-                )?;
-            }
-            LocalHttpCommand::Status { token_output, json } => {
-                validate_private_output_path(token_output.as_deref())?;
-                let connector = config
-                    .connectors
-                    .iter()
-                    .find(|connector| connector.kind == ConnectorKind::LocalHttp)
-                    .context("local HTTP connector is missing")?;
-                let connector_id = connector.id.clone();
-                let enabled = connector.enabled;
-                let secret_name = local_http_secret_name(&connector_id);
-                let endpoint = format!("http://127.0.0.1:{}/mcp", config.port);
-                let token = secrets.get(&secret_name)?;
-                if json {
-                    super::print_json_output(
-                        "connect.local_http.status",
-                        &serde_json::json!({
-                            "connector_id": connector_id,
-                            "enabled": enabled,
-                            "endpoint": endpoint,
-                            "token_configured": token.is_some(),
-                            "credentials_export_requested": token_output.is_some(),
-                        }),
-                    )?;
-                } else {
-                    println!("Connector: {connector_id}");
-                    println!("Enabled: {enabled}");
-                    println!("Endpoint: {endpoint}");
-                    println!("Token configured: {}", token.is_some());
-                }
-                if let Some(output) = token_output.as_deref() {
-                    let token = token.context("local HTTP token is not configured")?;
-                    write_local_http_credentials(
-                        output,
-                        config.port,
-                        &connector_id,
-                        token.expose_secret(),
-                    )?;
-                    if !json {
-                        println!("Credentials written to {}.", output.display());
-                    }
-                } else if !json {
-                    println!(
-                        "Bearer token is not printed. Use --token-output <absolute-file> to export it securely."
-                    );
-                }
-            }
-        },
-        ConnectCommand::Cloudflare {
-            command:
-                CloudflareCommand::Quick {
-                    rotate,
-                    cloudflared,
-                },
-        } => {
-            if let Some(id) = rotate {
-                let path_secret = SecretString::from(generate_path_secret()?);
-                update_config_with_secrets(
-                    &config_path,
-                    secrets.as_ref(),
-                    |config, transaction| {
-                        let connector = config.connector(&id).context("connector was not found")?;
-                        if connector.kind != ConnectorKind::CloudflareQuick {
-                            bail!(
-                                "secret rotation is only valid for a Cloudflare Quick Tunnel connector"
-                            );
-                        }
-                        transaction.set(&format!("connector.{id}.path_secret"), &path_secret)
-                    },
-                )?;
-                println!("Rotated the temporary connector secret. The previous URL is invalid.");
-                return Ok(());
-            }
-            let binary = ensure_binary(
-                &paths,
-                BinaryKind::Cloudflared,
-                ReleaseProvider::Cloudflared,
-                cloudflared.as_deref(),
-            )
-            .await?;
-            let id = Uuid::new_v4().to_string();
-            let path_secret = generate_path_secret()?;
-            let connector = ConnectorConfig {
-                id: id.clone(),
-                name: "Cloudflare Quick Tunnel".to_owned(),
-                kind: ConnectorKind::CloudflareQuick,
-                enabled: true,
-                policy_preset: PolicyPreset::Safe,
-                pack_overrides: BTreeMap::default(),
-                tool_overrides: BTreeMap::default(),
-                policy_rules: Vec::new(),
-                public_base_url: None,
-                cloudflare_quick: Some(CloudflareQuickSettings {
-                    cloudflared_path: Some(binary.path),
-                    ..CloudflareQuickSettings::default()
-                }),
-                cloudflare_named: None,
-                oauth_owner: None,
-                openai_tunnel: None,
-            };
-            commit_new_connector(
-                connector,
-                &paths,
-                &config_path,
-                secrets.as_ref(),
-                &[(
-                    format!("connector.{id}.path_secret"),
-                    SecretString::from(path_secret),
-                )],
-            )?;
-            println!("Created temporary Cloudflare connector {id}.");
-            println!("The secret URL path is stored in the operating system credential store.");
+        ConnectCommand::LocalHttp { command } => handle_local_http(&context, command),
+        ConnectCommand::Cloudflare { command } => handle_cloudflare(&context, command).await,
+        ConnectCommand::UpdateManagedBinaries => update_managed_binaries(&context).await,
+        ConnectCommand::PinExternalBinaries => pin_external_binaries(&context),
+        ConnectCommand::Openai(args) => connect_openai(&context, args).await,
+    }
+}
+
+fn list_connectors(context: &ConnectContext) {
+    if context.config.connectors.is_empty() {
+        println!("No connectors are configured.");
+    }
+    for connector in &context.config.connectors {
+        println!(
+            "{}  {:?}  enabled={}  preset={:?}  binary_trust={}  {}",
+            connector.id,
+            connector.kind,
+            connector.enabled,
+            connector.policy_preset,
+            connector_binary_trust_label(&context.paths, connector),
+            connector.name,
+        );
+    }
+}
+
+fn show_connector(context: &ConnectContext, connector_id: &str) -> Result<()> {
+    let connector = context
+        .config
+        .connector(connector_id)
+        .context("connector was not found")?;
+    println!("{}", serde_json::to_string_pretty(connector)?);
+    Ok(())
+}
+
+fn set_connector_enabled(
+    context: &ConnectContext,
+    connector_id: &str,
+    enabled: bool,
+) -> Result<()> {
+    let _removal_lock = ConnectorRemovalLock::acquire(&context.paths)?;
+    ConnectorRemovalJournal::new(&context.paths).ensure_id_available(connector_id)?;
+    AppConfig::update(&context.config_path, |config| {
+        if enabled {
+            let connector = config
+                .connector(connector_id)
+                .context("connector was not found")?;
+            ensure_connector_credentials(connector, context.secrets.as_ref())?;
         }
-        ConnectCommand::Cloudflare {
-            command: CloudflareCommand::Oauth(args),
-        } => {
-            validate_private_output_path(args.registration_token_output.as_deref())?;
-            let binary = ensure_binary(
-                &paths,
-                BinaryKind::Cloudflared,
-                ReleaseProvider::Cloudflared,
-                args.cloudflared.as_deref(),
-            )
-            .await?;
-            let hostname = value_or_prompt(args.hostname, "Public Cloudflare hostname: ")?
-                .to_ascii_lowercase();
-            let callback_url = format!("https://{hostname}/oauth/github/callback");
-            let tunnel_id = value_or_prompt(args.tunnel_id, "Cloudflare tunnel UUID: ")?;
-            let credentials_file = args
-                .credentials_file
-                .map_or_else(
-                    || prompt_required("Cloudflare credentials JSON path: ").map(PathBuf::from),
-                    Ok,
-                )?
-                .canonicalize()
-                .context("Cloudflare credentials file does not exist")?;
-            let client_id = value_or_prompt(args.github_client_id, "GitHub OAuth client ID: ")?;
-            let client_secret =
-                read_secret(args.client_secret_stdin, "GitHub OAuth client secret: ")?;
-            if client_secret.trim().is_empty() {
-                bail!("GitHub OAuth client secret must not be empty");
-            }
-            let owner_login =
-                value_or_prompt(args.github_owner, "Machine owner's GitHub display login: ")?;
-            let owner_id = args.github_owner_id.map_or_else(
-                || {
-                    prompt_required("Machine owner's immutable GitHub numeric ID: ")?
-                        .parse::<u64>()
-                        .context("GitHub owner ID must be a positive integer")
-                },
-                Ok,
-            )?;
-            if owner_id == 0 {
-                bail!("GitHub owner ID must be greater than zero");
-            }
-            let id = Uuid::new_v4().to_string();
-            let registration_token = generate_path_secret()?;
-            let public_base_url = Url::parse(&format!("https://{hostname}/"))
-                .context("public Cloudflare hostname is invalid")?;
-            let connector = ConnectorConfig {
-                id: id.clone(),
-                name: "Cloudflare Named Tunnel with OAuth".to_owned(),
-                kind: ConnectorKind::CloudflareOauth,
-                enabled: true,
-                policy_preset: PolicyPreset::Safe,
-                pack_overrides: BTreeMap::default(),
-                tool_overrides: BTreeMap::default(),
-                policy_rules: Vec::new(),
-                public_base_url: Some(public_base_url),
-                cloudflare_quick: None,
-                cloudflare_named: Some(CloudflareNamedSettings {
-                    tunnel_id,
-                    credentials_file,
-                    hostname: hostname.clone(),
-                    cloudflared_path: Some(binary.path),
-                    metrics_port: 47_824,
-                }),
-                oauth_owner: Some(OAuthOwnerSettings {
-                    github_login: owner_login,
-                    github_id: owner_id,
-                }),
-                openai_tunnel: None,
-            };
-            commit_new_connector(
-                connector,
-                &paths,
-                &config_path,
-                secrets.as_ref(),
-                &[
-                    (
-                        format!("connector.{id}.github_client_id"),
-                        SecretString::from(client_id),
-                    ),
-                    (
-                        format!("connector.{id}.github_client_secret"),
-                        SecretString::from(client_secret),
-                    ),
-                    (
-                        format!("connector.{id}.oauth_hash_key"),
-                        SecretString::from(generate_path_secret()?),
-                    ),
-                    (
-                        format!("connector.{id}.oauth_registration_token"),
-                        SecretString::from(registration_token.clone()),
-                    ),
-                ],
-            )?;
-            println!("Created OAuth connector {id}.");
-            println!("Register {callback_url} in the GitHub OAuth app.");
-            if let Some(output) = args.registration_token_output.as_deref() {
-                write_oauth_registration_credentials(
-                    output,
-                    &id,
-                    &format!("https://{hostname}/oauth/register"),
-                    &registration_token,
-                )
-                .with_context(|| {
-                    format!(
-                        "the registration token remains in the credential store, but secure export to {} failed; retry with `runonmine oauth registration-token export {id} --output <absolute-file>`",
-                        output.display()
-                    )
-                })?;
-                println!(
-                    "OAuth registration credentials written to {}.",
-                    output.display()
-                );
-            } else {
-                println!(
-                    "The OAuth registration token was not printed. Export it with `runonmine oauth registration-token export {id} --output <absolute-file>`."
-                );
-            }
+        config
+            .connector_mut(connector_id)
+            .context("connector was not found")?
+            .enabled = enabled;
+        Ok(())
+    })?;
+    println!(
+        "{} connector {connector_id}.",
+        if enabled { "Enabled" } else { "Disabled" }
+    );
+    reconcile_running_agent_after_connector_change()
+}
+
+fn remove_connector(context: &ConnectContext, connector_id: &str, confirm: &str) -> Result<()> {
+    if confirm != "REMOVE" {
+        bail!("connector removal requires --confirm REMOVE");
+    }
+    if remove_connector_recoverably(&context.paths, context.secrets.as_ref(), connector_id)? {
+        println!("Removed connector {connector_id} and reconciled all local state.");
+        reconcile_running_agent_after_connector_change()?;
+    } else {
+        println!("Connector {connector_id} is already absent and has no pending cleanup.");
+    }
+    Ok(())
+}
+
+fn handle_local_http(context: &ConnectContext, command: LocalHttpCommand) -> Result<()> {
+    match command {
+        LocalHttpCommand::Enable { token_output } => {
+            enable_local_http(context, token_output.as_deref())
         }
-        ConnectCommand::UpdateManagedBinaries => {
-            let cloudflare_updated = update_managed_cloudflared(&paths, &config_path).await?;
-            let openai_updated = update_managed_openai(&paths, &config_path).await?;
-            if cloudflare_updated == 0 {
-                println!("No managed Cloudflare connector paths required an update.");
-            } else {
-                println!("Updated {cloudflare_updated} managed Cloudflare connector path(s).");
-            }
-            if openai_updated == 0 {
-                println!("No managed OpenAI tunnel-client paths required an update.");
-            } else {
-                println!("Updated {openai_updated} managed OpenAI tunnel-client path(s).");
-            }
+        LocalHttpCommand::Disable => disable_local_http(context),
+        LocalHttpCommand::Rotate { token_output } => {
+            rotate_local_http(context, token_output.as_deref())
         }
-        ConnectCommand::PinExternalBinaries => {
-            let pinned = pin_configured_external_binaries(&paths, &config)?;
-            if pinned == 0 {
-                println!("No unpinned external connector binaries were configured.");
-            } else {
-                println!("Pinned {pinned} external connector binary path(s).");
-            }
-        }
-        ConnectCommand::Openai(args) => {
-            validate_profile_name(&args.profile)?;
-            let tunnel_id = value_or_prompt(args.tunnel_id, "OpenAI tunnel ID: ")?;
-            let api_key = read_secret(args.api_key_stdin, "OpenAI runtime API key: ")?;
-            if api_key.trim().is_empty() {
-                bail!("runtime API key must not be empty");
-            }
-            let id = Uuid::new_v4().to_string();
-            let configured_binary_path =
-                OpenAiBinaryStaging::configured_path(&paths, args.tunnel_client.as_deref())?;
-            let mut connector_candidate = ConnectorConfig {
-                id: id.clone(),
-                name: "OpenAI Secure MCP Tunnel".to_owned(),
-                kind: ConnectorKind::OpenAiTunnel,
-                enabled: true,
-                policy_preset: PolicyPreset::Safe,
-                pack_overrides: BTreeMap::default(),
-                tool_overrides: BTreeMap::default(),
-                policy_rules: Vec::new(),
-                public_base_url: None,
-                cloudflare_quick: None,
-                cloudflare_named: None,
-                oauth_owner: None,
-                openai_tunnel: Some(OpenAiTunnelSettings {
-                    tunnel_id: tunnel_id.clone(),
-                    profile: args.profile.clone(),
-                    tunnel_client_path: Some(configured_binary_path.clone()),
-                    health_port: 47_823,
-                }),
-            };
-            validate_new_openai_connector(&paths, &config_path, connector_candidate.clone())?;
-            let binary =
-                OpenAiBinaryStaging::prepare(&paths, args.tunnel_client.as_deref()).await?;
-            let actual_binary_path = binary.configured_binary_path();
-            connector_candidate
-                .openai_tunnel
-                .as_mut()
-                .context("OpenAI connector settings disappeared during setup")?
-                .tunnel_client_path = Some(actual_binary_path);
-            let connector =
-                validate_new_openai_connector(&paths, &config_path, connector_candidate)?;
-            let staging = OpenAiConnectorStaging::prepare(&paths, &id)?;
-            let profile_directory = staging.profile_directory();
-            let profile = OpenAiTunnelProfile::builder(
-                &args.profile,
-                &tunnel_id,
-                OpenAiMcpTarget::runonmine_stdio(std::env::current_exe()?.canonicalize()?, &id)?,
-            )
-            .profile_directory(profile_directory.clone())
-            .health_address("127.0.0.1:47823".parse()?)
-            .health_url_file(staging.health_directory().join("tunnel-health.url"))
-            .build()?;
-            let initialized = run_once(
-                profile.init_command(binary.binary())?,
-                std::time::Duration::from_secs(30),
-                128 * 1_024,
-            )
-            .await?;
-            if !initialized.success {
-                bail!("tunnel-client profile initialization failed");
-            }
-            restrict_private_file(&profile_directory.join(format!("{}.yaml", args.profile)))?;
-            let doctor = run_once(
-                profile.doctor_command(binary.binary(), SecretValue::new(api_key.clone())?)?,
-                std::time::Duration::from_secs(30),
-                256 * 1_024,
-            )
-            .await?;
-            if !doctor.success {
-                bail!("tunnel-client doctor failed; verify tunnel permissions and the runtime key");
-            }
-            commit_prepared_openai_connector(
-                connector,
-                &paths,
-                &config_path,
-                secrets.as_ref(),
-                &[(
-                    format!("connector.{id}.runtime_api_key"),
-                    SecretString::from(api_key),
-                )],
-                binary,
-                staging,
-            )?;
-            println!("Created OpenAI Secure MCP Tunnel connector {id}.");
+        LocalHttpCommand::Status { token_output, json } => {
+            show_local_http_status(context, token_output.as_deref(), json)
         }
     }
+}
+
+fn enable_local_http(context: &ConnectContext, token_output: Option<&Path>) -> Result<()> {
+    validate_private_output_path(token_output)?;
+    let token = generate_path_secret()?;
+    let secret = SecretString::from(token.clone());
+    let (connector_id, port) = enable_local_http_transactionally(
+        &context.paths,
+        &context.config_path,
+        context.secrets.as_ref(),
+        &secret,
+    )?;
+    report_local_http_credentials(port, &connector_id, &token, token_output)?;
+    reconcile_running_agent_after_connector_change()
+}
+
+fn disable_local_http(context: &ConnectContext) -> Result<()> {
+    let connector_id = disable_local_http_transactionally(
+        &context.paths,
+        &context.config_path,
+        context.secrets.as_ref(),
+    )?;
+    println!("Local HTTP connector {connector_id} is disabled and its token was deleted.");
+    reconcile_running_agent_after_connector_change()
+}
+
+fn rotate_local_http(context: &ConnectContext, token_output: Option<&Path>) -> Result<()> {
+    validate_private_output_path(token_output)?;
+    let token = generate_path_secret()?;
+    let secret = SecretString::from(token.clone());
+    let _removal_lock = ConnectorRemovalLock::acquire(&context.paths)?;
+    let (connector_id, port) = update_config_with_secrets(
+        &context.config_path,
+        context.secrets.as_ref(),
+        |config, transaction| {
+            let connector = config
+                .connectors
+                .iter()
+                .find(|connector| connector.kind == ConnectorKind::LocalHttp)
+                .context("local HTTP connector is missing")?;
+            if !connector.enabled {
+                bail!("local HTTP is disabled; enable it before rotating its token");
+            }
+            let connector_id = connector.id.clone();
+            transaction.set(&local_http_secret_name(&connector_id), &secret)?;
+            Ok((connector_id, config.port))
+        },
+    )?;
+    report_local_http_credentials(port, &connector_id, &token, token_output)
+}
+
+fn show_local_http_status(
+    context: &ConnectContext,
+    token_output: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    validate_private_output_path(token_output)?;
+    let connector = context
+        .config
+        .connectors
+        .iter()
+        .find(|connector| connector.kind == ConnectorKind::LocalHttp)
+        .context("local HTTP connector is missing")?;
+    let connector_id = connector.id.clone();
+    let enabled = connector.enabled;
+    let endpoint = format!("http://127.0.0.1:{}/mcp", context.config.port);
+    let token = context
+        .secrets
+        .get(&local_http_secret_name(&connector_id))?;
+    if json {
+        super::print_json_output(
+            "connect.local_http.status",
+            &serde_json::json!({
+                "connector_id": connector_id,
+                "enabled": enabled,
+                "endpoint": endpoint,
+                "token_configured": token.is_some(),
+                "credentials_export_requested": token_output.is_some(),
+            }),
+        )?;
+    } else {
+        println!("Connector: {connector_id}");
+        println!("Enabled: {enabled}");
+        println!("Endpoint: {endpoint}");
+        println!("Token configured: {}", token.is_some());
+    }
+    export_local_http_status_credentials(context, token_output, json, &connector_id, token)
+}
+
+fn export_local_http_status_credentials(
+    context: &ConnectContext,
+    token_output: Option<&Path>,
+    json: bool,
+    connector_id: &str,
+    token: Option<SecretString>,
+) -> Result<()> {
+    if let Some(output) = token_output {
+        let token = token.context("local HTTP token is not configured")?;
+        write_local_http_credentials(
+            output,
+            context.config.port,
+            connector_id,
+            token.expose_secret(),
+        )?;
+        if !json {
+            println!("Credentials written to {}.", output.display());
+        }
+    } else if !json {
+        println!(
+            "Bearer token is not printed. Use --token-output <absolute-file> to export it securely."
+        );
+    }
+    Ok(())
+}
+
+async fn handle_cloudflare(context: &ConnectContext, command: CloudflareCommand) -> Result<()> {
+    match command {
+        CloudflareCommand::Quick {
+            rotate,
+            cloudflared,
+        } => connect_cloudflare_quick(context, rotate, cloudflared).await,
+        CloudflareCommand::Oauth(args) => connect_cloudflare_oauth(context, args).await,
+    }
+}
+
+async fn connect_cloudflare_quick(
+    context: &ConnectContext,
+    rotate: Option<String>,
+    cloudflared: Option<PathBuf>,
+) -> Result<()> {
+    if let Some(connector_id) = rotate {
+        let path_secret = SecretString::from(generate_path_secret()?);
+        update_config_with_secrets(
+            &context.config_path,
+            context.secrets.as_ref(),
+            |config, transaction| {
+                let connector = config
+                    .connector(&connector_id)
+                    .context("connector was not found")?;
+                if connector.kind != ConnectorKind::CloudflareQuick {
+                    bail!("secret rotation is only valid for a Cloudflare Quick Tunnel connector");
+                }
+                transaction.set(
+                    &format!("connector.{connector_id}.path_secret"),
+                    &path_secret,
+                )
+            },
+        )?;
+        println!("Rotated the temporary connector secret. The previous URL is invalid.");
+        return Ok(());
+    }
+    let binary = ensure_binary(
+        &context.paths,
+        BinaryKind::Cloudflared,
+        ReleaseProvider::Cloudflared,
+        cloudflared.as_deref(),
+    )
+    .await?;
+    let connector_id = Uuid::new_v4().to_string();
+    let connector = new_cloudflare_quick_connector(&connector_id, binary.path);
+    commit_new_connector(
+        connector,
+        &context.paths,
+        &context.config_path,
+        context.secrets.as_ref(),
+        &[(
+            format!("connector.{connector_id}.path_secret"),
+            SecretString::from(generate_path_secret()?),
+        )],
+    )?;
+    println!("Created temporary Cloudflare connector {connector_id}.");
+    println!("The secret URL path is stored in the operating system credential store.");
+    Ok(())
+}
+
+fn new_cloudflare_quick_connector(connector_id: &str, binary: PathBuf) -> ConnectorConfig {
+    ConnectorConfig {
+        id: connector_id.to_owned(),
+        name: "Cloudflare Quick Tunnel".to_owned(),
+        kind: ConnectorKind::CloudflareQuick,
+        enabled: true,
+        policy_preset: PolicyPreset::Safe,
+        pack_overrides: BTreeMap::default(),
+        tool_overrides: BTreeMap::default(),
+        policy_rules: Vec::new(),
+        public_base_url: None,
+        cloudflare_quick: Some(CloudflareQuickSettings {
+            cloudflared_path: Some(binary),
+            ..CloudflareQuickSettings::default()
+        }),
+        cloudflare_named: None,
+        oauth_owner: None,
+        openai_tunnel: None,
+    }
+}
+
+struct CloudflareOauthInput {
+    hostname: String,
+    tunnel_id: String,
+    credentials_file: PathBuf,
+    client_id: String,
+    client_secret: String,
+    owner_login: String,
+    owner_id: u64,
+    binary_path: PathBuf,
+    registration_token_output: Option<PathBuf>,
+}
+
+async fn prepare_cloudflare_oauth_input(
+    context: &ConnectContext,
+    args: CloudflareOAuthArgs,
+) -> Result<CloudflareOauthInput> {
+    validate_private_output_path(args.registration_token_output.as_deref())?;
+    let binary = ensure_binary(
+        &context.paths,
+        BinaryKind::Cloudflared,
+        ReleaseProvider::Cloudflared,
+        args.cloudflared.as_deref(),
+    )
+    .await?;
+    let hostname =
+        value_or_prompt(args.hostname, "Public Cloudflare hostname: ")?.to_ascii_lowercase();
+    let tunnel_id = value_or_prompt(args.tunnel_id, "Cloudflare tunnel UUID: ")?;
+    let credentials_file = args
+        .credentials_file
+        .map_or_else(
+            || prompt_required("Cloudflare credentials JSON path: ").map(PathBuf::from),
+            Ok,
+        )?
+        .canonicalize()
+        .context("Cloudflare credentials file does not exist")?;
+    let client_id = value_or_prompt(args.github_client_id, "GitHub OAuth client ID: ")?;
+    let client_secret = read_secret(args.client_secret_stdin, "GitHub OAuth client secret: ")?;
+    if client_secret.trim().is_empty() {
+        bail!("GitHub OAuth client secret must not be empty");
+    }
+    let owner_login = value_or_prompt(args.github_owner, "Machine owner's GitHub display login: ")?;
+    let owner_id = args.github_owner_id.map_or_else(
+        || {
+            prompt_required("Machine owner's immutable GitHub numeric ID: ")?
+                .parse::<u64>()
+                .context("GitHub owner ID must be a positive integer")
+        },
+        Ok,
+    )?;
+    if owner_id == 0 {
+        bail!("GitHub owner ID must be greater than zero");
+    }
+    Ok(CloudflareOauthInput {
+        hostname,
+        tunnel_id,
+        credentials_file,
+        client_id,
+        client_secret,
+        owner_login,
+        owner_id,
+        binary_path: binary.path,
+        registration_token_output: args.registration_token_output,
+    })
+}
+
+fn new_cloudflare_oauth_connector(
+    connector_id: &str,
+    input: &CloudflareOauthInput,
+) -> Result<ConnectorConfig> {
+    Ok(ConnectorConfig {
+        id: connector_id.to_owned(),
+        name: "Cloudflare Named Tunnel with OAuth".to_owned(),
+        kind: ConnectorKind::CloudflareOauth,
+        enabled: true,
+        policy_preset: PolicyPreset::Safe,
+        pack_overrides: BTreeMap::default(),
+        tool_overrides: BTreeMap::default(),
+        policy_rules: Vec::new(),
+        public_base_url: Some(
+            Url::parse(&format!("https://{}/", input.hostname))
+                .context("public Cloudflare hostname is invalid")?,
+        ),
+        cloudflare_quick: None,
+        cloudflare_named: Some(CloudflareNamedSettings {
+            tunnel_id: input.tunnel_id.clone(),
+            credentials_file: input.credentials_file.clone(),
+            hostname: input.hostname.clone(),
+            cloudflared_path: Some(input.binary_path.clone()),
+            metrics_port: 47_824,
+        }),
+        oauth_owner: Some(OAuthOwnerSettings {
+            github_login: input.owner_login.clone(),
+            github_id: input.owner_id,
+        }),
+        openai_tunnel: None,
+    })
+}
+
+async fn connect_cloudflare_oauth(
+    context: &ConnectContext,
+    args: CloudflareOAuthArgs,
+) -> Result<()> {
+    let input = prepare_cloudflare_oauth_input(context, args).await?;
+    let connector_id = Uuid::new_v4().to_string();
+    let registration_token = generate_path_secret()?;
+    commit_new_connector(
+        new_cloudflare_oauth_connector(&connector_id, &input)?,
+        &context.paths,
+        &context.config_path,
+        context.secrets.as_ref(),
+        &cloudflare_oauth_secrets(&connector_id, &input, &registration_token)?,
+    )?;
+    report_cloudflare_oauth_credentials(
+        &connector_id,
+        &input.hostname,
+        &registration_token,
+        input.registration_token_output.as_deref(),
+    )
+}
+
+fn cloudflare_oauth_secrets(
+    connector_id: &str,
+    input: &CloudflareOauthInput,
+    registration_token: &str,
+) -> Result<Vec<(String, SecretString)>> {
+    Ok(vec![
+        (
+            format!("connector.{connector_id}.github_client_id"),
+            SecretString::from(input.client_id.clone()),
+        ),
+        (
+            format!("connector.{connector_id}.github_client_secret"),
+            SecretString::from(input.client_secret.clone()),
+        ),
+        (
+            format!("connector.{connector_id}.oauth_hash_key"),
+            SecretString::from(generate_path_secret()?),
+        ),
+        (
+            format!("connector.{connector_id}.oauth_registration_token"),
+            SecretString::from(registration_token.to_owned()),
+        ),
+    ])
+}
+
+fn report_cloudflare_oauth_credentials(
+    connector_id: &str,
+    hostname: &str,
+    registration_token: &str,
+    output: Option<&Path>,
+) -> Result<()> {
+    println!("Created OAuth connector {connector_id}.");
+    println!("Register https://{hostname}/oauth/github/callback in the GitHub OAuth app.");
+    if let Some(output) = output {
+        write_oauth_registration_credentials(
+            output,
+            connector_id,
+            &format!("https://{hostname}/oauth/register"),
+            registration_token,
+        )
+        .with_context(|| {
+            format!(
+                "the registration token remains in the credential store, but secure export to {} failed; retry with `runonmine oauth registration-token export {connector_id} --output <absolute-file>`",
+                output.display()
+            )
+        })?;
+        println!(
+            "OAuth registration credentials written to {}.",
+            output.display()
+        );
+    } else {
+        println!(
+            "The OAuth registration token was not printed. Export it with `runonmine oauth registration-token export {connector_id} --output <absolute-file>`."
+        );
+    }
+    Ok(())
+}
+
+async fn update_managed_binaries(context: &ConnectContext) -> Result<()> {
+    let cloudflare_updated =
+        update_managed_cloudflared(&context.paths, &context.config_path).await?;
+    let openai_updated = update_managed_openai(&context.paths, &context.config_path).await?;
+    println!(
+        "{}",
+        if cloudflare_updated == 0 {
+            "No managed Cloudflare connector paths required an update.".to_owned()
+        } else {
+            format!("Updated {cloudflare_updated} managed Cloudflare connector path(s).")
+        }
+    );
+    println!(
+        "{}",
+        if openai_updated == 0 {
+            "No managed OpenAI tunnel-client paths required an update.".to_owned()
+        } else {
+            format!("Updated {openai_updated} managed OpenAI tunnel-client path(s).")
+        }
+    );
+    Ok(())
+}
+
+fn pin_external_binaries(context: &ConnectContext) -> Result<()> {
+    let pinned = pin_configured_external_binaries(&context.paths, &context.config)?;
+    if pinned == 0 {
+        println!("No unpinned external connector binaries were configured.");
+    } else {
+        println!("Pinned {pinned} external connector binary path(s).");
+    }
+    Ok(())
+}
+
+fn new_openai_connector(
+    connector_id: &str,
+    tunnel_id: &str,
+    profile: &str,
+    binary_path: PathBuf,
+) -> ConnectorConfig {
+    ConnectorConfig {
+        id: connector_id.to_owned(),
+        name: "OpenAI Secure MCP Tunnel".to_owned(),
+        kind: ConnectorKind::OpenAiTunnel,
+        enabled: true,
+        policy_preset: PolicyPreset::Safe,
+        pack_overrides: BTreeMap::default(),
+        tool_overrides: BTreeMap::default(),
+        policy_rules: Vec::new(),
+        public_base_url: None,
+        cloudflare_quick: None,
+        cloudflare_named: None,
+        oauth_owner: None,
+        openai_tunnel: Some(OpenAiTunnelSettings {
+            tunnel_id: tunnel_id.to_owned(),
+            profile: profile.to_owned(),
+            tunnel_client_path: Some(binary_path),
+            health_port: 47_823,
+        }),
+    }
+}
+
+async fn initialize_openai_profile(
+    binary: &OpenAiBinaryStaging,
+    staging: &OpenAiConnectorStaging,
+    profile_name: &str,
+    tunnel_id: &str,
+    connector_id: &str,
+    api_key: &str,
+) -> Result<()> {
+    let profile_directory = staging.profile_directory();
+    let profile = OpenAiTunnelProfile::builder(
+        profile_name,
+        tunnel_id,
+        OpenAiMcpTarget::runonmine_stdio(std::env::current_exe()?.canonicalize()?, connector_id)?,
+    )
+    .profile_directory(profile_directory.clone())
+    .health_address("127.0.0.1:47823".parse()?)
+    .health_url_file(staging.health_directory().join("tunnel-health.url"))
+    .build()?;
+    let initialized = run_once(
+        profile.init_command(binary.binary())?,
+        std::time::Duration::from_secs(30),
+        128 * 1_024,
+    )
+    .await?;
+    if !initialized.success {
+        bail!("tunnel-client profile initialization failed");
+    }
+    restrict_private_file(&profile_directory.join(format!("{profile_name}.yaml")))?;
+    let doctor = run_once(
+        profile.doctor_command(binary.binary(), SecretValue::new(api_key.to_owned())?)?,
+        std::time::Duration::from_secs(30),
+        256 * 1_024,
+    )
+    .await?;
+    if !doctor.success {
+        bail!("tunnel-client doctor failed; verify tunnel permissions and the runtime key");
+    }
+    Ok(())
+}
+
+async fn connect_openai(context: &ConnectContext, args: OpenAiConnectArgs) -> Result<()> {
+    validate_profile_name(&args.profile)?;
+    let tunnel_id = value_or_prompt(args.tunnel_id, "OpenAI tunnel ID: ")?;
+    let api_key = read_secret(args.api_key_stdin, "OpenAI runtime API key: ")?;
+    if api_key.trim().is_empty() {
+        bail!("runtime API key must not be empty");
+    }
+    let connector_id = Uuid::new_v4().to_string();
+    let configured_path =
+        OpenAiBinaryStaging::configured_path(&context.paths, args.tunnel_client.as_deref())?;
+    let candidate = new_openai_connector(&connector_id, &tunnel_id, &args.profile, configured_path);
+    validate_new_openai_connector(&context.paths, &context.config_path, candidate.clone())?;
+    let binary =
+        OpenAiBinaryStaging::prepare(&context.paths, args.tunnel_client.as_deref()).await?;
+    let mut candidate = candidate;
+    candidate
+        .openai_tunnel
+        .as_mut()
+        .context("OpenAI connector settings disappeared during setup")?
+        .tunnel_client_path = Some(binary.configured_binary_path());
+    let connector = validate_new_openai_connector(&context.paths, &context.config_path, candidate)?;
+    let staging = OpenAiConnectorStaging::prepare(&context.paths, &connector_id)?;
+    initialize_openai_profile(
+        &binary,
+        &staging,
+        &args.profile,
+        &tunnel_id,
+        &connector_id,
+        &api_key,
+    )
+    .await?;
+    commit_prepared_openai_connector(
+        connector,
+        &context.paths,
+        &context.config_path,
+        context.secrets.as_ref(),
+        &[(
+            format!("connector.{connector_id}.runtime_api_key"),
+            SecretString::from(api_key),
+        )],
+        binary,
+        staging,
+    )?;
+    println!("Created OpenAI Secure MCP Tunnel connector {connector_id}.");
     Ok(())
 }
 

@@ -13,6 +13,8 @@ pre-release development and does not yet provide compatibility guarantees.
 - Share one access-bound, expiring MCP session transition model between production middleware, deterministic tests, fuzzing and targeted mutation testing; all 20 generated session mutants are caught.
 - Pre-scan verified ZIP and gzip-TAR releases for unsafe, non-regular or duplicate executable entries before creating the destination, and fuzz the exact production scanners.
 - Expand the scheduled fuzz matrix to eight build-verified targets and add SQLite-backed approval reference-model tests plus targeted mutation checks with no surviving viable approval mutant.
+- Split desktop rendering into per-screen modules, StateStore into worker/approval, audit/checkpoint, migration and test modules, and MCP into macro-bound tools, runtime identity, authorization/bootstrap and tests; replace the monolithic connector CLI dispatcher with typed command-family handlers.
+- Remove every `clippy::too_many_lines` suppression by extracting MCP authorization decisions, Cloudflare supervisor setup, approval-preview formatters and connector setup/credential flows into focused helpers.
 - Persist authenticated incremental audit-verification checkpoints and move desktop config/state/OAuth/audit/connector-health refresh into a bounded background snapshot.
 - Extend real Chromium private-network regression coverage to redirects, popups, iframes, downloads, workers, WebSockets, rebinding, file URLs and IPv6 variants, with zero private-probe connections.
 - Verify the Unix helper boundary with real distinct UIDs and a kernel-enforced owner-only socket; add fresh-host artifact preflight workflows without claiming reboot or publisher signing.

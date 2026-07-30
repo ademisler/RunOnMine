@@ -404,7 +404,6 @@ pub(crate) fn ring_gauge(ui: &mut egui::Ui, score: u32, label: &str) {
     );
 }
 
-#[allow(clippy::too_many_lines)]
 fn paint_icon(
     painter: &egui::Painter,
     rect: egui::Rect,
