@@ -139,6 +139,9 @@ on restart/backoff and removed on process stop.
   set when any address is private or non-routable, and connects only to the
   checked IP. QUIC and non-proxied WebRTC UDP are disabled. Private-network
   access is a local-connector-only opt-in and remains blocked for remote connectors.
+  Every browser/CDP operation also has a configurable 1–300 second deadline
+  (45 seconds by default); a timeout quarantines the session, terminates owned
+  Chromium when necessary, and permits a clean lazy restart.
 - Secrets use the operating-system credential store, with an explicit encrypted headless Linux fallback. The encrypted file backend uses an owner-only cross-process lock so CLI, desktop, and agent updates cannot overwrite one another.
 - Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. The core worker has a bounded 128-job queue, one-second enqueue backpressure, and overload metrics; dangerous authorization and audit paths fail closed when work cannot be admitted. Accepted jobs finish without an ambiguous reply timeout. Database directories are private, database/WAL/shared-memory files are owner-only, and worker threads are joined during shutdown. MCP authorization, approval, and audit paths use asynchronous worker replies.
 - OAuth clients, authorization state, codes, tokens, and refresh families are isolated by connector/issuer even when connectors share one local SQLite database.

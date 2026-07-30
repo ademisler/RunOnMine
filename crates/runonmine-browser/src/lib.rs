@@ -2,9 +2,11 @@
 
 mod network_proxy;
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -25,6 +27,9 @@ use tokio::sync::{Mutex, MutexGuard};
 use url::Url;
 
 const MAX_BROWSER_INPUT_BYTES: usize = 256 * 1_024;
+const DEFAULT_BROWSER_OPERATION_TIMEOUT: Duration = Duration::from_secs(45);
+const BROWSER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_REQUEST_GUARD_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -80,6 +85,9 @@ pub struct BrowserSessionInfo {
     pub profile: BrowserProfile,
     pub active: bool,
     pub current_url: Option<String>,
+    pub operation_timeout_seconds: u64,
+    pub timeout_recoveries: u64,
+    pub last_timeout_operation: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,11 +113,68 @@ struct ActiveBrowser {
     page_owned: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TeardownMode {
+    Graceful,
+    Forced,
+}
+
+async fn teardown_active_browser(mut active: ActiveBrowser, mode: TeardownMode) {
+    active.interceptor_task.abort();
+
+    if mode == TeardownMode::Graceful {
+        let _ignored = tokio::time::timeout(
+            Duration::from_secs(1),
+            active.page.execute(FetchDisableParams::default()),
+        )
+        .await;
+        if active.page_owned {
+            let _ignored =
+                tokio::time::timeout(Duration::from_secs(2), active.page.clone().close()).await;
+        }
+    }
+
+    let mut process_stopped = !active.owned_process;
+    if active.owned_process
+        && mode == TeardownMode::Graceful
+        && matches!(
+            tokio::time::timeout(Duration::from_secs(2), active.browser.close()).await,
+            Ok(Ok(_))
+        )
+        && matches!(
+            tokio::time::timeout(Duration::from_secs(3), active.browser.wait()).await,
+            Ok(Ok(_))
+        )
+    {
+        process_stopped = true;
+    }
+    if active.owned_process && !process_stopped {
+        let killed = tokio::time::timeout(BROWSER_RECOVERY_TIMEOUT, async {
+            match active.browser.kill().await {
+                Some(result) => result,
+                None => Ok(()),
+            }
+        })
+        .await;
+        if !matches!(killed, Ok(Ok(()))) {
+            tracing::warn!("owned Chromium did not confirm forced termination before its deadline");
+        }
+    }
+
+    active.handler_task.abort();
+    if let Some(mut guard) = active.network_guard.take() {
+        guard.stop().await;
+    }
+}
+
 pub struct BrowserSession {
     profile: BrowserProfile,
     headless: bool,
     allow_private_network: bool,
     max_output_bytes: usize,
+    operation_timeout: Duration,
+    timeout_recoveries: AtomicU64,
+    last_timeout_operation: StdMutex<Option<&'static str>>,
     resolver: Arc<dyn DestinationResolver>,
     #[cfg(test)]
     extra_browser_args: Vec<(String, String)>,
@@ -124,6 +189,11 @@ impl std::fmt::Debug for BrowserSession {
             .field("headless", &self.headless)
             .field("allow_private_network", &self.allow_private_network)
             .field("max_output_bytes", &self.max_output_bytes)
+            .field("operation_timeout", &self.operation_timeout)
+            .field(
+                "timeout_recoveries",
+                &self.timeout_recoveries.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -135,11 +205,30 @@ impl BrowserSession {
         allow_private_network: bool,
         max_output_bytes: usize,
     ) -> Self {
+        Self::with_operation_timeout(
+            profile,
+            headless,
+            allow_private_network,
+            max_output_bytes,
+            DEFAULT_BROWSER_OPERATION_TIMEOUT,
+        )
+    }
+
+    pub fn with_operation_timeout(
+        profile: BrowserProfile,
+        headless: bool,
+        allow_private_network: bool,
+        max_output_bytes: usize,
+        operation_timeout: Duration,
+    ) -> Self {
         Self {
             profile,
             headless,
             allow_private_network,
             max_output_bytes: max_output_bytes.max(1),
+            operation_timeout: operation_timeout.max(Duration::from_millis(1)),
+            timeout_recoveries: AtomicU64::new(0),
+            last_timeout_operation: StdMutex::new(None),
             resolver: Arc::new(SystemDestinationResolver),
             #[cfg(test)]
             extra_browser_args: Vec::new(),
@@ -160,6 +249,9 @@ impl BrowserSession {
             headless,
             allow_private_network: false,
             max_output_bytes: max_output_bytes.max(1),
+            operation_timeout: DEFAULT_BROWSER_OPERATION_TIMEOUT,
+            timeout_recoveries: AtomicU64::new(0),
+            last_timeout_operation: StdMutex::new(None),
             resolver,
             extra_browser_args,
             active: Mutex::new(None),
@@ -167,6 +259,114 @@ impl BrowserSession {
     }
 
     pub async fn open(&self, url: &str) -> Result<String> {
+        self.run_with_deadline("open", self.open_inner(url)).await
+    }
+
+    pub async fn navigate(&self, url: &str) -> Result<String> {
+        self.run_with_deadline("navigate", self.navigate_inner(url))
+            .await
+    }
+
+    pub async fn policy_url(&self) -> Result<Url> {
+        self.run_with_deadline("policy_url", self.policy_url_inner())
+            .await
+    }
+
+    pub async fn current_url(&self) -> Result<Option<String>> {
+        self.run_with_deadline("current_url", self.current_url_inner())
+            .await
+    }
+
+    pub async fn text(&self) -> Result<BoundedBrowserText> {
+        self.run_with_deadline("text", self.text_inner()).await
+    }
+
+    pub async fn snapshot(&self) -> Result<BoundedBrowserText> {
+        self.run_with_deadline("snapshot", self.snapshot_inner())
+            .await
+    }
+
+    pub async fn click(&self, selector: &str) -> Result<()> {
+        self.run_with_deadline("click", self.click_inner(selector))
+            .await
+    }
+
+    pub async fn type_text(&self, selector: &str, text: &str) -> Result<()> {
+        self.run_with_deadline("type_text", self.type_text_inner(selector, text))
+            .await
+    }
+
+    pub async fn press(&self, key: &str) -> Result<()> {
+        self.run_with_deadline("press", self.press_inner(key)).await
+    }
+
+    pub async fn screenshot_jpeg(&self, quality: u8, full_page: bool) -> Result<Vec<u8>> {
+        self.run_with_deadline("screenshot", self.screenshot_jpeg_inner(quality, full_page))
+            .await
+    }
+
+    pub async fn evaluate(&self, expression: &str) -> Result<serde_json::Value> {
+        self.run_with_deadline("evaluate", self.evaluate_inner(expression))
+            .await
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        self.run_with_deadline("close", self.close_inner()).await
+    }
+
+    pub async fn info(&self) -> Result<BrowserSessionInfo> {
+        self.run_with_deadline("info", self.info_inner()).await
+    }
+
+    async fn run_with_deadline<T, F>(&self, operation: &'static str, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        if let Ok(result) = tokio::time::timeout(self.operation_timeout, future).await {
+            return result;
+        }
+        let reset = self.recover_stuck_session(operation).await;
+        let outcome = if reset {
+            "the browser session was reset"
+        } else {
+            "the browser session could not be reset promptly"
+        };
+        bail!(
+            "browser operation `{operation}` exceeded its {} second deadline; {outcome}",
+            self.operation_timeout.as_secs_f64()
+        )
+    }
+
+    async fn recover_stuck_session(&self, operation: &'static str) -> bool {
+        self.timeout_recoveries.fetch_add(1, Ordering::Relaxed);
+        *self
+            .last_timeout_operation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(operation);
+        let Ok(mut slot) = tokio::time::timeout(BROWSER_RECOVERY_TIMEOUT, self.active.lock()).await
+        else {
+            tracing::error!(
+                operation,
+                "timed-out browser session lock could not be recovered"
+            );
+            return false;
+        };
+        let active = slot.take();
+        if let Some(active) = active {
+            let cleanup = teardown_active_browser(active, TeardownMode::Forced);
+            if tokio::time::timeout(BROWSER_RECOVERY_TIMEOUT, cleanup)
+                .await
+                .is_err()
+            {
+                tracing::warn!(operation, "forced browser cleanup exceeded its deadline");
+            }
+        }
+        self.cleanup_profile();
+        drop(slot);
+        true
+    }
+
+    async fn open_inner(&self, url: &str) -> Result<String> {
         validate_navigation_url_with_resolver(
             url,
             self.allow_private_network,
@@ -209,7 +409,7 @@ impl BrowserSession {
         Ok(current_url)
     }
 
-    pub async fn navigate(&self, url: &str) -> Result<String> {
+    async fn navigate_inner(&self, url: &str) -> Result<String> {
         validate_navigation_url_with_resolver(
             url,
             self.allow_private_network,
@@ -231,7 +431,7 @@ impl BrowserSession {
 
     /// Return the page identity used for policy evaluation without launching a
     /// browser when the session is inactive. New sessions begin at about:blank.
-    pub async fn policy_url(&self) -> Result<Url> {
+    async fn policy_url_inner(&self) -> Result<Url> {
         let slot = self.active.lock().await;
         let value = match slot.as_ref() {
             Some(active) => active
@@ -244,13 +444,13 @@ impl BrowserSession {
         Url::parse(&value).context("current browser page has an invalid URL")
     }
 
-    pub async fn current_url(&self) -> Result<Option<String>> {
+    async fn current_url_inner(&self) -> Result<Option<String>> {
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
         active.page.url().await.map_err(Into::into)
     }
 
-    pub async fn text(&self) -> Result<BoundedBrowserText> {
+    async fn text_inner(&self) -> Result<BoundedBrowserText> {
         let limit = self.max_output_bytes.min(i32::MAX as usize);
         let expression = format!(
             "() => {{ const value = document.body ? document.body.innerText : ''; return {{ content: value.slice(0, {limit}), truncated: value.length > {limit} }}; }}"
@@ -266,7 +466,7 @@ impl BrowserSession {
         Ok(bound_utf8(value, self.max_output_bytes))
     }
 
-    pub async fn snapshot(&self) -> Result<BoundedBrowserText> {
+    async fn snapshot_inner(&self) -> Result<BoundedBrowserText> {
         let limit = self.max_output_bytes.min(i32::MAX as usize);
         let expression = format!(
             "() => {{ const value = document.documentElement ? document.documentElement.outerHTML : ''; return {{ content: value.slice(0, {limit}), truncated: value.length > {limit} }}; }}"
@@ -282,7 +482,7 @@ impl BrowserSession {
         Ok(bound_utf8(value, self.max_output_bytes))
     }
 
-    pub async fn click(&self, selector: &str) -> Result<()> {
+    async fn click_inner(&self, selector: &str) -> Result<()> {
         validate_selector(selector)?;
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
@@ -290,7 +490,7 @@ impl BrowserSession {
         Ok(())
     }
 
-    pub async fn type_text(&self, selector: &str, text: &str) -> Result<()> {
+    async fn type_text_inner(&self, selector: &str, text: &str) -> Result<()> {
         validate_selector(selector)?;
         if text.len() > MAX_BROWSER_INPUT_BYTES {
             bail!("browser text input exceeds the size limit");
@@ -308,7 +508,7 @@ impl BrowserSession {
         Ok(())
     }
 
-    pub async fn press(&self, key: &str) -> Result<()> {
+    async fn press_inner(&self, key: &str) -> Result<()> {
         if key.is_empty() || key.len() > 64 {
             bail!("invalid key name");
         }
@@ -323,7 +523,7 @@ impl BrowserSession {
         Ok(())
     }
 
-    pub async fn screenshot_jpeg(&self, quality: u8, full_page: bool) -> Result<Vec<u8>> {
+    async fn screenshot_jpeg_inner(&self, quality: u8, full_page: bool) -> Result<Vec<u8>> {
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
         let bytes = active
@@ -342,7 +542,7 @@ impl BrowserSession {
         Ok(bytes)
     }
 
-    pub async fn evaluate(&self, expression: &str) -> Result<serde_json::Value> {
+    async fn evaluate_inner(&self, expression: &str) -> Result<serde_json::Value> {
         if expression.len() > MAX_BROWSER_INPUT_BYTES {
             bail!("browser expression exceeds the size limit");
         }
@@ -360,29 +560,16 @@ impl BrowserSession {
         Ok(value)
     }
 
-    pub async fn close(&self) -> Result<()> {
+    async fn close_inner(&self) -> Result<()> {
         let mut slot = self.active.lock().await;
-        let Some(mut active) = slot.take() else {
-            self.cleanup_profile();
-            return Ok(());
-        };
-        stop_request_guard(&active.page, &active.interceptor_task).await;
-        if active.page_owned {
-            let _result = active.page.close().await;
+        if let Some(active) = slot.take() {
+            teardown_active_browser(active, TeardownMode::Graceful).await;
         }
-        if active.owned_process {
-            let _result = active.browser.close().await;
-            let _result = tokio::time::timeout(Duration::from_secs(5), active.browser.wait()).await;
-        }
-        if let Some(mut guard) = active.network_guard.take() {
-            guard.stop().await;
-        }
-        active.handler_task.abort();
         self.cleanup_profile();
         Ok(())
     }
 
-    pub async fn info(&self) -> Result<BrowserSessionInfo> {
+    async fn info_inner(&self) -> Result<BrowserSessionInfo> {
         let slot = self.active.lock().await;
         let current_url = match slot.as_ref() {
             Some(active) => active.page.url().await?,
@@ -392,6 +579,13 @@ impl BrowserSession {
             profile: self.profile.clone(),
             active: slot.is_some(),
             current_url,
+            operation_timeout_seconds: self.operation_timeout.as_secs(),
+            timeout_recoveries: self.timeout_recoveries.load(Ordering::Relaxed),
+            last_timeout_operation: self
+                .last_timeout_operation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .map(str::to_owned),
         })
     }
 
@@ -413,8 +607,8 @@ impl BrowserSession {
                         .chrome_executable(executable)
                         .user_data_dir(directory)
                         .window_size(1_280, 900)
-                        .launch_timeout(Duration::from_secs(30))
-                        .request_timeout(Duration::from_mins(1));
+                        .launch_timeout(self.operation_timeout.min(Duration::from_secs(30)))
+                        .request_timeout(self.operation_timeout.min(Duration::from_secs(30)));
                     if let Some(guard) = network_guard.as_ref() {
                         for argument in guarded_browser_arguments(guard.address()) {
                             builder = match argument.value {
@@ -563,8 +757,12 @@ fn validate_browser_network_mode(
 }
 
 async fn stop_request_guard(page: &Page, task: &tokio::task::JoinHandle<()>) {
-    let _ignored = page.execute(FetchDisableParams::default()).await;
     task.abort();
+    let _ignored = tokio::time::timeout(
+        Duration::from_secs(1),
+        page.execute(FetchDisableParams::default()),
+    )
+    .await;
 }
 
 async fn install_request_guard(
@@ -582,34 +780,48 @@ async fn install_request_guard(
                 if event.response_status_code.is_some() || event.response_error_reason.is_some() {
                     true
                 } else {
-                    validate_request_url_with_resolver(
-                        &event.request.url,
-                        allow_private_network,
-                        resolver.as_ref(),
+                    matches!(
+                        tokio::time::timeout(
+                            BROWSER_REQUEST_GUARD_TIMEOUT,
+                            validate_request_url_with_resolver(
+                                &event.request.url,
+                                allow_private_network,
+                                resolver.as_ref(),
+                            ),
+                        )
+                        .await,
+                        Ok(Ok(()))
                     )
-                    .await
-                    .is_ok()
                 };
-            let result = if allowed {
-                guarded_page
-                    .execute(ContinueRequestParams::new(request_id))
-                    .await
-                    .map(|_| ())
-            } else {
-                tracing::warn!(
-                    destination = %redacted_destination(&event.request.url),
-                    "blocked browser request to a private or unsupported destination"
-                );
-                guarded_page
-                    .execute(FailRequestParams::new(
-                        request_id,
-                        ErrorReason::BlockedByClient,
-                    ))
-                    .await
-                    .map(|_| ())
+            let command = async {
+                if allowed {
+                    guarded_page
+                        .execute(ContinueRequestParams::new(request_id))
+                        .await
+                        .map(|_| ())
+                } else {
+                    tracing::warn!(
+                        destination = %redacted_destination(&event.request.url),
+                        "blocked browser request to a private, unsupported, or unresolved destination"
+                    );
+                    guarded_page
+                        .execute(FailRequestParams::new(
+                            request_id,
+                            ErrorReason::BlockedByClient,
+                        ))
+                        .await
+                        .map(|_| ())
+                }
             };
-            if let Err(error) = result {
-                tracing::debug!(%error, "browser request interception ended");
+            match tokio::time::timeout(BROWSER_REQUEST_GUARD_TIMEOUT, command).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "browser request interception ended");
+                }
+                Err(_) => {
+                    tracing::warn!("browser request interception exceeded its deadline");
+                    break;
+                }
             }
         }
     }))
@@ -927,6 +1139,91 @@ mod tests {
             )
             .is_ok()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operation_deadline_resets_and_records_the_session() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let session = BrowserSession::with_operation_timeout(
+            BrowserProfile::isolated_ephemeral(temporary.path().join("profile")),
+            true,
+            false,
+            1_024,
+            Duration::from_millis(20),
+        );
+        let result = session
+            .run_with_deadline("test_hang", futures::future::pending::<Result<()>>())
+            .await;
+        let Err(error) = result else {
+            bail!("pending browser operation unexpectedly completed");
+        };
+        assert!(error.to_string().contains("test_hang"));
+        assert!(error.to_string().contains("session was reset"));
+
+        let info = session.info_inner().await?;
+        assert!(!info.active);
+        assert_eq!(info.timeout_recoveries, 1);
+        assert_eq!(info.last_timeout_operation.as_deref(), Some("test_hang"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_operation_does_not_record_recovery() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let session = BrowserSession::with_operation_timeout(
+            BrowserProfile::isolated_ephemeral(temporary.path().join("profile")),
+            true,
+            false,
+            1_024,
+            Duration::from_millis(50),
+        );
+        let value = session
+            .run_with_deadline("test_ready", async { Ok::<_, anyhow::Error>(7_u8) })
+            .await?;
+        assert_eq!(value, 7);
+        assert_eq!(session.timeout_recoveries.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn active_timeout_quarantines_owned_chromium_and_allows_restart() -> Result<()> {
+        if !chromium_available() {
+            return Ok(());
+        }
+        let temporary = tempfile::tempdir()?;
+        let session = BrowserSession::with_operation_timeout(
+            BrowserProfile::isolated_ephemeral(temporary.path().join("profile")),
+            true,
+            false,
+            1_024 * 1_024,
+            Duration::from_secs(5),
+        );
+
+        assert_eq!(session.open("about:blank").await?, "about:blank");
+        let result = session
+            .run_with_deadline("test_active_hang", async {
+                let _slot = session.active.lock().await;
+                futures::future::pending::<Result<()>>().await
+            })
+            .await;
+        let Err(error) = result else {
+            bail!("active browser operation unexpectedly completed");
+        };
+        assert!(error.to_string().contains("test_active_hang"));
+
+        let after_timeout = session.info_inner().await?;
+        assert!(!after_timeout.active);
+        assert_eq!(after_timeout.timeout_recoveries, 1);
+        assert_eq!(
+            after_timeout.last_timeout_operation.as_deref(),
+            Some("test_active_hang")
+        );
+
+        assert_eq!(session.open("about:blank").await?, "about:blank");
+        assert!(session.info().await?.active);
+        session.close().await?;
         Ok(())
     }
 

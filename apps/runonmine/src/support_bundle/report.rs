@@ -76,6 +76,7 @@ pub(super) struct BrowserSummary {
     profile_mode: BrowserProfileMode,
     external_cdp_configured: bool,
     private_network_allowed: bool,
+    operation_timeout_seconds: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,6 +159,7 @@ pub(super) fn config_report(paths: &AppPaths) -> (ConfigReport, Option<AppConfig
             profile_mode: config.browser.profile_mode,
             external_cdp_configured: config.browser.external_cdp_url.is_some(),
             private_network_allowed: config.browser.allow_private_network,
+            operation_timeout_seconds: config.browser.operation_timeout_seconds,
         },
         limits: LimitsSummary {
             approval_timeout_seconds: config.limits.approval_timeout_seconds,

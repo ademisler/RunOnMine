@@ -83,6 +83,23 @@ RunOnMine's process-wide proxy, so it is rejected while protected mode is
 active; a local user must explicitly enable private-network expert mode before
 attaching to an external browser.
 
+## Operation deadlines and recovery
+
+Every browser operation, including launch, navigation, page reads, input,
+screenshots, JavaScript evaluation, profile inspection, and shutdown, has a
+configurable deadline. The default is 45 seconds and configuration accepts only
+1 through 300 seconds. This prevents a stalled renderer or CDP connection from
+holding the per-session lock indefinitely.
+
+After a deadline expires, RunOnMine cancels the pending call, removes that browser
+connection from service, aborts its request interceptor, and stops the network
+guard. Chromium processes launched by RunOnMine are force-terminated when needed;
+ephemeral profile data is then removed. A later operation creates a fresh browser
+session lazily. For expert external CDP attachment, RunOnMine drops and quarantines
+its connection but never kills the independently owned browser process. Profile
+diagnostics expose only the configured deadline, recovery count, and last bounded
+operation category.
+
 ## Output and policy
 
 Screenshots are encoded as complete JPEG images and rejected when they exceed

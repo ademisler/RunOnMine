@@ -81,6 +81,17 @@ context and the exact-action authorization identity. An inactive session uses
 `about:blank` without starting Chromium. The origin is read again after any local
 approval wait; a changed origin is re-authorized before the operation continues.
 
+Every browser and CDP operation is wrapped in one configured session deadline
+(default 45 seconds, accepted range 1–300 seconds). A timeout cancels the pending
+future and then acquires the session slot only after cancellation has released it.
+The active connection is removed before reuse; owned Chromium is force-terminated
+if graceful CDP shutdown cannot complete, the request interceptor and process-wide
+network guard are stopped, and ephemeral profile state is removed. The next call
+starts a clean session lazily. External CDP processes are never killed: their
+RunOnMine connection is quarantined and must be reattached on the next call.
+Recovery count and the last bounded operation category are available through
+browser profile diagnostics without exposing page content or JavaScript.
+
 When private-network access is disabled, the isolated Chromium process is
 launched behind a RunOnMine-owned loopback HTTP proxy. Process-level proxy,
 host-resolver, QUIC, loopback-bypass, and WebRTC settings make the boundary

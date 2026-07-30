@@ -283,11 +283,12 @@ impl RunOnMineServer {
         };
         let browser_available =
             matches!(browser_profile, BrowserProfile::ExternalCdp { .. }) || chromium_available();
-        let browser = Arc::new(BrowserSession::new(
+        let browser = Arc::new(BrowserSession::with_operation_timeout(
             browser_profile,
             browser_should_be_headless(),
             app_config.browser.allow_private_network && !remote_connector,
             runtime.0.max_output_bytes,
+            Duration::from_secs(app_config.browser.operation_timeout_seconds),
         ));
         let engine = PolicyEngine;
         let mut tool_router = Self::tool_router();

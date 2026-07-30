@@ -171,6 +171,12 @@ pub struct BrowserConfig {
     pub external_cdp_url: Option<Url>,
     #[serde(default)]
     pub allow_private_network: bool,
+    #[serde(default = "default_browser_operation_timeout_seconds")]
+    pub operation_timeout_seconds: u64,
+}
+
+const fn default_browser_operation_timeout_seconds() -> u64 {
+    45
 }
 
 impl Default for BrowserConfig {
@@ -180,6 +186,7 @@ impl Default for BrowserConfig {
             profile_mode: BrowserProfileMode::Ephemeral,
             external_cdp_url: None,
             allow_private_network: false,
+            operation_timeout_seconds: default_browser_operation_timeout_seconds(),
         }
     }
 }
@@ -570,6 +577,9 @@ fn validate_limits(limits: &LimitsConfig) -> Result<()> {
 }
 
 fn validate_browser(browser: &BrowserConfig) -> Result<()> {
+    if browser.operation_timeout_seconds == 0 || browser.operation_timeout_seconds > 300 {
+        bail!("browser operation timeout must be between 1 and 300 seconds");
+    }
     if browser.profile_name.is_empty()
         || browser.profile_name.len() > 64
         || !browser
@@ -1333,6 +1343,21 @@ mod tests {
         let duplicate = config.connectors[0].clone();
         config.connectors.push(duplicate);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn browser_operation_timeout_defaults_for_older_config_and_is_bounded() -> Result<()> {
+        let browser: BrowserConfig = toml::from_str("profile_name = 'default'")?;
+        assert_eq!(browser.operation_timeout_seconds, 45);
+
+        let mut config = AppConfig::default();
+        config.browser.operation_timeout_seconds = 0;
+        assert!(config.validate().is_err());
+        config.browser.operation_timeout_seconds = 301;
+        assert!(config.validate().is_err());
+        config.browser.operation_timeout_seconds = 1;
+        assert!(config.validate().is_ok());
+        Ok(())
     }
 
     #[test]
