@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Namespace OAuth clients, registration limits, authorization state, consents, codes, tokens, and sessions by connector; require connector-qualified administrative revocation and discard legacy namespace-free beta credentials during migration.
 - Mark dynamically registered OAuth client names as unverified and show a stable client fingerprint, registration time, requested redirect origin, and every registered redirect origin on the local consent page.
 - Split platform-native automation from `shell:exec` with a dedicated `platform:exec` OAuth scope and explicit AppleScript, PowerShell, and D-Bus consent text.
 - Default dynamic OAuth registrations that omit `scope` to only `machine:read` instead of every supported capability.

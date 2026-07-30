@@ -107,7 +107,8 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 remove_connector_transactionally(&config_path, secrets.as_ref(), &connector)?;
             StateStore::open(&paths.state_db())?.clear_persistent_grants(Some(&removed.id))?;
             if removed.kind == ConnectorKind::CloudflareOauth {
-                SqliteOAuthStore::open(&paths.state_db())?.emergency_revoke_all()?;
+                SqliteOAuthStore::open_scoped(&paths.state_db(), &removed.id)?
+                    .emergency_revoke_all()?;
             }
             remove_connector_directories(&paths, &removed.id)?;
             println!(

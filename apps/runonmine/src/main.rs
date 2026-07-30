@@ -368,10 +368,12 @@ enum OauthClientCommand {
     List,
     /// Revoke every active token issued to one client.
     Revoke {
+        connector_id: String,
         client_id: String,
     },
     /// Delete one registered client and all of its authorization state.
     Delete {
+        connector_id: String,
         client_id: String,
     },
 }
@@ -380,9 +382,12 @@ enum OauthClientCommand {
 enum OauthSessionCommand {
     List {
         #[arg(long)]
+        connector_id: Option<String>,
+        #[arg(long)]
         client_id: Option<String>,
     },
     Revoke {
+        connector_id: String,
         family_id: Uuid,
     },
 }

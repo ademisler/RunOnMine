@@ -717,6 +717,7 @@ mod tests {
 
     fn service_with_store(store: Arc<dyn OAuthStore>) -> Result<OAuthService, OAuthError> {
         let config = OAuthServiceConfig {
+            connector_id: "test-connector".to_owned(),
             issuer: Url::parse("https://mine.example").map_err(|_| OAuthError::configuration())?,
             protected_resource: Url::parse("https://mine.example/mcp")
                 .map_err(|_| OAuthError::configuration())?,
@@ -1049,13 +1050,15 @@ mod tests {
         let directory = tempfile::tempdir().map_err(|_| OAuthError::server())?;
         let database = directory.path().join("state").join("state.db");
         {
-            let store = SqliteOAuthStore::open(&database).map_err(map_store_server_error)?;
+            let store = SqliteOAuthStore::open_scoped(&database, "test-connector")
+                .map_err(map_store_server_error)?;
             let service = service_with_store(Arc::new(store))?;
             for _ in 0..REGISTRATIONS_PER_SOURCE_WINDOW {
                 register(&service)?;
             }
         }
-        let store = SqliteOAuthStore::open(&database).map_err(map_store_server_error)?;
+        let store = SqliteOAuthStore::open_scoped(&database, "test-connector")
+            .map_err(map_store_server_error)?;
         let restarted = service_with_store(Arc::new(store))?;
         assert!(matches!(
             register(&restarted),
@@ -1170,6 +1173,7 @@ mod tests {
     #[test]
     fn rejects_non_https_public_issuer_and_non_loopback_http_redirect() {
         let invalid = OAuthServiceConfig {
+            connector_id: "test-connector".to_owned(),
             issuer: Url::parse("http://mine.example").unwrap_or_else(|_| unreachable!()),
             protected_resource: Url::parse("https://mine.example/mcp")
                 .unwrap_or_else(|_| unreachable!()),

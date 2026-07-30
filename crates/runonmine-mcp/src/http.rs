@@ -310,12 +310,16 @@ fn build_oauth_connector(
     )?;
     let service = OAuthService::new(
         OAuthServiceConfig {
+            connector_id: connector.id.clone(),
             issuer: public_base.clone(),
             protected_resource,
             github_client_id: client_id.expose_secret().to_owned(),
             github_callback_url,
         },
-        Arc::new(SqliteOAuthStore::open(&paths.state_db())?),
+        Arc::new(SqliteOAuthStore::open_scoped(
+            &paths.state_db(),
+            &connector.id,
+        )?),
         TokenHasher::new(hash_key)?,
         &registration_access_token,
         Arc::new(verifier),

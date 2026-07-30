@@ -169,3 +169,4 @@ be committed.
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+- OAuth clients, codes, tokens, and refresh families are isolated by connector/issuer even when connectors share the same local SQLite state file.

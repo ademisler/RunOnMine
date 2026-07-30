@@ -149,3 +149,7 @@ runonmine connect enable <id>
 runonmine connect disable <id>
 runonmine connect remove <id> --confirm REMOVE
 ```
+
+## OAuth connector isolation
+
+OAuth state is connector-scoped. A client registered through one named-tunnel issuer cannot be looked up, authorized, refreshed, revoked, or reused through another connector that shares the same local state database. Administrative client and session listings show the owning connector, and revoke/delete operations require that connector identity. The schema-v4 migration intentionally removes namespace-free beta OAuth clients and sessions because they cannot be assigned safely to an issuer; affected clients must register and complete owner consent again.

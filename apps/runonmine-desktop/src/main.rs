@@ -125,7 +125,7 @@ mod desktop {
         root_input: String,
         diagnostics: String,
         diagnostic_rx: Option<BackgroundCliTask>,
-        pending_client_delete: Option<String>,
+        pending_client_delete: Option<(String, String)>,
         pending_connector_delete: Option<String>,
         pending_credential_update: Option<(String, ConnectorKind)>,
         credential_client_id: String,
@@ -382,35 +382,40 @@ mod desktop {
             self.refresh()
         }
 
-        fn revoke_oauth_client(&mut self, client_id: &str) -> Result<()> {
+        fn revoke_oauth_client(&mut self, connector_id: &str, client_id: &str) -> Result<()> {
             let paths = self
                 .paths
                 .as_ref()
                 .context("RunOnMine paths are unavailable")?;
             let oauth = SqliteOAuthStore::open(&paths.state_db())?;
-            let revoked = oauth.revoke_client_tokens(client_id)?;
-            self.diagnostics = format!("Revoked {revoked} active token(s) for {client_id}.");
+            let revoked = oauth.revoke_client_tokens_for(connector_id, client_id)?;
+            self.diagnostics =
+                format!("Revoked {revoked} active token(s) for {connector_id}/{client_id}.");
             self.refresh()
         }
 
-        fn delete_oauth_client(&mut self, client_id: &str) -> Result<()> {
+        fn delete_oauth_client(&mut self, connector_id: &str, client_id: &str) -> Result<()> {
             let paths = self
                 .paths
                 .as_ref()
                 .context("RunOnMine paths are unavailable")?;
-            if !SqliteOAuthStore::open(&paths.state_db())?.delete_client(client_id)? {
-                bail!("OAuth client no longer exists");
+            if !SqliteOAuthStore::open(&paths.state_db())?
+                .delete_client_for(connector_id, client_id)?
+            {
+                bail!("OAuth client no longer exists in this connector");
             }
             self.refresh()
         }
 
-        fn revoke_oauth_session(&mut self, family_id: Uuid) -> Result<()> {
+        fn revoke_oauth_session(&mut self, connector_id: &str, family_id: Uuid) -> Result<()> {
             let paths = self
                 .paths
                 .as_ref()
                 .context("RunOnMine paths are unavailable")?;
-            let revoked = SqliteOAuthStore::open(&paths.state_db())?.revoke_session(family_id)?;
-            self.diagnostics = format!("Revoked {revoked} active token(s) in {family_id}.");
+            let revoked = SqliteOAuthStore::open(&paths.state_db())?
+                .revoke_session_for(connector_id, family_id)?;
+            self.diagnostics =
+                format!("Revoked {revoked} active token(s) in {connector_id}/{family_id}.");
             self.refresh()
         }
 
@@ -537,7 +542,12 @@ mod desktop {
                                 SecretString::from(secret.to_owned()),
                             ),
                         ],
-                        || Ok(SqliteOAuthStore::open(&paths.state_db())?.emergency_revoke_all()?),
+                        || {
+                            Ok(
+                                SqliteOAuthStore::open_scoped(&paths.state_db(), connector_id)?
+                                    .emergency_revoke_all()?,
+                            )
+                        },
                     )?;
                     self.diagnostics = format!(
                         "Updated GitHub credentials and revoked {revoked} OAuth token(s). Restart the agent to apply the new credentials."
@@ -1593,7 +1603,12 @@ mod desktop {
                 );
             }
             for client in clients {
-                let confirming = self.pending_client_delete.as_deref() == Some(&client.client_id);
+                let confirming =
+                    self.pending_client_delete
+                        .as_ref()
+                        .is_some_and(|(connector_id, client_id)| {
+                            connector_id == &client.connector_id && client_id == &client.client_id
+                        });
                 theme::card(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
@@ -1604,26 +1619,40 @@ mod desktop {
                                     .color(theme::TEXT),
                             );
                             ui.label(
-                                egui::RichText::new(format!("ID {}", client.client_id))
-                                    .size(11.0)
-                                    .monospace()
-                                    .color(theme::MUTED),
+                                egui::RichText::new(format!(
+                                    "Connector {} · ID {}",
+                                    client.connector_id, client.client_id
+                                ))
+                                .size(11.0)
+                                .monospace()
+                                .color(theme::MUTED),
                             );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if confirming {
                                 if ui.add(theme::danger_button("Confirm delete")).clicked() {
-                                    client_action = Some((client.client_id.clone(), true));
+                                    client_action = Some((
+                                        client.connector_id.clone(),
+                                        client.client_id.clone(),
+                                        true,
+                                    ));
                                 }
                                 if ui.button("Cancel").clicked() {
                                     cancel_delete = true;
                                 }
                             } else {
                                 if ui.add(theme::danger_button("Delete…")).clicked() {
-                                    request_delete = Some(client.client_id.clone());
+                                    request_delete = Some((
+                                        client.connector_id.clone(),
+                                        client.client_id.clone(),
+                                    ));
                                 }
                                 if ui.button("Revoke tokens").clicked() {
-                                    client_action = Some((client.client_id.clone(), false));
+                                    client_action = Some((
+                                        client.connector_id.clone(),
+                                        client.client_id.clone(),
+                                        false,
+                                    ));
                                 }
                             }
                         });
@@ -1654,15 +1683,15 @@ mod desktop {
             if cancel_delete {
                 self.pending_client_delete = None;
             }
-            if let Some(client_id) = request_delete {
-                self.pending_client_delete = Some(client_id);
+            if let Some(client) = request_delete {
+                self.pending_client_delete = Some(client);
             }
-            if let Some((client, delete)) = client_action {
+            if let Some((connector_id, client_id, delete)) = client_action {
                 self.pending_client_delete = None;
                 let result = if delete {
-                    self.delete_oauth_client(&client)
+                    self.delete_oauth_client(&connector_id, &client_id)
                 } else {
-                    self.revoke_oauth_client(&client)
+                    self.revoke_oauth_client(&connector_id, &client_id)
                 };
                 self.apply_result(result);
             }
@@ -1693,15 +1722,18 @@ mod desktop {
                                     .color(theme::TEXT),
                             );
                             ui.label(
-                                egui::RichText::new(session.family_id.to_string())
-                                    .size(11.0)
-                                    .monospace()
-                                    .color(theme::MUTED),
+                                egui::RichText::new(format!(
+                                    "{} · {}",
+                                    session.connector_id, session.family_id
+                                ))
+                                .size(11.0)
+                                .monospace()
+                                .color(theme::MUTED),
                             );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if session.active && ui.add(theme::danger_button("Revoke")).clicked() {
-                                revoke = Some(session.family_id);
+                                revoke = Some((session.connector_id.clone(), session.family_id));
                             }
                             theme::status_badge(
                                 ui,

@@ -289,7 +289,8 @@ fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Resul
             }
             for client in clients {
                 println!(
-                    "{}  {}  issued={}  expires={}  last_used={}\n  scopes: {}\n  redirects: {}",
+                    "connector={}  {}  {}  issued={}  expires={}  last_used={}\n  scopes: {}\n  redirects: {}",
+                    client.connector_id,
                     client.client_id,
                     client.client_name,
                     client.issued_at.to_rfc3339(),
@@ -307,15 +308,23 @@ fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Resul
                 );
             }
         }
-        OauthClientCommand::Revoke { client_id } => {
-            let revoked = store.revoke_client_tokens(&client_id)?;
-            println!("Revoked {revoked} active OAuth token(s) for {client_id}.");
+        OauthClientCommand::Revoke {
+            connector_id,
+            client_id,
+        } => {
+            let revoked = store.revoke_client_tokens_for(&connector_id, &client_id)?;
+            println!("Revoked {revoked} active OAuth token(s) for {connector_id}/{client_id}.");
         }
-        OauthClientCommand::Delete { client_id } => {
-            if !store.delete_client(&client_id)? {
-                bail!("OAuth client was not found");
+        OauthClientCommand::Delete {
+            connector_id,
+            client_id,
+        } => {
+            if !store.delete_client_for(&connector_id, &client_id)? {
+                bail!("OAuth client was not found in the selected connector");
             }
-            println!("Deleted OAuth client {client_id} and its authorization state.");
+            println!(
+                "Deleted OAuth client {connector_id}/{client_id} and its authorization state."
+            );
         }
     }
     Ok(())
@@ -323,15 +332,19 @@ fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Resul
 
 fn oauth_sessions(store: &SqliteOAuthStore, command: OauthSessionCommand) -> Result<()> {
     match command {
-        OauthSessionCommand::List { client_id } => {
-            let sessions = store.sessions(client_id.as_deref())?;
+        OauthSessionCommand::List {
+            connector_id,
+            client_id,
+        } => {
+            let sessions = store.sessions_for(connector_id.as_deref(), client_id.as_deref())?;
             if sessions.is_empty() {
                 println!("No OAuth sessions were found.");
             }
             for session in sessions {
                 println!(
-                    "{}  client={}  active={}  expires={}\n  subject: {}\n  scopes: {}",
+                    "{}  connector={}  client={}  active={}  expires={}\n  subject: {}\n  scopes: {}",
                     session.family_id,
+                    session.connector_id,
                     session.client_id,
                     session.active,
                     session.expires_at.to_rfc3339(),
@@ -340,9 +353,12 @@ fn oauth_sessions(store: &SqliteOAuthStore, command: OauthSessionCommand) -> Res
                 );
             }
         }
-        OauthSessionCommand::Revoke { family_id } => {
-            let revoked = store.revoke_session(family_id)?;
-            println!("Revoked {revoked} active token(s) in session {family_id}.");
+        OauthSessionCommand::Revoke {
+            connector_id,
+            family_id,
+        } => {
+            let revoked = store.revoke_session_for(&connector_id, family_id)?;
+            println!("Revoked {revoked} active token(s) in session {connector_id}/{family_id}.");
         }
     }
     Ok(())
