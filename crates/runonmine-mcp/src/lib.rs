@@ -184,14 +184,7 @@ impl Runtime {
     }
 
     fn connector(&self) -> Result<ConnectorConfig> {
-        let config = AppConfig::load(&self.0.config_path)?;
-        let connector = config
-            .connector(&self.0.connector_id)
-            .context("connector is no longer configured")?;
-        if !connector.enabled {
-            bail!("connector is disabled");
-        }
-        Ok(connector.clone())
+        load_enabled_connector(&self.0.config_path, &self.0.connector_id)
     }
 
     fn acquire_session(&self) -> Result<SessionPermit> {
@@ -209,6 +202,20 @@ impl Runtime {
     fn approvals(&self) -> &ApprovalFlow {
         &self.0.approvals
     }
+}
+
+fn load_enabled_connector(
+    config_path: &std::path::Path,
+    connector_id: &str,
+) -> Result<ConnectorConfig> {
+    let config = AppConfig::load(config_path)?;
+    let connector = config
+        .connector(connector_id)
+        .context("connector is no longer configured")?;
+    if !connector.enabled {
+        bail!("connector is disabled");
+    }
+    Ok(connector.clone())
 }
 
 #[derive(Clone)]
@@ -614,6 +621,7 @@ impl RunOnMineServer {
         match response.result {
             HelperResult::Healthy {
                 allowlisted_programs,
+                ..
             } => Some(allowlisted_programs),
             _ => None,
         }
@@ -2061,5 +2069,28 @@ mod tests {
             validate_string_arguments(&vec!["x".to_owned(); MAX_ARGUMENT_ITEMS + 1], "args")
                 .is_err()
         );
+    }
+    #[test]
+    fn runtime_connector_gate_rejects_disable_and_removal_without_restart() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.toml");
+        let mut connector = ConnectorConfig::local_default();
+        connector.id = "live-connector".to_owned();
+        connector.name = "Live connector".to_owned();
+        let mut config = AppConfig {
+            connectors: vec![connector],
+            ..AppConfig::default()
+        };
+        config.save(&config_path)?;
+        assert!(load_enabled_connector(&config_path, "live-connector").is_ok());
+
+        config.connectors[0].enabled = false;
+        config.save(&config_path)?;
+        assert!(load_enabled_connector(&config_path, "live-connector").is_err());
+
+        config.connectors.clear();
+        config.save(&config_path)?;
+        assert!(load_enabled_connector(&config_path, "live-connector").is_err());
+        Ok(())
     }
 }

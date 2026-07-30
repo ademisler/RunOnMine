@@ -165,3 +165,10 @@ binds the newest event. Verification compares every denormalized SQLite column
 to the canonical event before accepting the chain. Version-3 databases never
 silently regenerate missing MAC data. See
 [`audit-security.md`](audit-security.md) for the exact trust boundary.
+
+Connector configuration is also a live revocation boundary. Runtime connector
+lookups reload the locked configuration and fail when an ID is disabled or no
+longer present. Successful disable/removal then reconciles the transport plane:
+a detected HTTP agent is explicitly restarted and must publish a fresh version
+handshake. This closes protocol sessions and tears down managed tunnel process
+groups rather than waiting for an operator restart.

@@ -153,3 +153,26 @@ runonmine connect remove <id> --confirm REMOVE
 ## OAuth connector isolation
 
 OAuth state is connector-scoped. A client registered through one named-tunnel issuer cannot be looked up, authorized, refreshed, revoked, or reused through another connector that shares the same local state database. Administrative client and session listings show the owning connector, and revoke/delete operations require that connector identity. The schema-v4 migration intentionally removes namespace-free beta OAuth clients and sessions because they cannot be assigned safely to an issuer; affected clients must register and complete owner consent again.
+
+## Immediate disable and removal
+
+Disabling or removing a connector is a live revocation operation. The committed
+configuration is the authorization source of truth: the MCP runtime reloads the
+connector before exposing or authorizing tools, so a missing or disabled
+connector is rejected immediately even before process reconciliation finishes.
+
+After the configuration transaction succeeds, the CLI checks the owner-only
+agent runtime marker. When an HTTP agent is running, RunOnMine performs the
+platform-specific explicit restart and waits for the fresh protocol/package/PID
+handshake. Restarting the owning agent closes its MCP sessions and drops every
+managed Cloudflare/OpenAI child-process handle, whose shutdown path terminates
+the corresponding process group. The command does not print a manual restart
+instruction and does not report success if a detected running agent cannot be
+restarted and verified.
+
+If no runtime marker exists, no managed HTTP agent is active and no restart is
+required. A malformed or symlinked marker fails closed. Connector mutation is
+performed before reconciliation; if the service-manager restart itself fails,
+the connector remains disabled/removed in configuration, so subsequent runtime
+checks continue to deny access while the local error instructs the owner to
+repair the service before reconnecting.
