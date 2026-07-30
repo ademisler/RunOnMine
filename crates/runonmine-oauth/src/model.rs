@@ -227,6 +227,15 @@ pub struct PendingAuthorization {
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]
+pub struct AuthorizationClaim {
+    pub claim_id: Uuid,
+    pub provider_code_hash: SecretHash,
+    pub pending: PendingAuthorization,
+    pub claim_expires_at: DateTime<Utc>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
 pub struct PendingConsent {
     pub id: Uuid,
     pub csrf_hash: SecretHash,

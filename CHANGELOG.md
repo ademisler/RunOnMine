@@ -5,6 +5,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Make GitHub OAuth callback recovery replay-safe with short-lived state+code claims, bounded user-endpoint retries, atomic consent completion, and explicit root-only issuer deployment.
+
 ### Security
 
 - Preserve sanitized internal diagnostics without widening remote errors: MCP tool, authorization, approval, audit, storage, browser, helper and output failures now carry request/incident correlation and audit UUIDs when available; OAuth storage failures log bounded request/connector/category/operation fields while public OAuth bodies remain unchanged. Raw causes, arguments and secrets are excluded from these structured failure logs.

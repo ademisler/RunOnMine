@@ -10,12 +10,13 @@ use uuid::Uuid;
 
 use crate::crypto::verify_pkce;
 use crate::model::{
-    AccessGrant, AuthorizationCodeGrant, OAuthSession, PendingAuthorization, PendingConsent,
-    RegisteredClient, RegistrationLimits, RegistrationOutcome, TokenGrant, TokenPairDraft,
+    AccessGrant, AuthorizationClaim, AuthorizationCodeGrant, OAuthSession, PendingAuthorization,
+    PendingConsent, RegisteredClient, RegistrationLimits, RegistrationOutcome, TokenGrant,
+    TokenPairDraft,
 };
 use crate::{ScopeSet, SecretHash, StoreError};
 
-const OAUTH_SCHEMA_VERSION: i64 = 4;
+const OAUTH_SCHEMA_VERSION: i64 = 6;
 const TEST_CONNECTOR_ID: &str = "test-connector";
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -112,11 +113,30 @@ pub trait OAuthStore: Send + Sync {
         expires_at: DateTime<Utc>,
     ) -> Result<bool, StoreError>;
     fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError>;
-    fn take_authorization(
+    fn claim_authorization(
         &self,
         state_hash: &SecretHash,
+        provider_code_hash: &SecretHash,
+        claim_id: Uuid,
         now: DateTime<Utc>,
-    ) -> Result<PendingAuthorization, StoreError>;
+        claim_expires_at: DateTime<Utc>,
+    ) -> Result<AuthorizationClaim, StoreError>;
+    fn release_authorization_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
+    fn consume_authorization_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
+    fn complete_authorization_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        consent: &PendingConsent,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
     fn put_consent(&self, pending: &PendingConsent) -> Result<(), StoreError>;
     fn take_consent(
         &self,
@@ -448,6 +468,7 @@ fn migrate_oauth_schema(connection: &mut Connection, current: i64) -> Result<(),
     migrate_registered_clients(&transaction)?;
     migrate_connector_namespace(&transaction, current)?;
     create_oauth_tables(&transaction)?;
+    migrate_authorization_claims(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -487,6 +508,25 @@ fn migrate_registration_attempts(connection: &Connection) -> Result<(), StoreErr
         // Historical attempts cannot be assigned safely to one connector.
         // Recreate this short-lived limiter table with an explicit namespace.
         connection.execute("DROP TABLE oauth_registration_attempts", [])?;
+    }
+    Ok(())
+}
+
+fn migrate_authorization_claims(connection: &Connection) -> Result<(), StoreError> {
+    if !table_exists(connection, "oauth_authorizations")? {
+        return Ok(());
+    }
+    for (column, definition) in [
+        ("provider_code_hash", "BLOB"),
+        ("claim_id", "TEXT"),
+        ("claim_expires_at", "INTEGER"),
+    ] {
+        if !table_has_column(connection, "oauth_authorizations", column)? {
+            connection.execute(
+                &format!("ALTER TABLE oauth_authorizations ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
@@ -559,7 +599,10 @@ fn create_oauth_tables(connection: &Connection) -> Result<(), StoreError> {
             client_state TEXT NOT NULL,
             scopes TEXT NOT NULL,
             code_challenge TEXT NOT NULL,
-            expires_at INTEGER NOT NULL
+            expires_at INTEGER NOT NULL,
+            provider_code_hash BLOB,
+            claim_id TEXT,
+            claim_expires_at INTEGER
          );
          CREATE TABLE IF NOT EXISTS oauth_consents (
             id TEXT PRIMARY KEY,
@@ -816,23 +859,209 @@ impl OAuthStore for SqliteOAuthStore {
         })
     }
 
-    fn take_authorization(
+    fn claim_authorization(
         &self,
         state_hash: &SecretHash,
+        provider_code_hash: &SecretHash,
+        claim_id: Uuid,
         now: DateTime<Utc>,
-    ) -> Result<PendingAuthorization, StoreError> {
-        let original_hash = *state_hash;
+        claim_expires_at: DateTime<Utc>,
+    ) -> Result<AuthorizationClaim, StoreError> {
+        if claim_expires_at <= now {
+            return Err(StoreError::InvalidGrant);
+        }
+        let original_state_hash = *state_hash;
+        let original_code_hash = *provider_code_hash;
         let state_hash = self.namespaced_hash(state_hash)?;
+        let provider_code_hash = self.namespaced_hash(provider_code_hash)?;
         self.call(move |connection| {
-            let transaction = connection.transaction()?;
-            transaction.execute("DELETE FROM oauth_authorizations WHERE expires_at <= ?1", [now.timestamp()])?;
-            let pending = transaction.query_row(
-                "SELECT client_id, redirect_uri, client_state, scopes, code_challenge, expires_at FROM oauth_authorizations WHERE provider_state_hash = ?1",
-                [state_hash.as_bytes().as_slice()], map_authorization,
-            ).optional()?.ok_or(StoreError::NotFound)?;
-            transaction.execute("DELETE FROM oauth_authorizations WHERE provider_state_hash = ?1", [state_hash.as_bytes().as_slice()])?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute(
+                "DELETE FROM oauth_authorizations WHERE expires_at <= ?1",
+                [now.timestamp()],
+            )?;
+            let row = transaction
+                .query_row(
+                    "SELECT client_id, redirect_uri, client_state, scopes, code_challenge,
+                            expires_at, provider_code_hash, claim_id, claim_expires_at
+                     FROM oauth_authorizations WHERE provider_state_hash = ?1",
+                    [state_hash.as_bytes().as_slice()],
+                    map_authorization_claim_row,
+                )
+                .optional()?
+                .ok_or(StoreError::NotFound)?;
+            let (pending, stored_code_hash, active_claim_id, active_claim_expires_at) = row;
+            if let Some(stored_code_hash) = stored_code_hash {
+                let stored_code_hash = SecretHash::from_slice(&stored_code_hash)?;
+                if !stored_code_hash.constant_time_eq(&provider_code_hash) {
+                    return Err(StoreError::InvalidGrant);
+                }
+            }
+            if active_claim_id.is_some()
+                && active_claim_expires_at.is_some_and(|expires_at| expires_at > now.timestamp())
+            {
+                return Err(StoreError::InvalidGrant);
+            }
+            let effective_claim_expiry = claim_expires_at.min(pending.expires_at);
+            let changed = transaction.execute(
+                "UPDATE oauth_authorizations
+                 SET provider_code_hash = ?1, claim_id = ?2, claim_expires_at = ?3
+                 WHERE provider_state_hash = ?4 AND expires_at > ?5",
+                params![
+                    provider_code_hash.as_bytes().as_slice(),
+                    claim_id.to_string(),
+                    effective_claim_expiry.timestamp(),
+                    state_hash.as_bytes().as_slice(),
+                    now.timestamp(),
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidGrant);
+            }
             transaction.commit()?;
-            Ok(PendingAuthorization { provider_state_hash: original_hash, ..pending })
+            Ok(AuthorizationClaim {
+                claim_id,
+                provider_code_hash: original_code_hash,
+                pending: PendingAuthorization {
+                    provider_state_hash: original_state_hash,
+                    ..pending
+                },
+                claim_expires_at: effective_claim_expiry,
+            })
+        })
+    }
+
+    fn release_authorization_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let state_hash = self.namespaced_hash(&claim.pending.provider_state_hash)?;
+        let provider_code_hash = self.namespaced_hash(&claim.provider_code_hash)?;
+        let claim_id = claim.claim_id.to_string();
+        self.call(move |connection| {
+            let changed = connection.execute(
+                "UPDATE oauth_authorizations
+                 SET claim_id = NULL, claim_expires_at = NULL
+                 WHERE provider_state_hash = ?1 AND provider_code_hash = ?2
+                   AND claim_id = ?3 AND expires_at > ?4",
+                params![
+                    state_hash.as_bytes().as_slice(),
+                    provider_code_hash.as_bytes().as_slice(),
+                    claim_id,
+                    now.timestamp(),
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidGrant);
+            }
+            Ok(())
+        })
+    }
+
+    fn consume_authorization_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let state_hash = self.namespaced_hash(&claim.pending.provider_state_hash)?;
+        let provider_code_hash = self.namespaced_hash(&claim.provider_code_hash)?;
+        let claim_id = claim.claim_id.to_string();
+        self.call(move |connection| {
+            let changed = connection.execute(
+                "DELETE FROM oauth_authorizations
+                 WHERE provider_state_hash = ?1 AND provider_code_hash = ?2
+                   AND claim_id = ?3 AND expires_at > ?4",
+                params![
+                    state_hash.as_bytes().as_slice(),
+                    provider_code_hash.as_bytes().as_slice(),
+                    claim_id,
+                    now.timestamp(),
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidGrant);
+            }
+            Ok(())
+        })
+    }
+
+    fn complete_authorization_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        consent: &PendingConsent,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        if consent.client_id != claim.pending.client_id
+            || consent.redirect_uri != claim.pending.redirect_uri
+            || consent.client_state != claim.pending.client_state
+            || consent.scopes != claim.pending.scopes
+            || consent.code_challenge != claim.pending.code_challenge
+        {
+            return Err(StoreError::Corrupt(
+                "authorization claim and consent do not match",
+            ));
+        }
+        let state_hash = self.namespaced_hash(&claim.pending.provider_state_hash)?;
+        let provider_code_hash = self.namespaced_hash(&claim.provider_code_hash)?;
+        let claim_id = claim.claim_id.to_string();
+        let mut consent = consent.clone();
+        let connector_id = self.scoped_connector_id()?.to_owned();
+        consent.csrf_hash = namespace_hash(&connector_id, &consent.csrf_hash)?;
+        self.call(move |connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let claim_exists = transaction
+                .query_row(
+                    "SELECT 1 FROM oauth_authorizations
+                     WHERE provider_state_hash = ?1 AND provider_code_hash = ?2
+                       AND claim_id = ?3 AND claim_expires_at > ?4 AND expires_at > ?4",
+                    params![
+                        state_hash.as_bytes().as_slice(),
+                        provider_code_hash.as_bytes().as_slice(),
+                        claim_id,
+                        now.timestamp(),
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !claim_exists {
+                return Err(StoreError::InvalidGrant);
+            }
+            transaction.execute(
+                "INSERT INTO oauth_consents
+                 (id, csrf_hash, client_id, redirect_uri, client_state, scopes,
+                  code_challenge, subject, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    consent.id.to_string(),
+                    consent.csrf_hash.as_bytes().as_slice(),
+                    consent.client_id,
+                    consent.redirect_uri.as_str(),
+                    consent.client_state,
+                    consent.scopes.to_space_delimited(),
+                    consent.code_challenge,
+                    consent.subject,
+                    consent.expires_at.timestamp(),
+                ],
+            )?;
+            let removed = transaction.execute(
+                "DELETE FROM oauth_authorizations
+                 WHERE provider_state_hash = ?1 AND provider_code_hash = ?2
+                   AND claim_id = ?3",
+                params![
+                    state_hash.as_bytes().as_slice(),
+                    provider_code_hash.as_bytes().as_slice(),
+                    claim_id,
+                ],
+            )?;
+            if removed != 1 {
+                return Err(StoreError::InvalidGrant);
+            }
+            transaction.commit()?;
+            Ok(())
         })
     }
 
@@ -1167,6 +1396,22 @@ fn cleanup_expired_connection(
     removed += prune_expired_clients(&transaction, None, now)?;
     transaction.commit()?;
     Ok(removed)
+}
+
+type AuthorizationClaimRow = (
+    PendingAuthorization,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<i64>,
+);
+
+fn map_authorization_claim_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthorizationClaimRow> {
+    Ok((
+        map_authorization(row)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+    ))
 }
 
 fn map_authorization(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingAuthorization> {
@@ -1572,6 +1817,153 @@ mod tests {
         })
     }
 
+    fn authorization_fixture(
+        store: &SqliteOAuthStore,
+        state_hash: SecretHash,
+        now: DateTime<Utc>,
+    ) -> Result<RegisteredClient, StoreError> {
+        let client = registered_client(
+            "authorization-client",
+            "authorization-source",
+            now,
+            now + chrono::Duration::days(1),
+        );
+        let limits = RegistrationLimits {
+            now,
+            window_seconds: 60,
+            per_source_limit: 5,
+            global_limit: 20,
+            max_clients: 256,
+        };
+        assert_eq!(
+            store.register_client_limited(&client, &limits)?,
+            RegistrationOutcome::Registered
+        );
+        store.put_authorization(&PendingAuthorization {
+            provider_state_hash: state_hash,
+            client_id: client.client_id.clone(),
+            redirect_uri: client.redirect_uris[0].clone(),
+            client_state: "client-state".to_owned(),
+            scopes: ScopeSet::machine_read(),
+            code_challenge: "challenge-value".to_owned(),
+            expires_at: now + chrono::Duration::minutes(10),
+        })?;
+        Ok(client)
+    }
+
+    #[test]
+    fn authorization_claim_release_retry_and_completion_are_replay_safe() -> Result<(), StoreError>
+    {
+        let store = SqliteOAuthStore::in_memory()?;
+        let now = Utc::now();
+        let state_hash = SecretHash::from_slice(&[21_u8; 32])?;
+        let code_hash = SecretHash::from_slice(&[22_u8; 32])?;
+        let wrong_code_hash = SecretHash::from_slice(&[23_u8; 32])?;
+        let client = authorization_fixture(&store, state_hash, now)?;
+        let claim = store.claim_authorization(
+            &state_hash,
+            &code_hash,
+            Uuid::new_v4(),
+            now,
+            now + chrono::Duration::minutes(2),
+        )?;
+        assert!(matches!(
+            store.claim_authorization(
+                &state_hash,
+                &code_hash,
+                Uuid::new_v4(),
+                now,
+                now + chrono::Duration::minutes(2),
+            ),
+            Err(StoreError::InvalidGrant)
+        ));
+        store.release_authorization_claim(&claim, now)?;
+        assert!(matches!(
+            store.claim_authorization(
+                &state_hash,
+                &wrong_code_hash,
+                Uuid::new_v4(),
+                now,
+                now + chrono::Duration::minutes(2),
+            ),
+            Err(StoreError::InvalidGrant)
+        ));
+        let retry_claim = store.claim_authorization(
+            &state_hash,
+            &code_hash,
+            Uuid::new_v4(),
+            now,
+            now + chrono::Duration::minutes(2),
+        )?;
+        let consent = PendingConsent {
+            id: Uuid::new_v4(),
+            csrf_hash: SecretHash::from_slice(&[24_u8; 32])?,
+            client_id: client.client_id,
+            redirect_uri: retry_claim.pending.redirect_uri.clone(),
+            client_state: retry_claim.pending.client_state.clone(),
+            scopes: retry_claim.pending.scopes.clone(),
+            code_challenge: retry_claim.pending.code_challenge.clone(),
+            subject: "github:42".to_owned(),
+            expires_at: now + chrono::Duration::minutes(5),
+        };
+        store.complete_authorization_claim(&retry_claim, &consent, now)?;
+        assert!(matches!(
+            store.claim_authorization(
+                &state_hash,
+                &code_hash,
+                Uuid::new_v4(),
+                now,
+                now + chrono::Duration::minutes(2),
+            ),
+            Err(StoreError::NotFound)
+        ));
+        assert_eq!(
+            store
+                .take_consent(consent.id, &consent.csrf_hash, now)?
+                .subject,
+            "github:42"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_authorization_claim_can_be_reclaimed_only_with_the_bound_code()
+    -> Result<(), StoreError> {
+        let store = SqliteOAuthStore::in_memory()?;
+        let now = Utc::now();
+        let state_hash = SecretHash::from_slice(&[31_u8; 32])?;
+        let code_hash = SecretHash::from_slice(&[32_u8; 32])?;
+        let wrong_code_hash = SecretHash::from_slice(&[33_u8; 32])?;
+        authorization_fixture(&store, state_hash, now)?;
+        let _claim = store.claim_authorization(
+            &state_hash,
+            &code_hash,
+            Uuid::new_v4(),
+            now,
+            now + chrono::Duration::seconds(1),
+        )?;
+        let later = now + chrono::Duration::seconds(2);
+        assert!(matches!(
+            store.claim_authorization(
+                &state_hash,
+                &wrong_code_hash,
+                Uuid::new_v4(),
+                later,
+                later + chrono::Duration::minutes(1),
+            ),
+            Err(StoreError::InvalidGrant)
+        ));
+        let reclaimed = store.claim_authorization(
+            &state_hash,
+            &code_hash,
+            Uuid::new_v4(),
+            later,
+            later + chrono::Duration::minutes(1),
+        )?;
+        store.consume_authorization_claim(&reclaimed, later)?;
+        Ok(())
+    }
+
     #[test]
     fn connector_namespaces_isolate_clients_and_authorizations() -> Result<(), StoreError> {
         let fixture = namespace_fixture()?;
@@ -1627,14 +2019,28 @@ mod tests {
         assert_eq!(
             fixture
                 .connector_a
-                .take_authorization(&raw_state, fixture.now)?
+                .claim_authorization(
+                    &raw_state,
+                    &SecretHash::from_slice(&[12_u8; 32])?,
+                    Uuid::new_v4(),
+                    fixture.now,
+                    fixture.now + chrono::Duration::minutes(1),
+                )?
+                .pending
                 .client_id,
             fixture.client_a.client_id
         );
         assert_eq!(
             fixture
                 .connector_b
-                .take_authorization(&raw_state, fixture.now)?
+                .claim_authorization(
+                    &raw_state,
+                    &SecretHash::from_slice(&[12_u8; 32])?,
+                    Uuid::new_v4(),
+                    fixture.now,
+                    fixture.now + chrono::Duration::minutes(1),
+                )?
+                .pending
                 .client_id,
             fixture.client_b.client_id
         );

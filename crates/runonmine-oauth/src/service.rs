@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::crypto::validate_pkce_challenge;
 use crate::diagnostics;
 use crate::model::{
-    AuthorizationCodeGrant, ConsentChallenge, PendingAuthorization, PendingConsent,
-    RegisteredClient, RegistrationLimits, RegistrationOutcome, TokenGrant, TokenPairDraft,
+    AuthorizationClaim, AuthorizationCodeGrant, ConsentChallenge, PendingAuthorization,
+    PendingConsent, RegisteredClient, RegistrationLimits, RegistrationOutcome, TokenGrant,
+    TokenPairDraft,
 };
 use crate::{
     AccessGrant, AuthorizationRequest, AuthorizationServerMetadata, ConsentDecision, ConsentResult,
@@ -26,6 +27,7 @@ use crate::{
 const ACCESS_TOKEN_TTL: Duration = Duration::minutes(15);
 const REFRESH_TOKEN_TTL: Duration = Duration::days(30);
 const AUTHORIZATION_TRANSACTION_TTL: Duration = Duration::minutes(10);
+const AUTHORIZATION_CLAIM_TTL: Duration = Duration::seconds(30);
 const CONSENT_TTL: Duration = Duration::minutes(5);
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
 const REGISTRATION_WINDOW_SECONDS: i64 = 60;
@@ -68,6 +70,15 @@ impl OAuthServiceConfig {
         }
         Ok(())
     }
+}
+
+struct GitHubCallbackPreparation {
+    client: RegisteredClient,
+    csrf: SecretString,
+    consent_id: Uuid,
+    client_id_fingerprint: String,
+    requested_redirect_origin: String,
+    registered_redirect_origins: Vec<String>,
 }
 
 pub struct OAuthService {
@@ -341,61 +352,136 @@ impl OAuthService {
         &self,
         callback: GitHubCallback,
     ) -> Result<ConsentChallenge, OAuthError> {
-        if callback.state.len() > 1_024 || callback.code.is_empty() || callback.code.len() > 2_048 {
-            return Err(OAuthError::invalid_request());
-        }
-        let pending = self
-            .store
-            .take_authorization(
-                &self.hasher.hash(HashPurpose::GitHubState, &callback.state),
-                Utc::now(),
-            )
-            .map_err(|error| match error {
-                StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
-                unexpected => self.store_server_error("take_authorization", &unexpected),
-            })?;
-        let identity = self
+        let claim = self.claim_github_authorization(&callback)?;
+        let prepared = self.prepare_github_callback(&claim)?;
+        let identity = match self
             .github
             .verify_code(
                 SecretString::from(callback.code),
                 &self.config.github_callback_url,
             )
-            .await?;
-        let client = self
-            .store
-            .client(&pending.client_id)
-            .map_err(|error| self.store_server_error("load_callback_client", &error))?
-            .ok_or_else(OAuthError::invalid_client)?;
-        let csrf = generate_secret()?;
-        let id = Uuid::new_v4();
-        let requested_redirect_origin = redirect_origin(&pending.redirect_uri)?;
-        let registered_redirect_origins = registered_redirect_origins(&client.redirect_uris)?;
-        let client_id_fingerprint = client_id_fingerprint(&client.client_id);
+            .await
+        {
+            Ok(identity) => identity,
+            Err(error) => return Err(self.settle_github_verification_error(&claim, error)?),
+        };
+
+        let consent = PendingConsent {
+            id: prepared.consent_id,
+            csrf_hash: self
+                .hasher
+                .hash(HashPurpose::ConsentCsrf, prepared.csrf.expose_secret()),
+            client_id: claim.pending.client_id.clone(),
+            redirect_uri: claim.pending.redirect_uri.clone(),
+            client_state: claim.pending.client_state.clone(),
+            scopes: claim.pending.scopes.clone(),
+            code_challenge: claim.pending.code_challenge.clone(),
+            subject: format!("github:{}", identity.id),
+            expires_at: Utc::now() + CONSENT_TTL,
+        };
         self.store
-            .put_consent(&PendingConsent {
-                id,
-                csrf_hash: self
-                    .hasher
-                    .hash(HashPurpose::ConsentCsrf, csrf.expose_secret()),
-                client_id: pending.client_id,
-                redirect_uri: pending.redirect_uri,
-                client_state: pending.client_state,
-                scopes: pending.scopes.clone(),
-                code_challenge: pending.code_challenge,
-                subject: format!("github:{}", identity.id),
-                expires_at: Utc::now() + CONSENT_TTL,
-            })
-            .map_err(|error| self.store_server_error("store_consent", &error))?;
+            .complete_authorization_claim(&claim, &consent, Utc::now())
+            .map_err(|error| self.store_server_error("complete_authorization_claim", &error))?;
+
         Ok(ConsentChallenge {
-            id,
-            csrf,
-            claimed_client_name: client.client_name,
-            client_id_fingerprint,
-            registered_at: client.issued_at,
-            requested_redirect_origin,
-            registered_redirect_origins,
-            scopes: pending.scopes,
+            id: prepared.consent_id,
+            csrf: prepared.csrf,
+            claimed_client_name: prepared.client.client_name,
+            client_id_fingerprint: prepared.client_id_fingerprint,
+            registered_at: prepared.client.issued_at,
+            requested_redirect_origin: prepared.requested_redirect_origin,
+            registered_redirect_origins: prepared.registered_redirect_origins,
+            scopes: claim.pending.scopes,
         })
+    }
+
+    fn claim_github_authorization(
+        &self,
+        callback: &GitHubCallback,
+    ) -> Result<AuthorizationClaim, OAuthError> {
+        if callback.state.len() > 1_024 || callback.code.is_empty() || callback.code.len() > 2_048 {
+            return Err(OAuthError::invalid_request());
+        }
+        let now = Utc::now();
+        self.store
+            .claim_authorization(
+                &self.hasher.hash(HashPurpose::GitHubState, &callback.state),
+                &self.hasher.hash(HashPurpose::GitHubCode, &callback.code),
+                Uuid::new_v4(),
+                now,
+                now + AUTHORIZATION_CLAIM_TTL,
+            )
+            .map_err(|error| match error {
+                StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
+                unexpected => self.store_server_error("claim_authorization", &unexpected),
+            })
+    }
+
+    fn prepare_github_callback(
+        &self,
+        claim: &AuthorizationClaim,
+    ) -> Result<GitHubCallbackPreparation, OAuthError> {
+        let client = match self.store.client(&claim.pending.client_id) {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                self.consume_callback_claim(claim, "consume_missing_callback_client")?;
+                return Err(OAuthError::invalid_client());
+            }
+            Err(error) => {
+                self.release_callback_claim(claim, "release_callback_client_claim")?;
+                return Err(self.store_server_error("load_callback_client", &error));
+            }
+        };
+        let prepared = (|| {
+            Ok(GitHubCallbackPreparation {
+                client_id_fingerprint: client_id_fingerprint(&client.client_id),
+                requested_redirect_origin: redirect_origin(&claim.pending.redirect_uri)?,
+                registered_redirect_origins: registered_redirect_origins(&client.redirect_uris)?,
+                csrf: generate_secret()?,
+                consent_id: Uuid::new_v4(),
+                client,
+            })
+        })();
+        match prepared {
+            Ok(prepared) => Ok(prepared),
+            Err(error) => {
+                self.release_callback_claim(claim, "release_callback_preparation_claim")?;
+                Err(error)
+            }
+        }
+    }
+
+    fn settle_github_verification_error(
+        &self,
+        claim: &AuthorizationClaim,
+        error: OAuthError,
+    ) -> Result<OAuthError, OAuthError> {
+        if error.code == crate::OAuthErrorCode::TemporarilyUnavailable {
+            self.release_callback_claim(claim, "release_transient_github_claim")?;
+        } else {
+            self.consume_callback_claim(claim, "consume_terminal_github_claim")?;
+        }
+        Ok(error)
+    }
+
+    fn release_callback_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        operation: &'static str,
+    ) -> Result<(), OAuthError> {
+        self.store
+            .release_authorization_claim(claim, Utc::now())
+            .map_err(|error| self.store_server_error(operation, &error))
+    }
+
+    fn consume_callback_claim(
+        &self,
+        claim: &AuthorizationClaim,
+        operation: &'static str,
+    ) -> Result<(), OAuthError> {
+        self.store
+            .consume_authorization_claim(claim, Utc::now())
+            .map_err(|error| self.store_server_error(operation, &error))
     }
 
     pub fn submit_consent(
@@ -717,6 +803,8 @@ mod tests {
     use async_trait::async_trait;
     use base64::Engine;
     use sha2::{Digest, Sha256};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
 
     const TEST_REGISTRATION_TOKEN: &str =
         "test-registration-access-token-with-more-than-thirty-two-bytes";
@@ -738,7 +826,52 @@ mod tests {
         }
     }
 
-    fn service_with_store(store: Arc<dyn OAuthStore>) -> Result<OAuthService, OAuthError> {
+    #[derive(Debug)]
+    struct SequenceVerifier {
+        responses: Mutex<VecDeque<Result<GitHubIdentity, OAuthError>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SequenceVerifier {
+        fn new(responses: impl IntoIterator<Item = Result<GitHubIdentity, OAuthError>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl GitHubOwnerVerifier for SequenceVerifier {
+        async fn verify_code(
+            &self,
+            _code: SecretString,
+            _callback_url: &Url,
+        ) -> Result<GitHubIdentity, OAuthError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.responses
+                .lock()
+                .map_err(|_| OAuthError::server())?
+                .pop_front()
+                .unwrap_or_else(|| Err(OAuthError::server()))
+        }
+    }
+
+    fn owner_identity() -> GitHubIdentity {
+        GitHubIdentity {
+            id: 42,
+            login: "owner".to_owned(),
+        }
+    }
+
+    fn service_with_store_and_verifier(
+        store: Arc<dyn OAuthStore>,
+        github: Arc<dyn GitHubOwnerVerifier>,
+    ) -> Result<OAuthService, OAuthError> {
         let config = OAuthServiceConfig {
             connector_id: "test-connector".to_owned(),
             issuer: Url::parse("https://mine.example").map_err(|_| OAuthError::configuration())?,
@@ -753,8 +886,12 @@ mod tests {
             store,
             TokenHasher::new([9_u8; 32])?,
             &SecretString::from(TEST_REGISTRATION_TOKEN.to_owned()),
-            Arc::new(Owner),
+            github,
         )
+    }
+
+    fn service_with_store(store: Arc<dyn OAuthStore>) -> Result<OAuthService, OAuthError> {
+        service_with_store_and_verifier(store, Arc::new(Owner))
     }
 
     fn service() -> Result<OAuthService, OAuthError> {
@@ -797,6 +934,26 @@ mod tests {
 
     fn register(service: &OAuthService) -> Result<DynamicClientResponse, OAuthError> {
         register_from_source(service, "test-source")
+    }
+
+    fn begin_test_authorization(
+        service: &OAuthService,
+        client_id: &str,
+    ) -> Result<GitHubAuthorization, OAuthError> {
+        service.begin_authorization(AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: client_id.to_owned(),
+            redirect_uri: Url::parse("https://client.example/callback")
+                .map_err(|_| OAuthError::invalid_request())?,
+            scope: "machine:read files:read".to_owned(),
+            state: "client-csrf-state-retry-123456789".to_owned(),
+            code_challenge: challenge(&verifier()),
+            code_challenge_method: "S256".to_owned(),
+            resource: Some(
+                Url::parse("https://mine.example/mcp")
+                    .map_err(|_| OAuthError::invalid_request())?,
+            ),
+        })
     }
 
     async fn authorize(service: &OAuthService, client_id: &str) -> Result<String, OAuthError> {
@@ -958,6 +1115,136 @@ mod tests {
             result,
             Err(error) if error.code == crate::OAuthErrorCode::InvalidScope
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transient_provider_failure_releases_bound_claim_for_same_code_retry()
+    -> Result<(), OAuthError> {
+        let store = Arc::new(
+            SqliteOAuthStore::in_memory().map_err(|error| map_store_server_error(&error))?,
+        );
+        let verifier = Arc::new(SequenceVerifier::new([
+            Err(OAuthError::temporarily_unavailable()),
+            Ok(owner_identity()),
+        ]));
+        let service = service_with_store_and_verifier(store, verifier.clone())?;
+        let client = register(&service)?;
+        let start = begin_test_authorization(&service, &client.client_id)?;
+        let state = start.provider_state.expose_secret().to_owned();
+
+        let first = service
+            .complete_github_callback(GitHubCallback {
+                code: "retry-code".to_owned(),
+                state: state.clone(),
+            })
+            .await;
+        assert!(matches!(
+            first,
+            Err(error) if error.code == crate::OAuthErrorCode::TemporarilyUnavailable
+        ));
+
+        let consent = service
+            .complete_github_callback(GitHubCallback {
+                code: "retry-code".to_owned(),
+                state: state.clone(),
+            })
+            .await?;
+        assert_eq!(
+            consent.scopes.to_space_delimited(),
+            "machine:read files:read"
+        );
+        assert_eq!(verifier.call_count(), 2);
+
+        let replay = service
+            .complete_github_callback(GitHubCallback {
+                code: "retry-code".to_owned(),
+                state,
+            })
+            .await;
+        assert!(matches!(
+            replay,
+            Err(error) if error.code == crate::OAuthErrorCode::AccessDenied
+        ));
+        assert_eq!(verifier.call_count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transient_retry_is_bound_to_the_original_provider_code() -> Result<(), OAuthError> {
+        let store = Arc::new(
+            SqliteOAuthStore::in_memory().map_err(|error| map_store_server_error(&error))?,
+        );
+        let verifier = Arc::new(SequenceVerifier::new([
+            Err(OAuthError::temporarily_unavailable()),
+            Ok(owner_identity()),
+        ]));
+        let service = service_with_store_and_verifier(store, verifier.clone())?;
+        let client = register(&service)?;
+        let start = begin_test_authorization(&service, &client.client_id)?;
+        let state = start.provider_state.expose_secret().to_owned();
+
+        let first = service
+            .complete_github_callback(GitHubCallback {
+                code: "bound-code".to_owned(),
+                state: state.clone(),
+            })
+            .await;
+        assert!(matches!(
+            first,
+            Err(error) if error.code == crate::OAuthErrorCode::TemporarilyUnavailable
+        ));
+
+        let wrong_code = service
+            .complete_github_callback(GitHubCallback {
+                code: "different-code".to_owned(),
+                state: state.clone(),
+            })
+            .await;
+        assert!(matches!(
+            wrong_code,
+            Err(error) if error.code == crate::OAuthErrorCode::AccessDenied
+        ));
+        assert_eq!(verifier.call_count(), 1);
+
+        service
+            .complete_github_callback(GitHubCallback {
+                code: "bound-code".to_owned(),
+                state,
+            })
+            .await?;
+        assert_eq!(verifier.call_count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_provider_failure_consumes_state_and_blocks_replay() -> Result<(), OAuthError>
+    {
+        let store = Arc::new(
+            SqliteOAuthStore::in_memory().map_err(|error| map_store_server_error(&error))?,
+        );
+        let verifier = Arc::new(SequenceVerifier::new([
+            Err(OAuthError::access_denied()),
+            Ok(owner_identity()),
+        ]));
+        let service = service_with_store_and_verifier(store, verifier.clone())?;
+        let client = register(&service)?;
+        let start = begin_test_authorization(&service, &client.client_id)?;
+        let state = start.provider_state.expose_secret().to_owned();
+
+        for _ in 0..2 {
+            let denied = service
+                .complete_github_callback(GitHubCallback {
+                    code: "terminal-code".to_owned(),
+                    state: state.clone(),
+                })
+                .await;
+            assert!(matches!(
+                denied,
+                Err(error) if error.code == crate::OAuthErrorCode::AccessDenied
+            ));
+        }
+        assert_eq!(verifier.call_count(), 1);
         Ok(())
     }
 

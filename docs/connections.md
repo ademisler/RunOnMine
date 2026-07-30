@@ -244,6 +244,12 @@ runonmine connect pin-external-binaries
 runonmine connect remove <id> --confirm REMOVE
 ```
 
+## OAuth callback retry and issuer deployment
+
+OAuth issuers are intentionally root-only. A configured issuer such as `https://host.example/prefix` is rejected rather than partially supported; metadata and OAuth endpoints are derived from the root origin.
+
+A GitHub callback first claims pending authorization state with a short lease bound to a domain-separated hash of the provider code. Only one callback can hold the claim. A different code can never replace the bound code. Temporary provider failures release the claim so the same state and code can be retried; terminal denial consumes it. The one-time code exchange itself is not blindly replayed, while the authenticated `/user` lookup has a bounded retry for transport, rate-limit, and server failures. On success, consent insertion and authorization-state deletion occur in one SQLite transaction.
+
 ## OAuth connector isolation
 
 OAuth state is connector-scoped. A client registered through one named-tunnel issuer cannot be looked up, authorized, refreshed, revoked, or reused through another connector that shares the same local state database. Administrative client and session listings show the owning connector, and revoke/delete operations require that connector identity. The schema-v4 migration intentionally removes namespace-free beta OAuth clients and sessions because they cannot be assigned safely to an issuer; affected clients must register and complete owner consent again.

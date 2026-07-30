@@ -4,6 +4,8 @@ use serde::Deserialize;
 use url::Url;
 
 const MAX_GITHUB_RESPONSE_BYTES: usize = 256 * 1_024;
+const GITHUB_USER_MAX_ATTEMPTS: usize = 3;
+const GITHUB_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 const GITHUB_USER_AGENT: &str = concat!(
     "RunOnMine/",
     env!("CARGO_PKG_VERSION"),
@@ -170,7 +172,11 @@ impl GitHubOwnerVerifier for GitHubApiOwnerVerifier {
             .await
             .map_err(|_| OAuthError::temporarily_unavailable())?;
         if !token_response.status().is_success() {
-            return Err(OAuthError::access_denied());
+            return Err(if is_retryable_github_status(token_response.status()) {
+                OAuthError::temporarily_unavailable()
+            } else {
+                OAuthError::access_denied()
+            });
         }
         let token_payload: GitHubTokenResponse = bounded_json(token_response).await?;
         if token_payload.error.is_some() {
@@ -182,21 +188,44 @@ impl GitHubOwnerVerifier for GitHubApiOwnerVerifier {
             .map(SecretString::from)
             .ok_or_else(OAuthError::access_denied)?;
 
-        let user_response = self
-            .client
+        let user_response = send_github_user_request(&self.client, &token).await?;
+        let user: GitHubUserResponse = bounded_json(user_response).await?;
+        verify_owner_identity(self.owner_id, user)
+    }
+}
+
+async fn send_github_user_request(
+    client: &reqwest::Client,
+    token: &SecretString,
+) -> Result<reqwest::Response, OAuthError> {
+    for attempt in 0..GITHUB_USER_MAX_ATTEMPTS {
+        let response = client
             .get("https://api.github.com/user")
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .bearer_auth(token.expose_secret())
             .send()
-            .await
-            .map_err(|_| OAuthError::temporarily_unavailable())?;
-        if !user_response.status().is_success() {
-            return Err(OAuthError::access_denied());
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) if is_retryable_github_status(response.status()) => {
+                if attempt + 1 == GITHUB_USER_MAX_ATTEMPTS {
+                    return Err(OAuthError::temporarily_unavailable());
+                }
+            }
+            Ok(_) => return Err(OAuthError::access_denied()),
+            Err(_) if attempt + 1 == GITHUB_USER_MAX_ATTEMPTS => {
+                return Err(OAuthError::temporarily_unavailable());
+            }
+            Err(_) => {}
         }
-        let user: GitHubUserResponse = bounded_json(user_response).await?;
-        verify_owner_identity(self.owner_id, user)
+        tokio::time::sleep(GITHUB_RETRY_DELAY).await;
     }
+    Err(OAuthError::temporarily_unavailable())
+}
+
+fn is_retryable_github_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 fn verify_owner_identity(
@@ -372,6 +401,22 @@ mod tests {
         };
         assert_eq!(error.code, crate::OAuthErrorCode::ServerError);
         Ok(())
+    }
+
+    #[test]
+    fn github_retry_statuses_are_bounded_to_rate_limits_and_server_errors() {
+        assert!(is_retryable_github_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(is_retryable_github_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_github_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!is_retryable_github_status(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(!is_retryable_github_status(reqwest::StatusCode::FORBIDDEN));
+        assert!(!is_retryable_github_status(reqwest::StatusCode::NOT_FOUND));
     }
 
     #[test]

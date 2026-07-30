@@ -72,8 +72,8 @@ Status markers:
 - [x] **P2-13 — Reap orphan browser processes and profiles.** Owned Chromium launches write owner-only crash leases with a unique token, exact profile, PID/start identity and executable; HTTP and stdio startup reap only fully matched same-user orphans, clean stale ephemeral profiles, retain persistent data, and fail closed on ambiguous or unsafe entries.
 - [x] **P2-14 — Support explicit browser executable selection and identity display.** Local CLI commands select, reset, and inspect one canonical Chrome/Chromium/Edge executable; each launch revalidates the configured binary, local output shows its full path, MCP/support diagnostics expose only source/product/basename, unavailable selections degrade browser tools without trapping config recovery, and external CDP restrictions remain unchanged.
 - [x] **P2-15 — Use immutable GitHub numeric ID as owner authority.** GitHub OAuth authorization compares only the positive numeric user ID; login is validated display metadata, successful same-ID renames are atomically reconciled under the config lock, authority/config races fail closed, and OAuth subjects remain `github:<numeric-id>`.
-- [ ] **P2-16 — Improve transient OAuth provider failure recovery.** Preserve safe retry semantics without permitting replay.
-- [ ] **P2-17 — Decide and document OAuth issuer subpath support.** Either support path-based issuers or explicitly enforce/document root-only deployment.
+- [x] **P2-16 — Improve transient OAuth provider failure recovery.** GitHub callbacks use short-lived state+code-bound claims: transient provider failures release only the same code for retry, terminal results consume state, concurrent/different-code callbacks fail closed, and successful consent insertion plus state deletion is atomic.
+- [x] **P2-17 — Decide and document OAuth issuer subpath support.** OAuth issuers are explicitly root-only; configuration rejects non-root issuer paths and all advertised endpoints are derived from that root origin.
 - [x] **P2-18 — Generate the GitHub User-Agent from package version.** Remove hard-coded version drift.
 - [ ] **P2-19 — Use real redaction for service-manager output or rename it accurately.** Do not imply truncation is sanitization.
 - [ ] **P2-20 — Record skipped/truncated support-bundle inputs in the manifest.** Make incomplete diagnostics visible.
@@ -118,7 +118,7 @@ Status markers:
 - [ ] **P3-02 — Report incomplete supervisor cleanup/orphan risk.** Do not label uncertain shutdown as stopped.
 - [ ] **P3-03 — Document and instrument in-memory rate/session reset behavior.** Add metrics and restart semantics.
 - [ ] **P3-04 — Partition OAuth registration limits by source.** One bad client must not consume all legitimate capacity.
-- [ ] **P3-05 — Improve consent recovery after transient GitHub errors.** Avoid unnecessary full restarts while preserving replay safety.
+- [x] **P3-05 — Improve consent recovery after transient GitHub errors.** Completed by P2-16 with code-bound callback claims and bounded provider retry.
 - [x] **P3-06 — Show requester identity in approval UI.** Include principal type, client ID/name and subject after principal-bound storage lands.
 - [ ] **P3-07 — Make approval redaction limitations explicit.** Require owner review of the complete effective action.
 - [ ] **P3-08 — Verify audit chains incrementally.** Persist the last verified sequence/checkpoint.
