@@ -391,16 +391,17 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             }
         }
         ConnectCommand::UpdateManagedBinaries => {
-            let updated = update_managed_cloudflared(&paths, &config_path).await?;
-            if updated == 0 {
+            let cloudflare_updated = update_managed_cloudflared(&paths, &config_path).await?;
+            let openai_updated = update_managed_openai(&paths, &config_path).await?;
+            if cloudflare_updated == 0 {
                 println!("No managed Cloudflare connector paths required an update.");
             } else {
-                println!("Updated {updated} managed Cloudflare connector path(s).");
+                println!("Updated {cloudflare_updated} managed Cloudflare connector path(s).");
             }
-            if has_managed_openai_connector(&paths, &config)? {
-                println!(
-                    "OpenAI tunnel-client migration remains pending compatibility validation; its configured path was unchanged."
-                );
+            if openai_updated == 0 {
+                println!("No managed OpenAI tunnel-client paths required an update.");
+            } else {
+                println!("Updated {openai_updated} managed OpenAI tunnel-client path(s).");
             }
         }
         ConnectCommand::PinExternalBinaries => {
@@ -421,35 +422,37 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             let id = Uuid::new_v4().to_string();
             let configured_binary_path =
                 OpenAiBinaryStaging::configured_path(&paths, args.tunnel_client.as_deref())?;
-            let connector = validate_new_openai_connector(
-                &paths,
-                &config_path,
-                ConnectorConfig {
-                    id: id.clone(),
-                    name: "OpenAI Secure MCP Tunnel".to_owned(),
-                    kind: ConnectorKind::OpenAiTunnel,
-                    enabled: true,
-                    policy_preset: PolicyPreset::Safe,
-                    pack_overrides: BTreeMap::default(),
-                    tool_overrides: BTreeMap::default(),
-                    policy_rules: Vec::new(),
-                    public_base_url: None,
-                    cloudflare_quick: None,
-                    cloudflare_named: None,
-                    oauth_owner: None,
-                    openai_tunnel: Some(OpenAiTunnelSettings {
-                        tunnel_id: tunnel_id.clone(),
-                        profile: args.profile.clone(),
-                        tunnel_client_path: Some(configured_binary_path.clone()),
-                        health_port: 47_823,
-                    }),
-                },
-            )?;
+            let mut connector_candidate = ConnectorConfig {
+                id: id.clone(),
+                name: "OpenAI Secure MCP Tunnel".to_owned(),
+                kind: ConnectorKind::OpenAiTunnel,
+                enabled: true,
+                policy_preset: PolicyPreset::Safe,
+                pack_overrides: BTreeMap::default(),
+                tool_overrides: BTreeMap::default(),
+                policy_rules: Vec::new(),
+                public_base_url: None,
+                cloudflare_quick: None,
+                cloudflare_named: None,
+                oauth_owner: None,
+                openai_tunnel: Some(OpenAiTunnelSettings {
+                    tunnel_id: tunnel_id.clone(),
+                    profile: args.profile.clone(),
+                    tunnel_client_path: Some(configured_binary_path.clone()),
+                    health_port: 47_823,
+                }),
+            };
+            validate_new_openai_connector(&paths, &config_path, connector_candidate.clone())?;
             let binary =
                 OpenAiBinaryStaging::prepare(&paths, args.tunnel_client.as_deref()).await?;
-            if binary.configured_binary_path() != configured_binary_path {
-                bail!("prepared OpenAI tunnel-client path changed during setup");
-            }
+            let actual_binary_path = binary.configured_binary_path();
+            connector_candidate
+                .openai_tunnel
+                .as_mut()
+                .context("OpenAI connector settings disappeared during setup")?
+                .tunnel_client_path = Some(actual_binary_path);
+            let connector =
+                validate_new_openai_connector(&paths, &config_path, connector_candidate)?;
             let staging = OpenAiConnectorStaging::prepare(&paths, &id)?;
             let profile_directory = staging.profile_directory();
             let profile = OpenAiTunnelProfile::builder(
@@ -673,7 +676,7 @@ pub(super) async fn ensure_binary(
 ) -> Result<InstalledBinary> {
     if let Some(path) = explicit_path {
         let binary = InstalledBinary::from_verified_path(kind, path)?;
-        BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+        BinaryProbe::run_compatible(&binary, std::time::Duration::from_secs(10)).await?;
         return Ok(binary);
     }
 
@@ -681,14 +684,15 @@ pub(super) async fn ensure_binary(
     if let Some(active) = store.resolve_active()? {
         let binary = InstalledBinary::from_verified_path(kind, &active.binary_path)?;
         verify_managed_binary(&binary, provider, &active.receipt_path)?;
-        BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+        BinaryProbe::run_compatible(&binary, std::time::Duration::from_secs(10)).await?;
         return Ok(binary);
     }
 
     println!("Downloading the latest verified official connector binary...");
     let prepared = prepare_latest_managed_binary(paths, kind, provider).await?;
     let activation = prepared.store.activate(&prepared.version)?;
-    if let Err(error) = BinaryProbe::run(&prepared.binary, std::time::Duration::from_secs(10)).await
+    if let Err(error) =
+        BinaryProbe::run_compatible(&prepared.binary, std::time::Duration::from_secs(10)).await
     {
         prepared.store.rollback(activation)?;
         return Err(error.context("managed binary probe failed and activation was rolled back"));
@@ -697,13 +701,13 @@ pub(super) async fn ensure_binary(
 }
 
 #[derive(Debug)]
-struct PreparedManagedBinary {
-    store: VersionedBinaryStore,
-    version: runonmine_connectors::ManagedBinaryVersion,
-    binary: InstalledBinary,
+pub(super) struct PreparedManagedBinary {
+    pub(super) store: VersionedBinaryStore,
+    pub(super) version: ManagedBinaryVersion,
+    pub(super) binary: InstalledBinary,
 }
 
-async fn prepare_latest_managed_binary(
+pub(super) async fn prepare_latest_managed_binary(
     paths: &AppPaths,
     kind: BinaryKind,
     provider: ReleaseProvider,
@@ -722,14 +726,14 @@ async fn prepare_latest_managed_binary(
         .install(&artifact, &staged_path)
         .await?;
     let staged = InstalledBinary::from_verified_path(kind, &staged_path)?;
-    BinaryProbe::run(&staged, std::time::Duration::from_secs(10)).await?;
+    BinaryProbe::run_compatible(&staged, std::time::Duration::from_secs(10)).await?;
     let version_id = store.version_id_for_file(&staged_path)?;
     let target = store.version(&version_id)?;
     receipt.installed_path.clone_from(&target.binary_path);
     let version = store.prepare(&staged_path, &serde_json::to_vec_pretty(&receipt)?)?;
     let binary = InstalledBinary::from_verified_path(kind, &version.binary_path)?;
     verify_managed_binary(&binary, provider, &version.receipt_path)?;
-    BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+    BinaryProbe::run_compatible(&binary, std::time::Duration::from_secs(10)).await?;
     Ok(PreparedManagedBinary {
         store,
         version,
@@ -833,8 +837,10 @@ fn rewrite_managed_cloudflare_paths(
     Ok(updated)
 }
 
-fn has_managed_openai_connector(paths: &AppPaths, config: &AppConfig) -> Result<bool> {
-    for connector in &config.connectors {
+async fn update_managed_openai(paths: &AppPaths, config_path: &Path) -> Result<usize> {
+    let current = AppConfig::load_or_create(config_path)?;
+    let mut candidates = 0_usize;
+    for connector in &current.connectors {
         let Some(settings) = &connector.openai_tunnel else {
             continue;
         };
@@ -842,10 +848,63 @@ fn has_managed_openai_connector(paths: &AppPaths, config: &AppConfig) -> Result<
             continue;
         };
         if is_managed_connector_binary(&paths.data_dir, BinaryKind::OpenAiTunnelClient, path)? {
-            return Ok(true);
+            candidates = candidates.saturating_add(1);
         }
     }
-    Ok(false)
+    if candidates == 0 {
+        return Ok(0);
+    }
+
+    let prepared = prepare_latest_managed_binary(
+        paths,
+        BinaryKind::OpenAiTunnelClient,
+        ReleaseProvider::OpenAiTunnelClient,
+    )
+    .await?;
+    let target_path = prepared.binary.path.clone();
+    let mut state = ManagedUpdateState {
+        store: prepared.store,
+        activation: None,
+    };
+    AppConfig::update_with_activation(
+        config_path,
+        &mut state,
+        |config, _state| rewrite_managed_openai_paths(config, paths, &target_path),
+        |_updated, state| {
+            state.activation = Some(state.store.activate(&prepared.version)?);
+            reconcile_running_agent_after_connector_change()
+        },
+        |state| match state.activation.take() {
+            Some(activation) => state.store.rollback(activation),
+            None => Ok(()),
+        },
+    )
+}
+
+fn rewrite_managed_openai_paths(
+    config: &mut AppConfig,
+    paths: &AppPaths,
+    target_path: &Path,
+) -> Result<usize> {
+    let mut updated = 0_usize;
+    for connector in &mut config.connectors {
+        let Some(settings) = connector.openai_tunnel.as_mut() else {
+            continue;
+        };
+        let Some(configured) = settings.tunnel_client_path.as_deref() else {
+            continue;
+        };
+        if !is_managed_connector_binary(
+            &paths.data_dir,
+            BinaryKind::OpenAiTunnelClient,
+            configured,
+        )? {
+            continue;
+        }
+        settings.tunnel_client_path = Some(target_path.to_path_buf());
+        updated = updated.saturating_add(1);
+    }
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -1171,6 +1230,67 @@ mod tests {
                 .cloudflare_named
                 .as_ref()
                 .and_then(|settings| settings.cloudflared_path.as_deref()),
+            Some(external.as_path())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_openai_rewrite_preserves_external_paths() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path());
+        paths.ensure()?;
+        let legacy_directory = paths.data_dir.join("bin");
+        ensure_private_directory(&legacy_directory)?;
+        let managed = legacy_directory.join(BinaryKind::OpenAiTunnelClient.executable_name());
+        std::fs::write(&managed, b"managed")?;
+        let external = temporary.path().join("external-tunnel-client");
+        std::fs::write(&external, b"external")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let target = temporary.path().join("new-openai-version");
+        let mut managed_connector = ConnectorConfig::local_default();
+        managed_connector.id = "managed-openai".to_owned();
+        managed_connector.kind = ConnectorKind::OpenAiTunnel;
+        managed_connector.openai_tunnel = Some(OpenAiTunnelSettings {
+            tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".to_owned(),
+            profile: "managed-profile".to_owned(),
+            tunnel_client_path: Some(managed),
+            health_port: 47_823,
+        });
+        let mut external_connector = ConnectorConfig::local_default();
+        external_connector.id = "external-openai".to_owned();
+        external_connector.kind = ConnectorKind::OpenAiTunnel;
+        external_connector.openai_tunnel = Some(OpenAiTunnelSettings {
+            tunnel_id: "tunnel_1123456789abcdef0123456789abcdef".to_owned(),
+            profile: "external-profile".to_owned(),
+            tunnel_client_path: Some(external.clone()),
+            health_port: 47_825,
+        });
+        let mut config = AppConfig {
+            connectors: vec![managed_connector, external_connector],
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            rewrite_managed_openai_paths(&mut config, &paths, &target)?,
+            1
+        );
+        assert_eq!(
+            config.connectors[0]
+                .openai_tunnel
+                .as_ref()
+                .and_then(|settings| settings.tunnel_client_path.as_deref()),
+            Some(target.as_path())
+        );
+        assert_eq!(
+            config.connectors[1]
+                .openai_tunnel
+                .as_ref()
+                .and_then(|settings| settings.tunnel_client_path.as_deref()),
             Some(external.as_path())
         );
         Ok(())

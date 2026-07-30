@@ -113,6 +113,7 @@ client-supplied name remains explicitly unverified.
 - isolated Chromium profiles live below the per-user RunOnMine data directory.
 - immutable managed connector versions live below `data/managed-binaries/<executable>/versions/<sha256>/`, with an owner-only active manifest and receipt per version.
 - optional external connector pins live in an owner-only state document and contain only binary identity/metadata, never connector credentials.
+- connector compatibility ranges are code-owned release gates applied by setup, doctor, update and startup before a child process becomes active.
 
 Cloudflare Quick Tunnel public URL discovery is runtime state rather than desired configuration. Each successful Quick process start creates a private generation-bound record below the state directory. Only the observer holding that generation may publish or clear the URL; restart/backoff clears it, process stop removes the record, startup replaces stale generations, and legacy Quick URLs are removed from `config.toml` under the configuration lock. The desktop, doctor, and support summary read this bounded state without exposing the URL through public health routes or support archives.
 
@@ -144,7 +145,8 @@ successfully.
 ## Asynchronous OpenAI activation and runtime health
 
 The loopback listener and local MCP router do not wait for OpenAI tunnel-client
-profile initialization or `doctor`. After the listener binds, each configured
+profile initialization or `doctor`. The configured binary is receipt/pin checked
+and compatibility-probed before activation. After the listener binds, each configured
 OpenAI connector receives an owned activation task. The task performs binary
 and profile discovery, optional profile `init`, credential lookup and `doctor`
 inside a 75-second preparation deadline, then starts the supervisor and requires

@@ -62,7 +62,8 @@ These are execution capabilities, not safe data-query shortcuts.
 `runonmine connect list` includes the configured connector binary trust state.
 Use `runonmine connect pin-external-binaries` after reviewing an explicit
 external executable; later content or ownership/metadata changes fail before
-process start. `runonmine connect update-managed-binaries` updates only managed
-Cloudflare paths through immutable version preparation and rollback-aware
-activation. External paths and the compatibility-gated OpenAI tunnel-client path
-are not silently replaced.
+process start. `runonmine connect update-managed-binaries` updates managed
+Cloudflare and OpenAI paths through immutable version preparation,
+compatibility probing and rollback-aware activation. Explicit external paths are
+never silently replaced. Unsupported or prerelease clients are rejected before
+the active manifest changes.

@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::connectors::{managed_receipt_path, verify_managed_binary};
+use super::connectors::{
+    managed_receipt_path, prepare_latest_managed_binary, verify_managed_binary,
+};
 
 const ACTIVATION_MARKER: &str = ".runonmine-openai-activation";
 
@@ -195,19 +197,15 @@ impl Drop for OpenAiConnectorStaging {
 #[derive(Debug)]
 pub(super) enum OpenAiBinaryStaging {
     Existing(InstalledBinary),
-    Staged(Box<StagedOpenAiBinary>),
+    Versioned(Box<VersionedOpenAiBinary>),
 }
 
 #[derive(Debug)]
-pub(super) struct StagedOpenAiBinary {
-    transaction_id: String,
+pub(super) struct VersionedOpenAiBinary {
     binary: InstalledBinary,
-    receipt: InstallReceipt,
-    staging_root: PathBuf,
-    final_binary: PathBuf,
-    final_receipt: PathBuf,
-    binary_linked: bool,
-    receipt_linked: bool,
+    store: VersionedBinaryStore,
+    version: ManagedBinaryVersion,
+    activation: Option<ManagedBinaryActivation>,
     committed: bool,
 }
 
@@ -216,107 +214,116 @@ impl OpenAiBinaryStaging {
         paths: &AppPaths,
         explicit_path: Option<&Path>,
     ) -> Result<PathBuf> {
-        explicit_path.map_or_else(
-            || {
-                let path = paths
-                    .data_dir
-                    .join("bin")
-                    .join(BinaryKind::OpenAiTunnelClient.executable_name());
-                if !path.is_absolute() {
-                    bail!("managed OpenAI tunnel-client path must be absolute");
-                }
-                Ok(path)
-            },
-            |path| {
-                Ok(InstalledBinary::from_verified_path(BinaryKind::OpenAiTunnelClient, path)?.path)
-            },
-        )
+        if let Some(path) = explicit_path {
+            return Ok(
+                InstalledBinary::from_verified_path(BinaryKind::OpenAiTunnelClient, path)?.path,
+            );
+        }
+        let store = managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient);
+        let active_manifest = store.root().join("active.json");
+        match fs::symlink_metadata(&active_manifest) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!("managed OpenAI active manifest is unsafe")
+            }
+            Ok(_) => store
+                .resolve_active()?
+                .map(|version| version.binary_path)
+                .context("managed OpenAI active manifest has no valid version"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(store.version(&"0".repeat(64))?.binary_path)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(super) async fn prepare(paths: &AppPaths, explicit_path: Option<&Path>) -> Result<Self> {
         if let Some(path) = explicit_path {
             let binary = InstalledBinary::from_verified_path(BinaryKind::OpenAiTunnelClient, path)?;
-            BinaryProbe::run(&binary, Duration::from_secs(10)).await?;
+            BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
             return Ok(Self::Existing(binary));
         }
 
-        let final_binary = Self::configured_path(paths, None)?;
-        let final_directory = final_binary
-            .parent()
-            .context("managed OpenAI tunnel-client path has no parent")?;
-        let final_receipt = managed_receipt_path(final_directory, BinaryKind::OpenAiTunnelClient);
-        let binary_present = safe_regular_file_presence(&final_binary, "managed OpenAI binary")?;
-        let receipt_present = safe_regular_file_presence(&final_receipt, "managed OpenAI receipt")?;
-        match (binary_present, receipt_present) {
-            (true, true) => {
-                let binary = InstalledBinary::from_verified_path(
-                    BinaryKind::OpenAiTunnelClient,
-                    &final_binary,
-                )?;
-                verify_managed_binary(
-                    &binary,
-                    ReleaseProvider::OpenAiTunnelClient,
-                    &final_receipt,
-                )
-                .context(
-                    "existing managed OpenAI tunnel-client failed integrity verification; repair or remove it before connector setup",
-                )?;
-                BinaryProbe::run(&binary, Duration::from_secs(10))
-                    .await
-                    .context(
-                        "existing managed OpenAI tunnel-client failed its version probe; repair or remove it before connector setup",
-                    )?;
-                return Ok(Self::Existing(binary));
-            }
-            (true, false) | (false, true) => {
-                bail!(
-                    "managed OpenAI tunnel-client installation is incomplete; repair or remove the existing binary/receipt pair before connector setup"
-                );
-            }
-            (false, false) => {}
+        let store = managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient);
+        if let Some(active) = store.resolve_active()? {
+            let binary = InstalledBinary::from_verified_path(
+                BinaryKind::OpenAiTunnelClient,
+                &active.binary_path,
+            )?;
+            verify_managed_binary(
+                &binary,
+                ReleaseProvider::OpenAiTunnelClient,
+                &active.receipt_path,
+            )?;
+            BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
+            return Ok(Self::Existing(binary));
         }
 
-        ensure_real_private_directory(&paths.data_dir)?;
-        let transaction_id = Uuid::new_v4().to_string();
-        let staging_root = paths
-            .data_dir
-            .join(format!(".openai-binary-stage-{transaction_id}"));
-        create_transaction_root(&staging_root, &transaction_id)?;
-        let staged_path = staging_root.join(BinaryKind::OpenAiTunnelClient.executable_name());
-        let preparation = async {
-            let artifact = GitHubReleaseResolver::production()?
-                .resolve(ReleaseProvider::OpenAiTunnelClient, &ReleaseChannel::Latest)
-                .await?;
-            let receipt = BinaryInstaller::production()?
-                .install(&artifact, &staged_path)
-                .await?;
-            let binary =
-                InstalledBinary::from_verified_path(BinaryKind::OpenAiTunnelClient, &staged_path)?;
-            BinaryProbe::run(&binary, Duration::from_secs(10)).await?;
-            Ok::<_, anyhow::Error>((receipt, binary))
+        let legacy_directory = paths.data_dir.join("bin");
+        let legacy_binary = legacy_directory.join(BinaryKind::OpenAiTunnelClient.executable_name());
+        let legacy_receipt =
+            managed_receipt_path(&legacy_directory, BinaryKind::OpenAiTunnelClient);
+        let binary_present = safe_regular_file_presence(&legacy_binary, "managed OpenAI binary")?;
+        let receipt_present =
+            safe_regular_file_presence(&legacy_receipt, "managed OpenAI receipt")?;
+        if binary_present != receipt_present {
+            bail!(
+                "managed OpenAI tunnel-client installation is incomplete; repair or remove the existing binary/receipt pair before connector setup"
+            );
         }
-        .await;
-        let (receipt, binary) = match preparation {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let cleanup = remove_owned_transaction_root(&staging_root, &transaction_id);
-                return match cleanup {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(error.context(format!(
-                        "OpenAI binary staging cleanup also failed: {cleanup:#}"
-                    ))),
-                };
-            }
-        };
-        Ok(Self::Staged(Box::new(StagedOpenAiBinary {
-            transaction_id,
-            binary,
-            receipt,
-            staging_root,
-            final_binary,
-            final_receipt,
-            binary_linked: false,
-            receipt_linked: false,
+        if binary_present {
+            let legacy = InstalledBinary::from_verified_path(
+                BinaryKind::OpenAiTunnelClient,
+                &legacy_binary,
+            )?;
+            verify_managed_binary(
+                &legacy,
+                ReleaseProvider::OpenAiTunnelClient,
+                &legacy_receipt,
+            )
+            .context(
+                "existing managed OpenAI tunnel-client failed integrity verification; repair or remove it before connector setup",
+            )?;
+            BinaryProbe::run_compatible(&legacy, Duration::from_secs(10))
+                .await
+                .context(
+                    "existing managed OpenAI tunnel-client is outside the supported compatibility range",
+                )?;
+            let mut receipt: InstallReceipt =
+                serde_json::from_slice(&fs::read(&legacy_receipt)?)
+                    .context("existing managed OpenAI receipt is invalid")?;
+            let version_id = store.version_id_for_file(&legacy_binary)?;
+            let target = store.version(&version_id)?;
+            receipt.installed_path.clone_from(&target.binary_path);
+            let version = store.prepare(&legacy_binary, &serde_json::to_vec_pretty(&receipt)?)?;
+            let binary = InstalledBinary::from_verified_path(
+                BinaryKind::OpenAiTunnelClient,
+                &version.binary_path,
+            )?;
+            verify_managed_binary(
+                &binary,
+                ReleaseProvider::OpenAiTunnelClient,
+                &version.receipt_path,
+            )?;
+            return Ok(Self::Versioned(Box::new(VersionedOpenAiBinary {
+                binary,
+                store,
+                version,
+                activation: None,
+                committed: false,
+            })));
+        }
+
+        let prepared = prepare_latest_managed_binary(
+            paths,
+            BinaryKind::OpenAiTunnelClient,
+            ReleaseProvider::OpenAiTunnelClient,
+        )
+        .await?;
+        Ok(Self::Versioned(Box::new(VersionedOpenAiBinary {
+            binary: prepared.binary,
+            store: prepared.store,
+            version: prepared.version,
+            activation: None,
             committed: false,
         })))
     }
@@ -324,122 +331,40 @@ impl OpenAiBinaryStaging {
     pub(super) fn binary(&self) -> &InstalledBinary {
         match self {
             Self::Existing(binary) => binary,
-            Self::Staged(staged) => &staged.binary,
+            Self::Versioned(versioned) => &versioned.binary,
         }
     }
 
     pub(super) fn configured_binary_path(&self) -> PathBuf {
         match self {
             Self::Existing(binary) => binary.path.clone(),
-            Self::Staged(staged) => staged.final_binary.clone(),
+            Self::Versioned(versioned) => versioned.binary.path.clone(),
         }
     }
 
     fn activate(&mut self) -> Result<()> {
-        let Self::Staged(staged) = self else {
-            return Ok(());
-        };
-        verify_transaction_root(&staged.staging_root, &staged.transaction_id)?;
-        let final_directory = staged
-            .final_binary
-            .parent()
-            .context("managed OpenAI tunnel-client path has no parent")?;
-        ensure_real_private_directory(final_directory)?;
-        ensure_path_absent(&staged.final_binary, "managed OpenAI tunnel-client")?;
-        ensure_path_absent(
-            &staged.final_receipt,
-            "managed OpenAI tunnel-client receipt",
-        )?;
-
-        let mut final_receipt_value = staged.receipt.clone();
-        final_receipt_value
-            .installed_path
-            .clone_from(&staged.final_binary);
-        let staged_receipt = staged.staging_root.join("activation-receipt.json");
-        write_new_private_file(
-            &staged_receipt,
-            &serde_json::to_vec_pretty(&final_receipt_value)?,
-        )?;
-
-        if let Err(error) = fs::hard_link(&staged.binary.path, &staged.final_binary) {
-            return Err(error).context("failed to activate staged OpenAI tunnel-client");
-        }
-        staged.binary_linked = true;
-        sync_parent(&staged.final_binary)?;
-        if let Err(error) = fs::hard_link(&staged_receipt, &staged.final_receipt) {
-            let rollback = remove_owned_managed_binary(
-                &staged.final_binary,
-                &staged.final_receipt,
-                &staged.receipt,
-                staged.binary_linked,
-                false,
-            );
-            staged.binary_linked = false;
-            return match rollback {
-                Ok(()) => Err(error).context("failed to activate OpenAI binary receipt"),
-                Err(rollback_error) => Err(error).context(format!(
-                    "failed to activate OpenAI binary receipt; binary cleanup also failed: {rollback_error:#}"
-                )),
-            };
-        }
-        staged.receipt_linked = true;
-        sync_parent(&staged.final_receipt)?;
-
-        let installed = InstalledBinary::from_verified_path(
-            BinaryKind::OpenAiTunnelClient,
-            &staged.final_binary,
-        )?;
-        if let Err(error) = verify_managed_binary(
-            &installed,
-            ReleaseProvider::OpenAiTunnelClient,
-            &staged.final_receipt,
-        ) {
-            let rollback = remove_owned_managed_binary(
-                &staged.final_binary,
-                &staged.final_receipt,
-                &staged.receipt,
-                staged.binary_linked,
-                staged.receipt_linked,
-            );
-            staged.binary_linked = false;
-            staged.receipt_linked = false;
-            return match rollback {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(error.context(format!(
-                    "managed OpenAI binary verification failed and cleanup also failed: {rollback_error:#}"
-                ))),
-            };
+        if let Self::Versioned(versioned) = self {
+            versioned.activation = Some(versioned.store.activate(&versioned.version)?);
         }
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<()> {
-        if let Self::Staged(staged) = self {
-            remove_owned_transaction_root(&staged.staging_root, &staged.transaction_id)?;
-            staged.committed = true;
+    fn finish(&mut self) {
+        if let Self::Versioned(versioned) = self {
+            versioned.committed = true;
         }
-        Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
-        let Self::Staged(staged) = self else {
-            return Ok(());
-        };
-        if staged.committed {
-            return Ok(());
+        if let Self::Versioned(versioned) = self {
+            if versioned.committed {
+                return Ok(());
+            }
+            if let Some(activation) = versioned.activation.take() {
+                versioned.store.rollback(activation)?;
+            }
         }
-        if staged.binary_linked || staged.receipt_linked {
-            remove_owned_managed_binary(
-                &staged.final_binary,
-                &staged.final_receipt,
-                &staged.receipt,
-                staged.binary_linked,
-                staged.receipt_linked,
-            )?;
-            staged.binary_linked = false;
-            staged.receipt_linked = false;
-        }
-        remove_owned_transaction_root(&staged.staging_root, &staged.transaction_id)
+        Ok(())
     }
 }
 
@@ -537,63 +462,6 @@ fn remove_owned_transaction_root(root: &Path, transaction_id: &str) -> Result<()
     sync_parent(root)
 }
 
-fn remove_owned_managed_binary(
-    final_binary: &Path,
-    final_receipt: &Path,
-    receipt: &InstallReceipt,
-    binary_linked: bool,
-    receipt_linked: bool,
-) -> Result<()> {
-    let mut expected_receipt = receipt.clone();
-    expected_receipt.installed_path = final_binary.to_path_buf();
-    if receipt_linked {
-        let actual = super::connectors::read_install_receipt(final_receipt)?;
-        if actual != expected_receipt {
-            bail!("refusing to remove an OpenAI receipt not owned by this transaction");
-        }
-    }
-    if binary_linked && !receipt.sha256.verify_file(final_binary)? {
-        bail!("refusing to remove an OpenAI binary not owned by this transaction");
-    }
-    if receipt_linked {
-        remove_regular_file_if_present(final_receipt)?;
-    }
-    if binary_linked {
-        remove_regular_file_if_present(final_binary)?;
-    }
-    Ok(())
-}
-
-fn remove_regular_file_if_present(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!("refusing to remove an unsafe managed OpenAI artifact")
-        }
-        Ok(_) => {
-            fs::remove_file(path)?;
-            sync_parent(path)
-        }
-    }
-}
-
-fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-
-    let mut options = fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 pub(super) fn validate_new_openai_connector(
     paths: &AppPaths,
     config_path: &Path,
@@ -658,7 +526,7 @@ pub(super) fn commit_prepared_openai_connector(
         |(), state| {
             state.binary.activate()?;
             state.staging.activate()?;
-            state.binary.finish()?;
+            state.binary.finish();
             state.staging.finish();
             Ok(())
         },
@@ -834,54 +702,45 @@ mod tests {
         }))
     }
 
-    fn staged_binary(paths: &AppPaths, contents: &[u8]) -> Result<OpenAiBinaryStaging> {
-        let transaction_id = Uuid::new_v4().to_string();
-        let staging_root = paths
+    fn versioned_binary(paths: &AppPaths, contents: &[u8]) -> Result<OpenAiBinaryStaging> {
+        let store = managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient);
+        let source = paths
             .data_dir
-            .join(format!(".openai-binary-stage-{transaction_id}"));
-        ensure_real_private_directory(&staging_root)?;
-        write_marker(&staging_root, &transaction_id)?;
-        let staged_path = staging_root.join(BinaryKind::OpenAiTunnelClient.executable_name());
-        fs::write(&staged_path, contents)?;
+            .join(format!("test-openai-{}", Uuid::new_v4()));
+        fs::write(&source, contents)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&staged_path, fs::Permissions::from_mode(0o700))?;
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o700))?;
         }
+        let version_id = store.version_id_for_file(&source)?;
+        let target = store.version(&version_id)?;
         let digest = Sha256::digest(contents);
         let mut encoded = String::with_capacity(64);
         for byte in digest {
             write!(&mut encoded, "{byte:02x}")?;
         }
-        let final_binary = paths
-            .data_dir
-            .join("bin")
-            .join(BinaryKind::OpenAiTunnelClient.executable_name());
-        let final_receipt = managed_receipt_path(
-            final_binary
-                .parent()
-                .context("test managed binary has no parent")?,
+        let receipt = InstallReceipt {
+            provider: ReleaseProvider::OpenAiTunnelClient,
+            release_tag: "test-v0.0.10".to_owned(),
+            sha256: Sha256Digest::parse(&format!("sha256:{encoded}"))?,
+            installed_path: target.binary_path.clone(),
+        };
+        let version = store.prepare(&source, &serde_json::to_vec_pretty(&receipt)?)?;
+        fs::remove_file(source)?;
+        let binary = InstalledBinary::from_verified_path(
             BinaryKind::OpenAiTunnelClient,
-        );
-        Ok(OpenAiBinaryStaging::Staged(Box::new(StagedOpenAiBinary {
-            transaction_id,
-            binary: InstalledBinary {
-                kind: BinaryKind::OpenAiTunnelClient,
-                path: staged_path.clone(),
+            &version.binary_path,
+        )?;
+        Ok(OpenAiBinaryStaging::Versioned(Box::new(
+            VersionedOpenAiBinary {
+                binary,
+                store,
+                version,
+                activation: None,
+                committed: false,
             },
-            receipt: InstallReceipt {
-                provider: ReleaseProvider::OpenAiTunnelClient,
-                release_tag: "test-v1".to_owned(),
-                sha256: Sha256Digest::parse(&format!("sha256:{encoded}"))?,
-                installed_path: staged_path,
-            },
-            staging_root,
-            final_binary,
-            final_receipt,
-            binary_linked: false,
-            receipt_linked: false,
-            committed: false,
-        })))
+        )))
     }
 
     fn connector(id: &str) -> ConnectorConfig {
@@ -1065,14 +924,8 @@ mod tests {
         AppConfig::default().save(&config_path)?;
         let staging = prepared_staging(&paths, "binary-rollback")?;
         fs::remove_dir_all(&staging.staging_state_root)?;
-        let binary = staged_binary(&paths, b"new tunnel client")?;
+        let binary = versioned_binary(&paths, b"new tunnel client")?;
         let final_binary = binary.configured_binary_path();
-        let final_receipt = managed_receipt_path(
-            final_binary
-                .parent()
-                .context("test managed binary has no parent")?,
-            BinaryKind::OpenAiTunnelClient,
-        );
         let store = TestSecretStore::default();
         let name = "connector.binary-rollback.runtime_api_key".to_owned();
         store.set(&name, &SecretString::from("previous".to_owned()))?;
@@ -1087,8 +940,12 @@ mod tests {
             staging,
         );
         assert!(result.is_err());
-        assert!(!final_binary.exists());
-        assert!(!final_receipt.exists());
+        assert!(final_binary.exists());
+        assert!(
+            managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient)
+                .resolve_active()?
+                .is_none()
+        );
         assert!(
             AppConfig::load(&config_path)?
                 .connector("binary-rollback")
@@ -1106,18 +963,19 @@ mod tests {
     }
 
     #[test]
-    fn dropping_staged_binary_removes_precommit_binary_root() -> Result<()> {
+    fn dropping_versioned_binary_does_not_activate_it() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let paths = AppPaths::under(directory.path());
         paths.ensure()?;
-        let binary = staged_binary(&paths, b"temporary tunnel client")?;
-        let staging_root = match &binary {
-            OpenAiBinaryStaging::Staged(staged) => staged.staging_root.clone(),
-            OpenAiBinaryStaging::Existing(_) => bail!("expected staged test binary"),
-        };
+        let binary = versioned_binary(&paths, b"temporary tunnel client")?;
+        let immutable_path = binary.configured_binary_path();
         drop(binary);
-        assert!(!staging_root.exists());
-        assert!(!OpenAiBinaryStaging::configured_path(&paths, None)?.exists());
+        assert!(immutable_path.exists());
+        assert!(
+            managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient)
+                .resolve_active()?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -1155,18 +1013,8 @@ mod tests {
         let config_path = paths.config_file();
         AppConfig::default().save(&config_path)?;
         let staging = prepared_staging(&paths, "success")?;
-        let binary = staged_binary(&paths, b"successful tunnel client")?;
+        let binary = versioned_binary(&paths, b"successful tunnel client")?;
         let final_binary = binary.configured_binary_path();
-        let final_receipt = managed_receipt_path(
-            final_binary
-                .parent()
-                .context("test managed binary has no parent")?,
-            BinaryKind::OpenAiTunnelClient,
-        );
-        let binary_stage = match &binary {
-            OpenAiBinaryStaging::Staged(staged) => staged.staging_root.clone(),
-            OpenAiBinaryStaging::Existing(_) => bail!("expected staged test binary"),
-        };
         let store = TestSecretStore::default();
         let name = "connector.success.runtime_api_key".to_owned();
         commit_prepared_openai_connector(
@@ -1190,8 +1038,13 @@ mod tests {
             Some("secret".to_owned())
         );
         assert!(final_binary.is_file());
-        assert!(final_receipt.is_file());
-        assert!(!binary_stage.exists());
+        assert_eq!(
+            managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient)
+                .resolve_active()?
+                .context("OpenAI version was not activated")?
+                .binary_path,
+            final_binary
+        );
         assert!(
             paths
                 .data_dir
@@ -1207,12 +1060,107 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_managed_binary_migrates_and_activation_rolls_back() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir()?;
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let legacy_dir = paths.data_dir.join("bin");
+        ensure_real_private_directory(&legacy_dir)?;
+        let legacy = legacy_dir.join(BinaryKind::OpenAiTunnelClient.executable_name());
+        let bytes = br#"#!/bin/sh
+if [ "${1:-}" = "--version" ]; then printf '%s
+' 'tunnel-client version 0.0.10'; exit 0; fi
+exit 0
+"#;
+        fs::write(&legacy, bytes)?;
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700))?;
+        let digest = Sha256::digest(bytes);
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut hex, "{byte:02x}")?;
+        }
+        let receipt_path = managed_receipt_path(&legacy_dir, BinaryKind::OpenAiTunnelClient);
+        fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&InstallReceipt {
+                provider: ReleaseProvider::OpenAiTunnelClient,
+                release_tag: "v0.0.10".to_owned(),
+                sha256: Sha256Digest::parse(&format!("sha256:{hex}"))?,
+                installed_path: legacy.clone(),
+            })?,
+        )?;
+        fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600))?;
+        let mut prepared = OpenAiBinaryStaging::prepare(&paths, None).await?;
+        let immutable = prepared.configured_binary_path();
+        assert_ne!(immutable, legacy);
+        assert!(immutable.is_file());
+        prepared.activate()?;
+        let store = managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient);
+        assert_eq!(
+            store
+                .resolve_active()?
+                .context("missing active version")?
+                .binary_path,
+            immutable
+        );
+        prepared.rollback()?;
+        assert!(store.resolve_active()?.is_none());
+        assert!(legacy.is_file());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn incompatible_candidate_preserves_known_good_active_version() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir()?;
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let mut known_good = versioned_binary(&paths, b"known-good")?;
+        known_good.activate()?;
+        let store = managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient);
+        let active = store
+            .resolve_active()?
+            .context("missing known-good version")?;
+        let candidate = paths.data_dir.join("future-tunnel-client");
+        fs::write(
+            &candidate,
+            br#"#!/bin/sh
+if [ "${1:-}" = "--version" ]; then printf '%s
+' 'tunnel-client version 0.0.11-dev'; exit 0; fi
+exit 0
+"#,
+        )?;
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))?;
+        let binary =
+            InstalledBinary::from_verified_path(BinaryKind::OpenAiTunnelClient, &candidate)?;
+        assert!(
+            BinaryProbe::run_compatible(&binary, Duration::from_secs(5))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .resolve_active()?
+                .context("known-good disappeared")?
+                .version_id,
+            active.version_id
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn incomplete_or_invalid_existing_managed_binary_is_preserved() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let paths = AppPaths::under(directory.path());
         paths.ensure()?;
-        let final_binary = OpenAiBinaryStaging::configured_path(&paths, None)?;
+        let final_binary = paths
+            .data_dir
+            .join("bin")
+            .join(BinaryKind::OpenAiTunnelClient.executable_name());
         ensure_real_private_directory(
             final_binary
                 .parent()

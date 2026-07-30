@@ -794,7 +794,12 @@ pub(super) async fn doctor() -> Result<()> {
                     settings.cloudflared_path.as_deref(),
                 )? {
                     Some(binary) => {
-                        match BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await {
+                        match BinaryProbe::run_compatible(
+                            &binary,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await
+                        {
                             Ok(probe) => {
                                 let runtime_url_discovered = match quick_runtime.get(&connector.id)
                                 {
@@ -845,7 +850,12 @@ pub(super) async fn doctor() -> Result<()> {
                     settings.cloudflared_path.as_deref(),
                 )? {
                     Some(binary) => {
-                        match BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await {
+                        match BinaryProbe::run_compatible(
+                            &binary,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await
+                        {
                             Ok(probe) => {
                                 println!(
                                     "{}: cloudflared {}, OAuth configured",
@@ -904,7 +914,8 @@ pub(super) async fn doctor() -> Result<()> {
                     failures = failures.saturating_add(1);
                     continue;
                 };
-                match BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await {
+                match BinaryProbe::run_compatible(&binary, std::time::Duration::from_secs(10)).await
+                {
                     Ok(probe) => println!("{}: tunnel-client {}", connector.id, probe.version),
                     Err(_) => {
                         println!("{}: tunnel-client probe FAILED", connector.id);

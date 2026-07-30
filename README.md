@@ -126,6 +126,10 @@ on restart/backoff and removed on process stop.
   as unpinned until the owner runs `runonmine connect pin-external-binaries`.
   Pinned path, digest, ownership, mode, size, and modification time are verified
   again before agent startup, and a changed pin degrades only that connector.
+  Managed and external clients are also compatibility-probed during setup,
+  doctor, update and startup. Current supported stable ranges are OpenAI
+  tunnel-client `0.0.10` and cloudflared `>=2025.1.0,<2027.0.0`; unsupported
+  candidates cannot replace the known-good active version.
 - File operations use open directory capabilities and descriptor-relative traversal inside explicitly selected roots; path checks and file access are not separated by a canonicalize-then-open race.
 - The default browser profile is disposable and isolated from the user's daily
   browser profile. A browser-process-wide loopback proxy covers pages, popups,

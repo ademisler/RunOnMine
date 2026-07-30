@@ -12,7 +12,7 @@ use runonmine_connectors::cloudflare::{
 };
 use runonmine_connectors::openai::{OpenAiMcpTarget, OpenAiTunnelProfile};
 use runonmine_connectors::{
-    BinaryKind, ExternalBinaryTrust, ProcessEvent, ProcessState, ProcessSupervisor,
+    BinaryKind, BinaryProbe, ExternalBinaryTrust, ProcessEvent, ProcessState, ProcessSupervisor,
     ReleaseProvider, RestartPolicy, SecretValue, SupervisorHandle, resolve_connector_binary,
     run_once,
 };
@@ -441,6 +441,7 @@ async fn start_external_connectors_inner(
                     .context("cloudflared is not installed; run the connector setup again")?;
                     warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
                     let binary = resolved.binary;
+                    BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
                     let tunnel = QuickTunnelConfig::builder(origin.clone())
                         .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
                         .build()?;
@@ -481,6 +482,7 @@ async fn start_external_connectors_inner(
                     .context("cloudflared is not installed; run the connector setup again")?;
                     warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
                     let binary = resolved.binary;
+                    BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
                     let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
                     ensure_private_directory(&connector_dir)?;
                     let tunnel = NamedTunnelConfig::builder(
@@ -776,6 +778,7 @@ async fn prepare_openai_activation(
     .context("tunnel-client is not installed; run the connector setup again")?;
     warn_unpinned_binary(&connector.id, resolved.trust, &resolved.binary.path);
     let binary = resolved.binary;
+    BinaryProbe::run_compatible(&binary, Duration::from_secs(10)).await?;
     let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
     let profile_directory = connector_dir.join("openai-profiles");
     let health_directory = paths.state_dir.join("connectors").join(&connector.id);
@@ -1034,11 +1037,15 @@ mod tests {
         let cloudflared = temporary.path().join("cloudflared");
         std::fs::write(
             &cloudflared,
-            b"#!/bin/sh
+            br#"#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'cloudflared version 2026.7.2'
+  exit 0
+fi
 printf '%s\n' 'https://healthy.trycloudflare.com'
 trap 'exit 0' TERM INT
 while :; do /bin/sleep 1; done
-",
+"#,
         )?;
         std::fs::set_permissions(&cloudflared, std::fs::Permissions::from_mode(0o700))?;
 
@@ -1161,6 +1168,56 @@ while :; do /bin/sleep 1; done
                 && status.kind == ConnectorKind::OpenAiTunnel
                 && status.stage == Some(ConnectorStartupStage::Preparation)
         }));
+        managed.stop().await;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn incompatible_external_binary_degrades_only_its_connector() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        let cloudflared = temporary.path().join("old-cloudflared");
+        std::fs::write(
+            &cloudflared,
+            br#"#!/bin/sh
+if [ "${1:-}" = "--version" ]; then printf '%s\n' 'cloudflared version 2024.12.1'; exit 0; fi
+exit 0
+"#,
+        )?;
+        std::fs::set_permissions(&cloudflared, std::fs::Permissions::from_mode(0o700))?;
+
+        let mut local = ConnectorConfig::local_http_default();
+        local.enabled = true;
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "incompatible-quick".to_owned();
+        quick.name = "Incompatible Quick".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.enabled = true;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings {
+            cloudflared_path: Some(cloudflared),
+            ..CloudflareQuickSettings::default()
+        });
+        let config = AppConfig {
+            connectors: vec![local, quick],
+            ..AppConfig::default()
+        };
+        config.validate()?;
+
+        let runtime = ConnectorRuntimeRegistry::default();
+        let managed =
+            start_external_connectors(&paths, &config, Vec::new(), runtime.clone()).await?;
+        assert!(managed.handles.is_empty());
+        assert_eq!(managed.degraded.len(), 1);
+        assert_eq!(managed.degraded[0].connector_id, "incompatible-quick");
+        assert_runtime_phase(
+            &runtime,
+            "incompatible-quick",
+            ConnectorRuntimePhase::Degraded,
+        )?;
         managed.stop().await;
         Ok(())
     }

@@ -16,7 +16,10 @@ pub mod supervisor;
 mod trusted_binary;
 mod versioned_binary;
 
-pub use binary::{BinaryDiscovery, BinaryKind, BinaryProbe, DoctorReport, InstalledBinary};
+pub use binary::{
+    BinaryCompatibility, BinaryDiscovery, BinaryKind, BinaryProbe, BinaryVersion, DoctorReport,
+    InstalledBinary,
+};
 pub use health::{HealthCheck, HealthCheckResult, HealthChecker};
 pub use installer::{
     ArtifactFormat, BinaryInstaller, GitHubReleaseResolver, InstallReceipt, ReleaseChannel,

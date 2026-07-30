@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,148 @@ impl BinaryKind {
             Self::Cloudflared | Self::OpenAiTunnelClient => &["--version"],
         }
     }
+
+    pub fn compatibility(self) -> BinaryCompatibility {
+        match self {
+            Self::Cloudflared => BinaryCompatibility::new(
+                BinaryVersion::new(2025, 1, 0),
+                BinaryVersion::new(2027, 0, 0),
+                false,
+            ),
+            Self::OpenAiTunnelClient => BinaryCompatibility::new(
+                BinaryVersion::new(0, 0, 10),
+                BinaryVersion::new(0, 0, 11),
+                false,
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BinaryCompatibility {
+    pub minimum_inclusive: BinaryVersion,
+    pub maximum_exclusive: BinaryVersion,
+    pub allow_prerelease: bool,
+}
+
+impl BinaryCompatibility {
+    const fn new(
+        minimum_inclusive: BinaryVersion,
+        maximum_exclusive: BinaryVersion,
+        allow_prerelease: bool,
+    ) -> Self {
+        Self {
+            minimum_inclusive,
+            maximum_exclusive,
+            allow_prerelease,
+        }
+    }
+
+    pub fn accepts(&self, version: &BinaryVersion) -> bool {
+        (self.allow_prerelease || version.prerelease.is_none())
+            && version >= &self.minimum_inclusive
+            && version < &self.maximum_exclusive
+    }
+
+    pub fn description(&self) -> String {
+        format!(
+            ">={}, <{}{}",
+            self.minimum_inclusive,
+            self.maximum_exclusive,
+            if self.allow_prerelease {
+                " (prereleases allowed)"
+            } else {
+                " (stable releases only)"
+            }
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BinaryVersion {
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
+    pub prerelease: Option<String>,
+}
+
+impl BinaryVersion {
+    const fn new(major: u64, minor: u64, patch: u64) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+            prerelease: None,
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim().trim_start_matches('v');
+        let (core, prerelease) = match value.split_once('-') {
+            Some((core, suffix)) if !suffix.is_empty() => (core, Some(suffix.to_owned())),
+            Some(_) => bail!("binary version prerelease suffix is empty"),
+            None => (value, None),
+        };
+        let mut pieces = core.split('.');
+        let major = parse_version_component(pieces.next(), "major")?;
+        let minor = parse_version_component(pieces.next(), "minor")?;
+        let patch = parse_version_component(pieces.next(), "patch")?;
+        if pieces.next().is_some() {
+            bail!("binary version has too many numeric components");
+        }
+        if let Some(suffix) = &prerelease
+            && !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        {
+            bail!("binary version prerelease suffix is invalid");
+        }
+        Ok(Self {
+            major,
+            minor,
+            patch,
+            prerelease,
+        })
+    }
+}
+
+impl fmt::Display for BinaryVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(prerelease) = &self.prerelease {
+            write!(formatter, "-{prerelease}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Ord for BinaryVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| match (&self.prerelease, &other.prerelease) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (Some(left), Some(right)) => left.cmp(right),
+            })
+    }
+}
+
+impl PartialOrd for BinaryVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn parse_version_component(value: Option<&str>, name: &str) -> Result<u64> {
+    let value = value.with_context(|| format!("binary version is missing its {name} component"))?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("binary version {name} component is invalid");
+    }
+    value
+        .parse::<u64>()
+        .with_context(|| format!("binary version {name} component is too large"))
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -137,6 +280,30 @@ impl BinaryProbe {
             version,
             raw_output,
         })
+    }
+
+    pub async fn run_compatible(binary: &InstalledBinary, timeout: Duration) -> Result<Self> {
+        let probe = Self::run(binary, timeout).await?;
+        probe.ensure_compatible()?;
+        Ok(probe)
+    }
+
+    pub fn parsed_version(&self) -> Result<BinaryVersion> {
+        BinaryVersion::parse(&self.version)
+    }
+
+    pub fn ensure_compatible(&self) -> Result<()> {
+        let version = self.parsed_version()?;
+        let range = self.kind.compatibility();
+        if !range.accepts(&version) {
+            bail!(
+                "unsupported {:?} version {}; supported range is {}",
+                self.kind,
+                version,
+                range.description()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -312,6 +479,37 @@ mod tests {
             extract_version("tunnel-client v0.0.10"),
             Some("0.0.10".to_owned())
         );
+    }
+
+    #[test]
+    fn compatibility_ranges_reject_old_future_and_prerelease_versions() -> Result<()> {
+        let openai = BinaryKind::OpenAiTunnelClient.compatibility();
+        assert!(openai.accepts(&BinaryVersion::parse("0.0.10")?));
+        assert!(!openai.accepts(&BinaryVersion::parse("0.0.9")?));
+        assert!(!openai.accepts(&BinaryVersion::parse("0.0.11-dev")?));
+        assert!(!openai.accepts(&BinaryVersion::parse("0.0.11")?));
+
+        let cloudflared = BinaryKind::Cloudflared.compatibility();
+        assert!(cloudflared.accepts(&BinaryVersion::parse("2026.7.2")?));
+        assert!(!cloudflared.accepts(&BinaryVersion::parse("2024.12.1")?));
+        assert!(!cloudflared.accepts(&BinaryVersion::parse("2027.0.0")?));
+        Ok(())
+    }
+
+    #[test]
+    fn version_parser_preserves_prerelease_identity() -> Result<()> {
+        assert_eq!(
+            BinaryVersion::parse("v0.0.11-dev")?,
+            BinaryVersion {
+                major: 0,
+                minor: 0,
+                patch: 11,
+                prerelease: Some("dev".to_owned()),
+            }
+        );
+        assert!(BinaryVersion::parse("0.0").is_err());
+        assert!(BinaryVersion::parse("0.0.10+build").is_err());
+        Ok(())
     }
 
     #[test]

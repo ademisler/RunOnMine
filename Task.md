@@ -50,10 +50,10 @@ Status markers:
 - [x] **P1-19 — Isolate connector startup failures.** One failed connector must become degraded without taking healthy local or remote connectors down.
 - [x] **P1-20 — Move OpenAI init/doctor out of blocking agent startup.** Activate connectors asynchronously with visible states and deadlines.
 - [x] **P1-21 — Store Quick Tunnel runtime URL as ephemeral state.** Clear stale URLs and keep runtime discovery out of durable desired configuration.
-- [-] **P1-22 — Add managed connector binary update and rollback.** Cloudflare uses immutable verified versions with atomic config/manifest/service rollback; OpenAI tunnel-client migration and compatibility-gated update remain in progress.
+- [x] **P1-22 — Add managed connector binary update and rollback.** Cloudflare and OpenAI use immutable verified versions with atomic config/manifest/service rollback; legacy OpenAI managed pairs migrate without deletion.
 - [x] **P1-23 — Distinguish and harden unmanaged external binaries.** CLI and startup distinguish verified managed, pinned external, and unpinned external binaries; optional pins bind canonical path, digest, owner, mode, size, and modification time.
 - [ ] **P1-24 — Strengthen connector binary supply-chain verification.** Add signed manifests/provenance and independent trust roots.
-- [ ] **P1-25 — Enforce connector-client compatibility ranges.** Probe supported versions and preserve known-good rollback.
+- [x] **P1-25 — Enforce connector-client compatibility ranges.** Setup, doctor, update and startup probe supported stable ranges before activation and preserve the known-good active version on rejection.
 
 ## P2 — Architecture, reliability and maintainability
 

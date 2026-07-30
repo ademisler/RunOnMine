@@ -201,11 +201,19 @@ and reject archive path traversal. New managed Cloudflare installs are stored in
 immutable SHA-256-addressed version directories with a private receipt. Connector
 startup accepts a managed version only when its exact path shape, receipt
 provider/path, and executable digest all verify. `runonmine connect
-update-managed-binaries` prepares and probes a new Cloudflare version before a
-single config/active-manifest/service-restart transaction; restart failure
-restores both the prior configuration and active version. OpenAI tunnel-client
-migration to this update path remains compatibility-gated and is not changed by
-that command yet.
+update-managed-binaries` prepares, receipt-verifies and compatibility-probes new
+Cloudflare and OpenAI versions before a config/active-manifest/service-restart
+transaction. Only managed paths are rewritten; explicit external paths remain
+untouched. Restart failure restores both the prior configuration and active
+version. A valid legacy `data/bin/tunnel-client` plus receipt is copied into the
+immutable version store on the next OpenAI setup, while the original pair is
+preserved for recovery.
+
+Compatibility is checked during setup, doctor, managed update and agent startup.
+RunOnMine currently accepts stable OpenAI tunnel-client `0.0.10` and stable
+cloudflared date versions from `2025.1.0` up to, but not including, `2027.0.0`.
+Prereleases and versions outside those ranges fail before activation; the prior
+known-good active version remains selected.
 
 Explicit user-supplied absolute paths remain an advanced local trust decision;
 PATH fallback is not used. `runonmine connect list` reports
