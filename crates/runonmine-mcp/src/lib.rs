@@ -3,11 +3,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use chrono::Utc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
@@ -24,9 +23,8 @@ use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::process::{ProcessRequest, execute_shell};
 use runonmine_core::secrets::SecretStore;
 use runonmine_core::{
-    AppConfig, AppPaths, ApprovalRequest, ApprovalStatus, AuditOutcome, BrowserProfileMode,
-    Capability, ConnectorConfig, ConnectorKind, PolicyContext, PolicyEngine, PolicyMode,
-    PrincipalContext, StateStore,
+    AppConfig, AppPaths, AuditOutcome, BrowserProfileMode, Capability, ConnectorConfig,
+    ConnectorKind, PolicyContext, PolicyEngine, PolicyMode, PrincipalContext, StateStore,
 };
 use runonmine_oauth::{Scope, ScopeSet};
 use runonmine_platform::desktop::{self, ScreenshotTarget};
@@ -37,11 +35,13 @@ use runonmine_platform::native::{self, DbusCall};
 use serde::Serialize;
 use serde_json::json;
 
+mod approval_flow;
 mod audit;
 mod http;
 mod managed_connectors;
 mod rate_limit;
 mod session;
+use approval_flow::ApprovalFlow;
 use audit::AuditRecorder;
 pub use http::serve_loopback;
 use rate_limit::PrincipalRateLimiter;
@@ -67,8 +67,8 @@ struct RuntimeInner {
     connector_id: String,
     store: StateStore,
     audit: AuditRecorder,
+    approvals: ApprovalFlow,
     filesystem: ScopedFilesystem,
-    approval_timeout: Duration,
     process_timeout: Duration,
     max_process_timeout: Duration,
     max_output_bytes: usize,
@@ -138,13 +138,20 @@ impl Runtime {
             bail!("audit chain verification failed; run `runonmine doctor`");
         }
         store.prune_audit()?;
+        let audit = AuditRecorder::new(connector_id, store.clone());
+        let approvals = ApprovalFlow::new(
+            connector_id,
+            store.clone(),
+            audit.clone(),
+            Duration::from_secs(config.limits.approval_timeout_seconds),
+        );
         Ok(Self(Arc::new(RuntimeInner {
             config_path: paths.config_file(),
             connector_id: connector_id.to_owned(),
-            audit: AuditRecorder::new(connector_id, store.clone()),
+            audit,
+            approvals,
             store,
             filesystem,
-            approval_timeout: Duration::from_secs(config.limits.approval_timeout_seconds),
             process_timeout: Duration::from_secs(config.limits.default_process_timeout_seconds),
             max_process_timeout: Duration::from_secs(config.limits.max_process_timeout_seconds),
             max_output_bytes: config.limits.max_output_bytes,
@@ -177,6 +184,10 @@ impl Runtime {
 
     fn audit(&self) -> &AuditRecorder {
         &self.0.audit
+    }
+
+    fn approvals(&self) -> &ApprovalFlow {
+        &self.0.approvals
     }
 }
 
@@ -386,114 +397,10 @@ impl RunOnMineServer {
             PreApprovalDecision::Ask => {}
         }
 
-        let chrono_timeout = chrono::Duration::from_std(self.runtime.0.approval_timeout)
-            .map_err(|_| McpError::internal_error("Invalid local approval timeout", None))?;
-        let approval = ApprovalRequest::new(
-            &connector.id,
-            tool_name,
-            approval_preview(tool_name, arguments),
-            &argument_hash,
-            Utc::now() + chrono_timeout,
-        );
         self.runtime
-            .0
-            .store
-            .insert_approval_async(approval.clone())
+            .approvals()
+            .request(tool_name, capability, summary, &argument_hash, arguments)
             .await
-            .map_err(|_| {
-                McpError::internal_error("Could not create a local approval request", None)
-            })?;
-        if let Err(error) = self
-            .runtime
-            .0
-            .audit
-            .record_required(
-                tool_name,
-                capability,
-                AuditOutcome::PendingApproval,
-                &argument_hash,
-                summary,
-            )
-            .await
-        {
-            let _ignored = self
-                .runtime
-                .0
-                .store
-                .resolve_approval_async(approval.id, runonmine_core::ApprovalDecision::Deny)
-                .await;
-            return Err(error);
-        }
-        let deadline = Instant::now() + self.runtime.0.approval_timeout;
-        loop {
-            if Instant::now() >= deadline {
-                self.runtime
-                    .audit()
-                    .record_required(
-                        tool_name,
-                        capability,
-                        AuditOutcome::Denied,
-                        &argument_hash,
-                        "local approval timed out",
-                    )
-                    .await?;
-                return Err(McpError::invalid_request("Local approval timed out", None));
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            let status = self
-                .runtime
-                .0
-                .store
-                .approval_status_async(approval.id)
-                .await
-                .map_err(|_| McpError::internal_error("Could not read local approval", None))?
-                .map_or(ApprovalStatus::Expired, |request| request.status);
-            match status {
-                ApprovalStatus::Approved => {
-                    self.runtime
-                        .audit()
-                        .record_required(
-                            tool_name,
-                            capability,
-                            AuditOutcome::Allowed,
-                            &argument_hash,
-                            summary,
-                        )
-                        .await?;
-                    return Ok(());
-                }
-                ApprovalStatus::Denied => {
-                    self.runtime
-                        .audit()
-                        .record_required(
-                            tool_name,
-                            capability,
-                            AuditOutcome::Denied,
-                            &argument_hash,
-                            "denied by the machine owner",
-                        )
-                        .await?;
-                    return Err(McpError::invalid_request(
-                        "Denied by the machine owner",
-                        None,
-                    ));
-                }
-                ApprovalStatus::Expired => {
-                    self.runtime
-                        .audit()
-                        .record_required(
-                            tool_name,
-                            capability,
-                            AuditOutcome::Denied,
-                            &argument_hash,
-                            "local approval expired",
-                        )
-                        .await?;
-                    return Err(McpError::invalid_request("Local approval timed out", None));
-                }
-                ApprovalStatus::Pending => {}
-            }
-        }
     }
 
     fn success<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
@@ -1818,10 +1725,11 @@ fn required_secret(store: &dyn SecretStore, name: &str) -> Result<secrecy::Secre
 
 #[allow(clippy::too_many_lines)]
 mod validation;
+#[cfg(test)]
+use validation::approval_preview;
 use validation::{
-    approval_preview, argument_hash, browser_should_be_headless, validate_dbus_arguments,
-    validate_nonempty_text, validate_optional_path, validate_path, validate_string_arguments,
-    validate_text,
+    argument_hash, browser_should_be_headless, validate_dbus_arguments, validate_nonempty_text,
+    validate_optional_path, validate_path, validate_string_arguments, validate_text,
 };
 
 #[cfg(test)]
