@@ -31,7 +31,7 @@ Status markers:
 
 - [x] **P1-01 — Apply browser-origin policy to every page operation.** Current page origin must authorize read, click, type, press, evaluate, screenshot, snapshot, URL and close operations; redirects and target changes must not become `ResourceContext::None`.
 - [x] **P1-02 — Canonicalize privileged executable resources before policy evaluation.** Use the same executable identity as the helper.
-- [ ] **P1-03 — Harden OAuth Dynamic Client Registration against persistent denial of service.** Validate before consuming rate-limit capacity; add source-aware limits, registration authorization/approval, client expiry/pruning and quota recovery.
+- [x] **P1-03 — Harden OAuth Dynamic Client Registration against persistent denial of service.** Validate before consuming rate-limit capacity; add source-aware limits, registration authorization/approval, client expiry/pruning and quota recovery.
 - [ ] **P1-04 — Use least-privilege OAuth defaults.** Missing `scope` must not grant every supported scope.
 - [ ] **P1-05 — Separate platform-native OAuth authority from `shell:exec`.** Introduce explicit platform-native scopes and consent text.
 - [ ] **P1-06 — Prevent OAuth client-name impersonation in consent UI.** Show client ID fingerprint, redirect origins, registration time and unverified-client warning.

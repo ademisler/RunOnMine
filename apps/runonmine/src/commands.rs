@@ -8,7 +8,10 @@ use connector_transactions::{
 };
 use connector_transactions::{local_http_secret_name, update_config_with_secrets};
 pub(crate) use connectors::{connect, setup};
-use connectors::{ensure_private_directory, generate_path_secret, load_connector_binary};
+use connectors::{
+    ensure_private_directory, generate_path_secret, load_connector_binary,
+    validate_private_output_path, write_oauth_registration_credentials,
+};
 
 pub(super) fn policy(command: PolicyCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
@@ -266,21 +269,34 @@ pub(super) fn oauth(command: OauthCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
     let store = SqliteOAuthStore::open(&paths.state_db())?;
     match command {
-        OauthCommand::Clients {
-            command: OauthClientCommand::List,
-        } => {
+        OauthCommand::Clients { command } => oauth_clients(&store, command),
+        OauthCommand::Sessions { command } => oauth_sessions(&store, command),
+        OauthCommand::RegistrationToken { command } => oauth_registration_token(&paths, command),
+        OauthCommand::Cleanup => {
+            let removed = store.cleanup_expired(chrono::Utc::now())?;
+            println!("Removed {removed} expired OAuth record(s).");
+            Ok(())
+        }
+    }
+}
+
+fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Result<()> {
+    match command {
+        OauthClientCommand::List => {
             let clients = store.registered_clients()?;
             if clients.is_empty() {
                 println!("No OAuth clients are registered.");
             }
             for client in clients {
                 println!(
-                    "{}  {}  issued={}
-  scopes: {}
-  redirects: {}",
+                    "{}  {}  issued={}  expires={}  last_used={}\n  scopes: {}\n  redirects: {}",
                     client.client_id,
                     client.client_name,
                     client.issued_at.to_rfc3339(),
+                    client.expires_at.to_rfc3339(),
+                    client
+                        .last_used_at
+                        .map_or_else(|| "never".to_owned(), |value| value.to_rfc3339()),
                     client.scopes.to_space_delimited(),
                     client
                         .redirect_uris
@@ -291,32 +307,30 @@ pub(super) fn oauth(command: OauthCommand) -> Result<()> {
                 );
             }
         }
-        OauthCommand::Clients {
-            command: OauthClientCommand::Revoke { client_id },
-        } => {
+        OauthClientCommand::Revoke { client_id } => {
             let revoked = store.revoke_client_tokens(&client_id)?;
             println!("Revoked {revoked} active OAuth token(s) for {client_id}.");
         }
-        OauthCommand::Clients {
-            command: OauthClientCommand::Delete { client_id },
-        } => {
+        OauthClientCommand::Delete { client_id } => {
             if !store.delete_client(&client_id)? {
                 bail!("OAuth client was not found");
             }
             println!("Deleted OAuth client {client_id} and its authorization state.");
         }
-        OauthCommand::Sessions {
-            command: OauthSessionCommand::List { client_id },
-        } => {
+    }
+    Ok(())
+}
+
+fn oauth_sessions(store: &SqliteOAuthStore, command: OauthSessionCommand) -> Result<()> {
+    match command {
+        OauthSessionCommand::List { client_id } => {
             let sessions = store.sessions(client_id.as_deref())?;
             if sessions.is_empty() {
                 println!("No OAuth sessions were found.");
             }
             for session in sessions {
                 println!(
-                    "{}  client={}  active={}  expires={}
-  subject: {}
-  scopes: {}",
+                    "{}  client={}  active={}  expires={}\n  subject: {}\n  scopes: {}",
                     session.family_id,
                     session.client_id,
                     session.active,
@@ -326,18 +340,115 @@ pub(super) fn oauth(command: OauthCommand) -> Result<()> {
                 );
             }
         }
-        OauthCommand::Sessions {
-            command: OauthSessionCommand::Revoke { family_id },
-        } => {
+        OauthSessionCommand::Revoke { family_id } => {
             let revoked = store.revoke_session(family_id)?;
             println!("Revoked {revoked} active token(s) in session {family_id}.");
         }
-        OauthCommand::Cleanup => {
-            let removed = store.cleanup_expired(chrono::Utc::now())?;
-            println!("Removed {removed} expired OAuth record(s).");
-        }
     }
     Ok(())
+}
+
+fn oauth_registration_token(
+    paths: &AppPaths,
+    command: OauthRegistrationTokenCommand,
+) -> Result<()> {
+    match command {
+        OauthRegistrationTokenCommand::Export {
+            connector_id,
+            output,
+        } => export_oauth_registration_token(paths, &connector_id, &output),
+        OauthRegistrationTokenCommand::Rotate {
+            connector_id,
+            output,
+        } => rotate_oauth_registration_token(paths, &connector_id, output.as_deref()),
+    }
+}
+
+fn export_oauth_registration_token(
+    paths: &AppPaths,
+    connector_id: &str,
+    output: &Path,
+) -> Result<()> {
+    validate_private_output_path(Some(output))?;
+    let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
+    let connector = oauth_connector(&config, connector_id)?;
+    let endpoint = oauth_registration_endpoint(connector)?;
+    let secrets = default_secret_store(paths)?;
+    let token = secrets
+        .get(&format!(
+            "connector.{connector_id}.oauth_registration_token"
+        ))?
+        .context("OAuth registration token is missing")?;
+    write_oauth_registration_credentials(
+        output,
+        connector_id,
+        endpoint.as_str(),
+        token.expose_secret(),
+    )?;
+    println!(
+        "OAuth registration credentials written to {}.",
+        output.display()
+    );
+    Ok(())
+}
+
+fn rotate_oauth_registration_token(
+    paths: &AppPaths,
+    connector_id: &str,
+    output: Option<&Path>,
+) -> Result<()> {
+    validate_private_output_path(output)?;
+    let token = generate_path_secret();
+    let secrets = default_secret_store(paths)?;
+    let endpoint = update_config_with_secrets(
+        &paths.config_file(),
+        secrets.as_ref(),
+        |config, transaction| {
+            let connector = oauth_connector(config, connector_id)?;
+            let endpoint = oauth_registration_endpoint(connector)?;
+            transaction.set(
+                &format!("connector.{connector_id}.oauth_registration_token"),
+                &SecretString::from(token.clone()),
+            )?;
+            Ok(endpoint)
+        },
+    )?;
+    if let Some(output) = output {
+        write_oauth_registration_credentials(output, connector_id, endpoint.as_str(), &token)
+            .with_context(|| {
+                format!(
+                    "the token was rotated and remains in the credential store, but secure export to {} failed; retry with `runonmine oauth registration-token export {connector_id} --output <absolute-file>`",
+                    output.display()
+                )
+            })?;
+        println!(
+            "OAuth registration credentials written to {}.",
+            output.display()
+        );
+    } else {
+        println!("OAuth registration token rotated in the credential store.");
+    }
+    println!("Restart the agent to invalidate the previous registration token.");
+    Ok(())
+}
+
+fn oauth_connector<'a>(config: &'a AppConfig, connector_id: &str) -> Result<&'a ConnectorConfig> {
+    let connector = config
+        .connector(connector_id)
+        .context("OAuth connector was not found")?;
+    if connector.kind != ConnectorKind::CloudflareOauth {
+        bail!("connector is not a Cloudflare OAuth connector");
+    }
+    Ok(connector)
+}
+
+fn oauth_registration_endpoint(connector: &ConnectorConfig) -> Result<Url> {
+    connector
+        .public_base_url
+        .as_ref()
+        .context("OAuth connector public base URL is missing")?
+        .join("oauth/register")
+        .context("OAuth registration endpoint is invalid")
 }
 
 pub(super) fn admin(command: AdminCommand) -> Result<()> {
@@ -435,43 +546,12 @@ pub(super) fn emergency_lock(arguments: &LockArgs) -> Result<()> {
     let oauth = SqliteOAuthStore::open(&paths.state_db())?;
     let revoked_tokens = oauth.emergency_revoke_all()?;
 
-    let config_path = paths.config_file();
-    let secrets = default_secret_store(&paths)?;
-    let (rotated_local_http_tokens, rotated_quick_tunnels, removed_openai_keys) =
-        update_config_with_secrets(&config_path, secrets.as_ref(), |config, transaction| {
-            let mut rotated_local_http_tokens = 0_usize;
-            let mut rotated_quick_tunnels = 0_usize;
-            let mut removed_openai_keys = 0_usize;
-            for connector in &config.connectors {
-                match connector.kind {
-                    ConnectorKind::LocalHttp => {
-                        transaction.set(
-                            &local_http_secret_name(&connector.id),
-                            &SecretString::from(generate_path_secret()),
-                        )?;
-                        rotated_local_http_tokens += 1;
-                    }
-                    ConnectorKind::CloudflareQuick => {
-                        transaction.set(
-                            &format!("connector.{}.path_secret", connector.id),
-                            &SecretString::from(generate_path_secret()),
-                        )?;
-                        rotated_quick_tunnels += 1;
-                    }
-                    ConnectorKind::OpenAiTunnel => {
-                        transaction
-                            .delete(&format!("connector.{}.runtime_api_key", connector.id))?;
-                        removed_openai_keys += 1;
-                    }
-                    ConnectorKind::LocalStdio | ConnectorKind::CloudflareOauth => {}
-                }
-            }
-            Ok((
-                rotated_local_http_tokens,
-                rotated_quick_tunnels,
-                removed_openai_keys,
-            ))
-        })?;
+    let (
+        rotated_local_http_tokens,
+        rotated_quick_tunnels,
+        rotated_oauth_registration_tokens,
+        removed_openai_keys,
+    ) = rotate_lock_credentials(&paths)?;
 
     println!("RunOnMine is locked.");
     println!("Denied pending approvals: {denied}");
@@ -479,6 +559,7 @@ pub(super) fn emergency_lock(arguments: &LockArgs) -> Result<()> {
     println!("Revoked OAuth tokens: {revoked_tokens}");
     println!("Rotated local HTTP tokens: {rotated_local_http_tokens}");
     println!("Rotated Quick Tunnel secrets: {rotated_quick_tunnels}");
+    println!("Rotated OAuth registration tokens: {rotated_oauth_registration_tokens}");
     println!("Removed OpenAI runtime keys: {removed_openai_keys}");
     println!("Restart and reconnect explicitly when access should be restored.");
     if !stop_failures.is_empty() {
@@ -488,6 +569,48 @@ pub(super) fn emergency_lock(arguments: &LockArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn rotate_lock_credentials(paths: &AppPaths) -> Result<(usize, usize, usize, usize)> {
+    let config_path = paths.config_file();
+    let secrets = default_secret_store(paths)?;
+    update_config_with_secrets(&config_path, secrets.as_ref(), |config, transaction| {
+        let mut local_http = 0_usize;
+        let mut quick_tunnels = 0_usize;
+        let mut oauth_registration = 0_usize;
+        let mut openai = 0_usize;
+        for connector in &config.connectors {
+            match connector.kind {
+                ConnectorKind::LocalHttp => {
+                    transaction.set(
+                        &local_http_secret_name(&connector.id),
+                        &SecretString::from(generate_path_secret()),
+                    )?;
+                    local_http += 1;
+                }
+                ConnectorKind::CloudflareQuick => {
+                    transaction.set(
+                        &format!("connector.{}.path_secret", connector.id),
+                        &SecretString::from(generate_path_secret()),
+                    )?;
+                    quick_tunnels += 1;
+                }
+                ConnectorKind::CloudflareOauth => {
+                    transaction.set(
+                        &format!("connector.{}.oauth_registration_token", connector.id),
+                        &SecretString::from(generate_path_secret()),
+                    )?;
+                    oauth_registration += 1;
+                }
+                ConnectorKind::OpenAiTunnel => {
+                    transaction.delete(&format!("connector.{}.runtime_api_key", connector.id))?;
+                    openai += 1;
+                }
+                ConnectorKind::LocalStdio => {}
+            }
+        }
+        Ok((local_http, quick_tunnels, oauth_registration, openai))
+    })
 }
 
 pub(super) fn uninstall(arguments: &UninstallArgs) -> Result<()> {
@@ -531,6 +654,7 @@ pub(super) fn uninstall(arguments: &UninstallArgs) -> Result<()> {
                             "github_client_id",
                             "github_client_secret",
                             "oauth_hash_key",
+                            "oauth_registration_token",
                             "runtime_api_key",
                         ] {
                             transaction.delete(&format!("connector.{}.{suffix}", connector.id))?;
@@ -694,7 +818,12 @@ pub(super) async fn doctor() -> Result<()> {
                         failures = failures.saturating_add(1);
                     }
                 }
-                for suffix in ["github_client_id", "github_client_secret", "oauth_hash_key"] {
+                for suffix in [
+                    "github_client_id",
+                    "github_client_secret",
+                    "oauth_hash_key",
+                    "oauth_registration_token",
+                ] {
                     if secrets
                         .get(&format!("connector.{}.{suffix}", connector.id))?
                         .is_none()
@@ -1279,9 +1408,9 @@ mod tests {
             connector_secret_suffixes(ConnectorKind::LocalHttp),
             &["local_http_token"]
         );
-        assert!(
-            connector_secret_suffixes(ConnectorKind::CloudflareOauth)
-                .contains(&"github_client_secret")
-        );
+        let oauth = connector_secret_suffixes(ConnectorKind::CloudflareOauth);
+        assert!(oauth.contains(&"github_client_secret"));
+        assert!(oauth.contains(&"oauth_hash_key"));
+        assert!(oauth.contains(&"oauth_registration_token"));
     }
 }

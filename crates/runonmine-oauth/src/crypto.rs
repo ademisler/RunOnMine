@@ -15,6 +15,8 @@ pub enum HashPurpose {
     RefreshToken,
     GitHubState,
     ConsentCsrf,
+    RegistrationAccess,
+    RegistrationSource,
 }
 
 impl HashPurpose {
@@ -25,6 +27,8 @@ impl HashPurpose {
             Self::RefreshToken => b"runonmine/oauth/refresh-token/v1\0",
             Self::GitHubState => b"runonmine/oauth/github-state/v1\0",
             Self::ConsentCsrf => b"runonmine/oauth/consent-csrf/v1\0",
+            Self::RegistrationAccess => b"runonmine/oauth/registration-access/v1\0",
+            Self::RegistrationSource => b"runonmine/oauth/registration-source/v1\0",
         }
     }
 }
@@ -43,6 +47,14 @@ impl SecretHash {
 
     pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    pub(crate) fn constant_time_eq(&self, other: &Self) -> bool {
+        bool::from(self.0.ct_eq(&other.0))
+    }
+
+    pub(crate) fn storage_key(&self) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.0)
     }
 }
 

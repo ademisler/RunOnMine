@@ -69,11 +69,19 @@ sessions after 30 idle minutes, and permits 120 calls per connector per minute
 by default. The server validates the connector bound to each session and
 rejects session reuse through a different connector.
 
+OAuth dynamic registration authenticates with a separately domain-hashed initial
+access token loaded from the credential store. The HTTP layer validates that
+bearer credential and registration payload before entering one SQLite
+`IMMEDIATE` transaction that prunes expired clients, enforces source/global
+windows plus total capacity, records the attempt, and inserts the client.
+Unsuccessful validation consumes no slot. Client expiry is refreshed on real
+authorization use rather than registration polling.
+
 ## Local data
 
 - `config.toml` contains non-secret configuration, is replaced atomically, and uses an owner-only sidecar lock for transactional read-modify-write updates.
-- `state.db` contains approvals, sessions, OAuth token hashes, and audit records.
-- platform credential storage contains connector paths and external API credentials.
+- `state.db` contains approvals, sessions, OAuth token/source hashes, expiring registered-client metadata, and audit records.
+- platform credential storage contains connector paths, external API credentials, OAuth hash keys, and owner-controlled registration access tokens.
 - isolated Chromium profiles live below the per-user RunOnMine data directory.
 
 Quick Tunnel URL discovery plus desktop, setup, browser, policy, and connector lifecycle mutations use the shared configuration transaction API, which reloads the latest validated document while holding the sidecar lock before atomically replacing it. Connector operations that also modify credentials record every previous secret value while that configuration lock is held and restore those values before releasing the lock after handled secret-store, validation, or save failures. Desktop credential replacement, emergency rotation, and purge enumeration use the same lock order. This is coordinated rollback across two stores, not a crash-proof distributed transaction. On headless Linux without Secret Service, secrets are stored only when an explicit `RUNONMINE_MASTER_KEY` supplies a 32-byte key. The file backend uses XChaCha20-Poly1305 with a random nonce and per-entry associated data. A separate owner-only file lock serializes secret updates across CLI, desktop, and agent processes. Missing or invalid key material fails closed.

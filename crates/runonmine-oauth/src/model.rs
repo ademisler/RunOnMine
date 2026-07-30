@@ -165,6 +165,27 @@ pub struct RegisteredClient {
     pub redirect_uris: Vec<Url>,
     pub scopes: ScopeSet,
     pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub registration_source_hash: String,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct RegistrationLimits {
+    pub now: DateTime<Utc>,
+    pub window_seconds: i64,
+    pub per_source_limit: usize,
+    pub global_limit: usize,
+    pub max_clients: usize,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistrationOutcome {
+    Registered,
+    RateLimited,
+    CapacityReached,
 }
 
 #[derive(Clone, Debug, Serialize)]

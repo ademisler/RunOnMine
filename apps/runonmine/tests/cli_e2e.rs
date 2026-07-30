@@ -1,10 +1,16 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
+use runonmine_core::{
+    AppConfig, CloudflareNamedSettings, ConnectorConfig, ConnectorKind, OAuthOwnerSettings,
+    PolicyPreset,
+};
 use tempfile::TempDir;
+use url::Url;
 
 const TEST_MASTER_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
@@ -245,5 +251,132 @@ fn local_http_credentials_never_reach_standard_output() -> Result<()> {
 
     let disabled = cli.run_ok(&["connect", "local-http", "disable"])?;
     assert!(disabled.contains("token was deleted"));
+    Ok(())
+}
+
+fn configure_oauth_test_connector(
+    cli: &IsolatedCli,
+    config_path: &Path,
+    connector_id: &str,
+) -> Result<()> {
+    let tunnel_credentials = cli.root.path().join("tunnel-credentials.json");
+    fs::write(&tunnel_credentials, b"{}")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&tunnel_credentials, fs::Permissions::from_mode(0o600))?;
+    }
+    let mut config = AppConfig::load(config_path)?;
+    config.connectors.push(ConnectorConfig {
+        id: connector_id.to_owned(),
+        name: "OAuth test connector".to_owned(),
+        kind: ConnectorKind::CloudflareOauth,
+        enabled: false,
+        policy_preset: PolicyPreset::Safe,
+        pack_overrides: BTreeMap::default(),
+        tool_overrides: BTreeMap::default(),
+        policy_rules: Vec::new(),
+        public_base_url: Some(Url::parse("https://mcp.example.com/")?),
+        cloudflare_quick: None,
+        cloudflare_named: Some(CloudflareNamedSettings {
+            tunnel_id: "00000000-0000-4000-8000-000000000456".to_owned(),
+            credentials_file: tunnel_credentials,
+            hostname: "mcp.example.com".to_owned(),
+            cloudflared_path: None,
+            metrics_port: 47_824,
+        }),
+        oauth_owner: Some(OAuthOwnerSettings {
+            github_login: "owner".to_owned(),
+            github_id: 42,
+        }),
+        openai_tunnel: None,
+    });
+    config.save(config_path)
+}
+
+fn initial_access_token(path: &Path) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    value["initial_access_token"]
+        .as_str()
+        .map(str::to_owned)
+        .context("OAuth registration export omitted initial_access_token")
+}
+
+#[test]
+fn oauth_registration_token_is_owner_exported_and_rotated_without_stdout_leak() -> Result<()> {
+    let cli = IsolatedCli::new()?;
+    let project = cli.project.to_string_lossy().into_owned();
+    let setup = cli.run_ok(&["setup", "--root", &project])?;
+    let config_path = config_path_from_setup(&setup)?;
+    let connector_id = "00000000-0000-4000-8000-000000000123";
+
+    configure_oauth_test_connector(&cli, &config_path, connector_id)?;
+
+    let first_output = cli.root.path().join("oauth-registration-first.json");
+    let first_output_text = first_output.to_string_lossy().into_owned();
+    let rotated = cli.run_ok(&[
+        "oauth",
+        "registration-token",
+        "rotate",
+        connector_id,
+        "--output",
+        &first_output_text,
+    ])?;
+    let first: serde_json::Value = serde_json::from_slice(&fs::read(&first_output)?)?;
+    let first_token = initial_access_token(&first_output)?;
+    assert_eq!(first["authorization_scheme"], "Bearer");
+    assert_eq!(
+        first["registration_endpoint"],
+        "https://mcp.example.com/oauth/register"
+    );
+    assert!(!rotated.contains(first_token.as_str()));
+    assert!(!rotated.contains("initial_access_token"));
+
+    let exported_output = cli.root.path().join("oauth-registration-exported.json");
+    let exported_output_text = exported_output.to_string_lossy().into_owned();
+    let exported = cli.run_ok(&[
+        "oauth",
+        "registration-token",
+        "export",
+        connector_id,
+        "--output",
+        &exported_output_text,
+    ])?;
+    let same: serde_json::Value = serde_json::from_slice(&fs::read(&exported_output)?)?;
+    assert_eq!(same["initial_access_token"], first_token);
+    assert!(!exported.contains(first_token.as_str()));
+
+    let second_output = cli.root.path().join("oauth-registration-second.json");
+    let second_output_text = second_output.to_string_lossy().into_owned();
+    let second_rotation = cli.run_ok(&[
+        "oauth",
+        "registration-token",
+        "rotate",
+        connector_id,
+        "--output",
+        &second_output_text,
+    ])?;
+    let second_token = initial_access_token(&second_output)?;
+    assert_ne!(first_token, second_token);
+    assert!(!second_rotation.contains(second_token.as_str()));
+
+    let overwrite = cli.run(&[
+        "oauth",
+        "registration-token",
+        "export",
+        connector_id,
+        "--output",
+        &second_output_text,
+    ])?;
+    assert!(!overwrite.status.success());
+    assert!(String::from_utf8_lossy(&overwrite.stderr).contains("refusing to overwrite"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for output in [&first_output, &exported_output, &second_output] {
+            assert_eq!(fs::metadata(output)?.permissions().mode() & 0o777, 0o600);
+        }
+    }
     Ok(())
 }

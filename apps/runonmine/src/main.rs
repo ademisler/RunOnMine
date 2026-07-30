@@ -190,6 +190,9 @@ struct CloudflareOAuthArgs {
     github_owner_id: Option<u64>,
     #[arg(long)]
     cloudflared: Option<PathBuf>,
+    /// Write the initial OAuth registration credential to a new owner-only JSON file.
+    #[arg(long, value_name = "ABSOLUTE_FILE")]
+    registration_token_output: Option<PathBuf>,
     /// Read the GitHub OAuth client secret from standard input.
     #[arg(long, hide = true)]
     client_secret_stdin: bool,
@@ -336,8 +339,28 @@ enum OauthCommand {
         #[command(subcommand)]
         command: OauthSessionCommand,
     },
+    RegistrationToken {
+        #[command(subcommand)]
+        command: OauthRegistrationTokenCommand,
+    },
     /// Remove expired authorization state and tokens.
     Cleanup,
+}
+
+#[derive(Debug, Subcommand)]
+enum OauthRegistrationTokenCommand {
+    /// Export the current initial access token to a new owner-only JSON file.
+    Export {
+        connector_id: String,
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        output: PathBuf,
+    },
+    /// Rotate the initial access token and optionally export it securely.
+    Rotate {
+        connector_id: String,
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

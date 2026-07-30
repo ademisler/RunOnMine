@@ -282,6 +282,14 @@ fn build_oauth_connector(
         secrets,
         &format!("connector.{}.oauth_hash_key", connector.id),
     )?;
+    let registration_access_token = required_secret(
+        secrets,
+        &format!("connector.{}.oauth_registration_token", connector.id),
+    )?;
+    validate_256_bit_url_secret(
+        registration_access_token.expose_secret(),
+        "OAuth registration access token",
+    )?;
     let decoded_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(hash_key.expose_secret())
         .context("OAuth hash key is invalid")?;
@@ -309,6 +317,7 @@ fn build_oauth_connector(
         },
         Arc::new(SqliteOAuthStore::open(&paths.state_db())?),
         TokenHasher::new(hash_key)?,
+        &registration_access_token,
         Arc::new(verifier),
     )?;
     let resource_metadata = public_base

@@ -105,9 +105,12 @@ pub(super) fn connector_secret_suffixes(kind: ConnectorKind) -> &'static [&'stat
         ConnectorKind::LocalStdio => &[],
         ConnectorKind::LocalHttp => &["local_http_token"],
         ConnectorKind::CloudflareQuick => &["path_secret"],
-        ConnectorKind::CloudflareOauth => {
-            &["github_client_id", "github_client_secret", "oauth_hash_key"]
-        }
+        ConnectorKind::CloudflareOauth => &[
+            "github_client_id",
+            "github_client_secret",
+            "oauth_hash_key",
+            "oauth_registration_token",
+        ],
         ConnectorKind::OpenAiTunnel => &["runtime_api_key"],
     }
 }

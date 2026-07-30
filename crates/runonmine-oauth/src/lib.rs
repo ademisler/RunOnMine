@@ -23,7 +23,8 @@ pub use model::{
     AccessGrant, AuthorizationCodeGrant, AuthorizationRequest, ConsentChallenge, ConsentDecision,
     ConsentResult, DynamicClientRequest, DynamicClientResponse, GitHubAuthorization,
     GitHubCallback, IssuedToken, OAuthSession, PendingAuthorization, PendingConsent,
-    RegisteredClient, RevocationRequest, TokenGrant, TokenPairDraft, TokenRequest,
+    RegisteredClient, RegistrationLimits, RegistrationOutcome, RevocationRequest, TokenGrant,
+    TokenPairDraft, TokenRequest,
 };
 pub use scope::{Scope, ScopeSet};
 pub use service::{OAuthService, OAuthServiceConfig};

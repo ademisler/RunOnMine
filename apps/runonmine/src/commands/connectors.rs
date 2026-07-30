@@ -118,7 +118,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
         }
         ConnectCommand::LocalHttp { command } => match command {
             LocalHttpCommand::Enable { token_output } => {
-                validate_local_http_output_path(token_output.as_deref())?;
+                validate_private_output_path(token_output.as_deref())?;
                 let token = generate_path_secret();
                 let secret = SecretString::from(token.clone());
                 let (connector_id, port) =
@@ -138,7 +138,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 );
             }
             LocalHttpCommand::Rotate { token_output } => {
-                validate_local_http_output_path(token_output.as_deref())?;
+                validate_private_output_path(token_output.as_deref())?;
                 let token = generate_path_secret();
                 let secret = SecretString::from(token.clone());
                 let (connector_id, port) = update_config_with_secrets(
@@ -166,7 +166,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 )?;
             }
             LocalHttpCommand::Status { token_output } => {
-                validate_local_http_output_path(token_output.as_deref())?;
+                validate_private_output_path(token_output.as_deref())?;
                 let connector = config
                     .connectors
                     .iter()
@@ -263,6 +263,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
         ConnectCommand::Cloudflare {
             command: CloudflareCommand::Oauth(args),
         } => {
+            validate_private_output_path(args.registration_token_output.as_deref())?;
             let binary = ensure_binary(
                 &paths,
                 BinaryKind::Cloudflared,
@@ -301,6 +302,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 bail!("GitHub owner ID must be greater than zero");
             }
             let id = Uuid::new_v4().to_string();
+            let registration_token = generate_path_secret();
             let public_base_url = Url::parse(&format!("https://{hostname}/"))
                 .context("public Cloudflare hostname is invalid")?;
             let connector = ConnectorConfig {
@@ -317,7 +319,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 cloudflare_named: Some(CloudflareNamedSettings {
                     tunnel_id,
                     credentials_file,
-                    hostname,
+                    hostname: hostname.clone(),
                     cloudflared_path: Some(binary.path),
                     metrics_port: 47_824,
                 }),
@@ -344,10 +346,36 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                         format!("connector.{id}.oauth_hash_key"),
                         SecretString::from(generate_path_secret()),
                     ),
+                    (
+                        format!("connector.{id}.oauth_registration_token"),
+                        SecretString::from(registration_token.clone()),
+                    ),
                 ],
             )?;
             println!("Created OAuth connector {id}.");
             println!("Register {callback_url} in the GitHub OAuth app.");
+            if let Some(output) = args.registration_token_output.as_deref() {
+                write_oauth_registration_credentials(
+                    output,
+                    &id,
+                    &format!("https://{hostname}/oauth/register"),
+                    &registration_token,
+                )
+                .with_context(|| {
+                    format!(
+                        "the registration token remains in the credential store, but secure export to {} failed; retry with `runonmine oauth registration-token export {id} --output <absolute-file>`",
+                        output.display()
+                    )
+                })?;
+                println!(
+                    "OAuth registration credentials written to {}.",
+                    output.display()
+                );
+            } else {
+                println!(
+                    "The OAuth registration token was not printed. Export it with `runonmine oauth registration-token export {id} --output <absolute-file>`."
+                );
+            }
         }
         ConnectCommand::Openai(args) => {
             validate_profile_name(&args.profile)?;
@@ -510,22 +538,22 @@ fn report_local_http_credentials(
     Ok(())
 }
 
-fn validate_local_http_output_path(path: Option<&Path>) -> Result<()> {
+pub(super) fn validate_private_output_path(path: Option<&Path>) -> Result<()> {
     let Some(path) = path else {
         return Ok(());
     };
     if !path.is_absolute() {
-        bail!("local HTTP credential output must be an absolute path");
+        bail!("credential output must be an absolute path");
     }
     let parent = path
         .parent()
-        .context("local HTTP credential output has no parent directory")?;
+        .context("credential output has no parent directory")?;
     if !parent.is_dir() {
-        bail!("local HTTP credential output parent must already exist");
+        bail!("credential output parent must already exist");
     }
     match std::fs::symlink_metadata(path) {
         Ok(_) => bail!(
-            "refusing to overwrite existing local HTTP credential output: {}",
+            "refusing to overwrite existing credential output: {}",
             path.display()
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -539,15 +567,48 @@ fn write_local_http_credentials(
     connector_id: &str,
     token: &str,
 ) -> Result<()> {
-    validate_local_http_output_path(Some(path))?;
-    let export = LocalHttpCredentialExport {
-        version: 1,
-        connector_id,
-        endpoint: format!("http://127.0.0.1:{port}/mcp"),
-        authorization_scheme: "Bearer",
-        bearer_token: token,
-    };
-    let mut contents = serde_json::to_vec_pretty(&export)?;
+    write_private_json_new(
+        path,
+        &LocalHttpCredentialExport {
+            version: 1,
+            connector_id,
+            endpoint: format!("http://127.0.0.1:{port}/mcp"),
+            authorization_scheme: "Bearer",
+            bearer_token: token,
+        },
+    )
+}
+
+#[derive(serde::Serialize)]
+struct OAuthRegistrationCredentialExport<'a> {
+    version: u8,
+    connector_id: &'a str,
+    registration_endpoint: &'a str,
+    authorization_scheme: &'static str,
+    initial_access_token: &'a str,
+}
+
+pub(super) fn write_oauth_registration_credentials(
+    path: &Path,
+    connector_id: &str,
+    registration_endpoint: &str,
+    token: &str,
+) -> Result<()> {
+    write_private_json_new(
+        path,
+        &OAuthRegistrationCredentialExport {
+            version: 1,
+            connector_id,
+            registration_endpoint,
+            authorization_scheme: "Bearer",
+            initial_access_token: token,
+        },
+    )
+}
+
+fn write_private_json_new(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    validate_private_output_path(Some(path))?;
+    let mut contents = serde_json::to_vec_pretty(value)?;
     contents.push(b'\n');
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -796,11 +857,49 @@ mod tests {
     }
 
     #[test]
+    fn oauth_registration_credentials_use_private_no_overwrite_output() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = temporary.path().join("oauth-registration.json");
+        write_oauth_registration_credentials(
+            &output,
+            "connector-id",
+            "https://mcp.example.com/oauth/register",
+            "registration-token",
+        )?;
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&output)?)?;
+        assert_eq!(value["connector_id"], "connector-id");
+        assert_eq!(
+            value["registration_endpoint"],
+            "https://mcp.example.com/oauth/register"
+        );
+        assert_eq!(value["authorization_scheme"], "Bearer");
+        assert_eq!(value["initial_access_token"], "registration-token");
+        assert!(
+            write_oauth_registration_credentials(
+                &output,
+                "connector-id",
+                "https://mcp.example.com/oauth/register",
+                "other-token",
+            )
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&output)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn local_http_credential_output_requires_absolute_new_path() -> Result<()> {
-        assert!(validate_local_http_output_path(Some(Path::new("relative.json"))).is_err());
+        assert!(validate_private_output_path(Some(Path::new("relative.json"))).is_err());
         let temporary = tempfile::tempdir()?;
         assert!(
-            validate_local_http_output_path(Some(&temporary.path().join("missing/secret.json")))
+            validate_private_output_path(Some(&temporary.path().join("missing/secret.json")))
                 .is_err()
         );
         Ok(())

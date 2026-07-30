@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Require an owner-controlled initial access token for OAuth dynamic client registration; validate before accounting, enforce atomic per-source/global quotas, expire and prune unused clients, recover capacity, and add no-overwrite owner-only token export and rotation.
 - Canonicalize privileged executable policy resources with the exact root/SYSTEM ownership and path identity resolver used by the helper allowlist.
 - Bind every current-page browser operation to the active normalized origin, include that origin in exact-action grants and approval previews, and re-authorize when the page changes origin during an approval wait.
 - Stop printing local HTTP bearer tokens; add an explicit absolute, no-overwrite, current-user-only JSON export channel for enable, rotate, and status, and remove the legacy `--show-token` path.

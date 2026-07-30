@@ -60,7 +60,8 @@ secret URL as a long-term identity system.
 ## Cloudflare Named Tunnel with OAuth 2.1
 
 ```console
-runonmine connect cloudflare oauth
+runonmine connect cloudflare oauth \
+  --registration-token-output /absolute/private/oauth-registration.json
 ```
 
 The recommended Cloudflare mode uses Cloudflare only as the HTTPS carrier. The
@@ -69,7 +70,34 @@ dynamic client registration, authorization code flow, PKCE S256, consent, CSRF
 protection, token rotation, and revocation. GitHub proves the configured machine
 owner's identity.
 
-Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days; reuse revokes the token family. Dynamic client registration uses an atomic SQLite-backed time window that survives agent restarts, in addition to the total registered-client cap. Only keyed, domain-separated token hashes are stored in SQLite. The GitHub client secret and hashing key remain in the platform credential store.
+Dynamic client registration is not anonymous. `/oauth/register` requires the
+256-bit owner-controlled initial access token from the connector credential
+store as `Authorization: Bearer <token>`. The token is never printed. The optional
+creation flag above exports a new no-overwrite JSON file restricted to the
+current operating-system user. Existing credentials can be exported or rotated
+with:
+
+```console
+runonmine oauth registration-token export <connector-id> --output /absolute/private/oauth-registration.json
+runonmine oauth registration-token rotate <connector-id> --output /absolute/private/new-oauth-registration.json
+```
+
+Rotation takes effect after the agent restarts. Emergency lock stops the service
+and rotates every OAuth registration token before access can be restored.
+
+Registration payloads are fully validated before they can consume capacity.
+Authorized valid registrations are committed atomically with a SQLite-backed
+limit of five registrations per Cloudflare source per minute, twenty globally
+per minute, and 256 live clients. These limits survive agent restarts. Unused
+clients expire after 24 hours; the first and subsequent authorization use records
+`last_used_at` and extends the client lifetime to at least 90 days. Expired
+clients without active tokens are pruned before the capacity check so abandoned
+registrations return quota automatically.
+
+Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days;
+reuse revokes the token family. Only keyed, domain-separated token and source
+hashes are stored in SQLite. The GitHub client secret, hashing key, and
+registration access token remain in the platform credential store.
 
 The public hostname, Cloudflare tunnel ID, credentials file, GitHub OAuth client
 ID, expected GitHub owner login, and immutable positive GitHub numeric owner ID are required. The CLI prompts for secrets rather

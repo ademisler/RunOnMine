@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::crypto::validate_pkce_challenge;
 use crate::model::{
     AuthorizationCodeGrant, ConsentChallenge, PendingAuthorization, PendingConsent,
-    RegisteredClient, TokenGrant, TokenPairDraft,
+    RegisteredClient, RegistrationLimits, RegistrationOutcome, TokenGrant, TokenPairDraft,
 };
 use crate::{
     AccessGrant, AuthorizationRequest, AuthorizationServerMetadata, ConsentDecision, ConsentResult,
@@ -26,8 +26,11 @@ const AUTHORIZATION_TRANSACTION_TTL: Duration = Duration::minutes(10);
 const CONSENT_TTL: Duration = Duration::minutes(5);
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
 const REGISTRATION_WINDOW_SECONDS: i64 = 60;
-const REGISTRATIONS_PER_WINDOW: usize = 20;
+const REGISTRATIONS_PER_SOURCE_WINDOW: usize = 5;
+const REGISTRATIONS_GLOBAL_WINDOW: usize = 20;
 const MAX_REGISTERED_CLIENTS: usize = 256;
+const UNUSED_CLIENT_TTL: Duration = Duration::days(1);
+const ACTIVE_CLIENT_TTL: Duration = Duration::days(90);
 
 #[derive(Clone, Debug)]
 pub struct OAuthServiceConfig {
@@ -61,6 +64,7 @@ pub struct OAuthService {
     config: OAuthServiceConfig,
     store: Arc<dyn OAuthStore>,
     hasher: TokenHasher,
+    registration_access_hash: crate::SecretHash,
     github: Arc<dyn GitHubOwnerVerifier>,
 }
 
@@ -71,6 +75,7 @@ impl std::fmt::Debug for OAuthService {
             .field("config", &self.config)
             .field("store", &"dyn OAuthStore")
             .field("hasher", &self.hasher)
+            .field("registration_access_hash", &"[REDACTED]")
             .field("github", &"dyn GitHubOwnerVerifier")
             .finish()
     }
@@ -81,13 +86,24 @@ impl OAuthService {
         config: OAuthServiceConfig,
         store: Arc<dyn OAuthStore>,
         hasher: TokenHasher,
+        registration_access_token: &SecretString,
         github: Arc<dyn GitHubOwnerVerifier>,
     ) -> Result<Self, OAuthError> {
         config.validate()?;
+        let registration_access_token = registration_access_token.expose_secret();
+        if registration_access_token.len() < 32
+            || registration_access_token.len() > 1_024
+            || registration_access_token.contains(char::is_whitespace)
+        {
+            return Err(OAuthError::configuration());
+        }
+        let registration_access_hash =
+            hasher.hash(HashPurpose::RegistrationAccess, registration_access_token);
         Ok(Self {
             config,
             store,
             hasher,
+            registration_access_hash,
             github,
         })
     }
@@ -115,8 +131,49 @@ impl OAuthService {
     pub fn register_client(
         &self,
         request: DynamicClientRequest,
+        registration_access_token: &str,
+        registration_source: &str,
     ) -> Result<DynamicClientResponse, OAuthError> {
-        self.check_registration_limits()?;
+        let supplied_hash = self
+            .hasher
+            .hash(HashPurpose::RegistrationAccess, registration_access_token);
+        if !self
+            .registration_access_hash
+            .constant_time_eq(&supplied_hash)
+        {
+            return Err(OAuthError::invalid_client());
+        }
+        let (client, response) = self.validate_registration(request, registration_source)?;
+        let limits = RegistrationLimits {
+            now: client.issued_at,
+            window_seconds: REGISTRATION_WINDOW_SECONDS,
+            per_source_limit: REGISTRATIONS_PER_SOURCE_WINDOW,
+            global_limit: REGISTRATIONS_GLOBAL_WINDOW,
+            max_clients: MAX_REGISTERED_CLIENTS,
+        };
+        match self
+            .store
+            .register_client_limited(&client, &limits)
+            .map_err(map_store_server_error)?
+        {
+            RegistrationOutcome::Registered => Ok(response),
+            RegistrationOutcome::RateLimited | RegistrationOutcome::CapacityReached => {
+                Err(OAuthError::temporarily_unavailable())
+            }
+        }
+    }
+
+    fn validate_registration(
+        &self,
+        request: DynamicClientRequest,
+        registration_source: &str,
+    ) -> Result<(RegisteredClient, DynamicClientResponse), OAuthError> {
+        if registration_source.is_empty()
+            || registration_source.len() > 256
+            || registration_source.chars().any(char::is_control)
+        {
+            return Err(OAuthError::invalid_request());
+        }
         if request.redirect_uris.is_empty() || request.redirect_uris.len() > 16 {
             return Err(OAuthError::invalid_request());
         }
@@ -171,17 +228,21 @@ impl OAuthService {
         let client_id_secret = generate_secret()?;
         let client_id = format!("rom_{}", client_id_secret.expose_secret());
         let issued_at = Utc::now();
+        let registration_source_hash = self
+            .hasher
+            .hash(HashPurpose::RegistrationSource, registration_source)
+            .storage_key();
         let client = RegisteredClient {
             client_id: client_id.clone(),
             client_name: client_name.clone(),
             redirect_uris: request.redirect_uris.clone(),
             scopes: scopes.clone(),
             issued_at,
+            expires_at: issued_at + UNUSED_CLIENT_TTL,
+            last_used_at: None,
+            registration_source_hash,
         };
-        self.store
-            .register_client(&client)
-            .map_err(map_store_server_error)?;
-        Ok(DynamicClientResponse {
+        let response = DynamicClientResponse {
             client_id,
             client_id_issued_at: issued_at.timestamp(),
             redirect_uris: request.redirect_uris,
@@ -190,30 +251,8 @@ impl OAuthService {
             grant_types: vec!["authorization_code", "refresh_token"],
             response_types: vec!["code"],
             scope: scopes.to_space_delimited(),
-        })
-    }
-
-    fn check_registration_limits(&self) -> Result<(), OAuthError> {
-        if self
-            .store
-            .registered_client_count()
-            .map_err(map_store_server_error)?
-            >= MAX_REGISTERED_CLIENTS
-        {
-            return Err(OAuthError::temporarily_unavailable());
-        }
-        let allowed = self
-            .store
-            .consume_registration_slot(
-                Utc::now(),
-                REGISTRATION_WINDOW_SECONDS,
-                REGISTRATIONS_PER_WINDOW,
-            )
-            .map_err(map_store_server_error)?;
-        if !allowed {
-            return Err(OAuthError::temporarily_unavailable());
-        }
-        Ok(())
+        };
+        Ok((client, response))
     }
 
     pub fn begin_authorization(
@@ -248,6 +287,14 @@ impl OAuthService {
         let scopes = ScopeSet::parse(&request.scope)?;
         if scopes.is_empty() || !scopes.is_subset(&client.scopes) {
             return Err(OAuthError::invalid_scope());
+        }
+        let now = Utc::now();
+        if !self
+            .store
+            .touch_client(&request.client_id, now, now + ACTIVE_CLIENT_TTL)
+            .map_err(map_store_server_error)?
+        {
+            return Err(OAuthError::invalid_client());
         }
         let provider_state = generate_secret()?;
         self.store
@@ -590,6 +637,9 @@ mod tests {
     use base64::Engine;
     use sha2::{Digest, Sha256};
 
+    const TEST_REGISTRATION_TOKEN: &str =
+        "test-registration-access-token-with-more-than-thirty-two-bytes";
+
     #[derive(Debug)]
     struct Owner;
 
@@ -620,6 +670,7 @@ mod tests {
             config,
             store,
             TokenHasher::new([9_u8; 32])?,
+            &SecretString::from(TEST_REGISTRATION_TOKEN.to_owned()),
             Arc::new(Owner),
         )
     }
@@ -637,8 +688,8 @@ mod tests {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
     }
 
-    fn register(service: &OAuthService) -> Result<DynamicClientResponse, OAuthError> {
-        service.register_client(DynamicClientRequest {
+    fn registration_request() -> Result<DynamicClientRequest, OAuthError> {
+        Ok(DynamicClientRequest {
             redirect_uris: vec![
                 Url::parse("https://client.example/callback")
                     .map_err(|_| OAuthError::invalid_request())?,
@@ -652,6 +703,17 @@ mod tests {
             response_types: Some(vec!["code".to_owned()]),
             scope: Some("machine:read files:read files:write".to_owned()),
         })
+    }
+
+    fn register_from_source(
+        service: &OAuthService,
+        source: &str,
+    ) -> Result<DynamicClientResponse, OAuthError> {
+        service.register_client(registration_request()?, TEST_REGISTRATION_TOKEN, source)
+    }
+
+    fn register(service: &OAuthService) -> Result<DynamicClientResponse, OAuthError> {
+        register_from_source(service, "test-source")
     }
 
     async fn authorize(service: &OAuthService, client_id: &str) -> Result<String, OAuthError> {
@@ -730,9 +792,62 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_registration_requires_initial_access_token() -> Result<(), OAuthError> {
+        let service = service()?;
+        let result = service.register_client(registration_request()?, "wrong-token", "source");
+        assert!(matches!(
+            result,
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidClient
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_registration_does_not_consume_source_capacity() -> Result<(), OAuthError> {
+        let service = service()?;
+        for _ in 0..(REGISTRATIONS_PER_SOURCE_WINDOW * 3) {
+            let mut invalid = registration_request()?;
+            invalid.redirect_uris.clear();
+            assert!(
+                service
+                    .register_client(invalid, TEST_REGISTRATION_TOKEN, "same-source")
+                    .is_err()
+            );
+        }
+        for _ in 0..REGISTRATIONS_PER_SOURCE_WINDOW {
+            register_from_source(&service, "same-source")?;
+        }
+        assert!(matches!(
+            register_from_source(&service, "same-source"),
+            Err(error) if error.code == crate::OAuthErrorCode::TemporarilyUnavailable
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn registration_limits_are_partitioned_but_globally_bounded() -> Result<(), OAuthError> {
+        let service = service()?;
+        for source_index in 0..4 {
+            let source = format!("source-{source_index}");
+            for _ in 0..REGISTRATIONS_PER_SOURCE_WINDOW {
+                register_from_source(&service, &source)?;
+            }
+        }
+        assert_eq!(
+            REGISTRATIONS_PER_SOURCE_WINDOW * 4,
+            REGISTRATIONS_GLOBAL_WINDOW
+        );
+        assert!(matches!(
+            register_from_source(&service, "new-source"),
+            Err(error) if error.code == crate::OAuthErrorCode::TemporarilyUnavailable
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_registration_is_rate_limited() -> Result<(), OAuthError> {
         let service = service()?;
-        for _ in 0..REGISTRATIONS_PER_WINDOW {
+        for _ in 0..REGISTRATIONS_PER_SOURCE_WINDOW {
             register(&service)?;
         }
         let result = register(&service);
@@ -750,7 +865,7 @@ mod tests {
         {
             let store = SqliteOAuthStore::open(&database).map_err(map_store_server_error)?;
             let service = service_with_store(Arc::new(store))?;
-            for _ in 0..REGISTRATIONS_PER_WINDOW {
+            for _ in 0..REGISTRATIONS_PER_SOURCE_WINDOW {
                 register(&service)?;
             }
         }

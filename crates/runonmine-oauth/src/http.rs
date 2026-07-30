@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Form, Query, State};
@@ -55,12 +56,41 @@ async fn protected_resource_metadata(
 
 async fn register_client(
     State(service): State<Arc<OAuthService>>,
+    headers: HeaderMap,
     Json(request): Json<DynamicClientRequest>,
 ) -> Result<Response, OAuthError> {
-    let response = service.register_client(request)?;
+    let token = registration_bearer_token(&headers)?;
+    let source = registration_source(&headers);
+    let response = service.register_client(request, token, &source)?;
     let mut response = (StatusCode::CREATED, Json(response)).into_response();
     no_store_headers(response.headers_mut());
     Ok(response)
+}
+
+fn registration_bearer_token(headers: &HeaderMap) -> Result<&str, OAuthError> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .ok_or_else(OAuthError::invalid_client)?
+        .to_str()
+        .map_err(|_| OAuthError::invalid_client())?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .ok_or_else(OAuthError::invalid_client)?;
+    if token.is_empty() || token.contains(char::is_whitespace) || token.len() > 1_024 {
+        return Err(OAuthError::invalid_client());
+    }
+    Ok(token)
+}
+
+fn registration_source(headers: &HeaderMap) -> String {
+    headers
+        .get("cf-connecting-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map_or_else(
+            || "local".to_owned(),
+            |address| format!("cloudflare:{address}"),
+        )
 }
 
 async fn authorize(
@@ -186,4 +216,41 @@ fn no_store_redirect(target: &url::Url) -> Response {
         HeaderValue::from_static("no-referrer"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_requires_exact_bearer_syntax() -> Result<(), Box<dyn std::error::Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer initial-token"),
+        );
+        assert_eq!(registration_bearer_token(&headers)?, "initial-token");
+        for value in [
+            "bearer token",
+            "Bearer ",
+            "Bearer two tokens",
+            "Basic token",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value)?);
+            assert!(registration_bearer_token(&headers).is_err());
+        }
+        assert!(registration_bearer_token(&HeaderMap::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn registration_source_uses_valid_cloudflare_address_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.8"));
+        assert_eq!(registration_source(&headers), "cloudflare:203.0.113.8");
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(registration_source(&headers), "local");
+        assert_eq!(registration_source(&HeaderMap::new()), "local");
+    }
 }

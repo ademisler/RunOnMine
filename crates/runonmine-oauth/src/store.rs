@@ -10,11 +10,11 @@ use uuid::Uuid;
 use crate::crypto::verify_pkce;
 use crate::model::{
     AccessGrant, AuthorizationCodeGrant, OAuthSession, PendingAuthorization, PendingConsent,
-    RegisteredClient, TokenGrant, TokenPairDraft,
+    RegisteredClient, RegistrationLimits, RegistrationOutcome, TokenGrant, TokenPairDraft,
 };
 use crate::{ScopeSet, SecretHash, StoreError};
 
-const OAUTH_SCHEMA_VERSION: i64 = 2;
+const OAUTH_SCHEMA_VERSION: i64 = 3;
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
 enum DbMessage {
@@ -97,15 +97,18 @@ impl Drop for SqliteWorker {
 }
 
 pub trait OAuthStore: Send + Sync {
-    fn registered_client_count(&self) -> Result<usize, StoreError>;
-    fn consume_registration_slot(
+    fn register_client_limited(
         &self,
-        now: DateTime<Utc>,
-        window_seconds: i64,
-        limit: usize,
-    ) -> Result<bool, StoreError>;
-    fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError>;
+        client: &RegisteredClient,
+        limits: &RegistrationLimits,
+    ) -> Result<RegistrationOutcome, StoreError>;
     fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError>;
+    fn touch_client(
+        &self,
+        client_id: &str,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<bool, StoreError>;
     fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError>;
     fn take_authorization(
         &self,
@@ -204,66 +207,7 @@ impl SqliteOAuthStore {
                 "unsupported OAuth database schema version",
             ));
         }
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS oauth_registration_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                attempted_at INTEGER NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS oauth_registration_attempts_time_idx
-                ON oauth_registration_attempts(attempted_at);
-             CREATE TABLE IF NOT EXISTS oauth_clients (
-                client_id TEXT PRIMARY KEY,
-                client_name TEXT NOT NULL,
-                redirect_uris TEXT NOT NULL,
-                scopes TEXT NOT NULL,
-                issued_at INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS oauth_authorizations (
-                provider_state_hash BLOB PRIMARY KEY,
-                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
-                redirect_uri TEXT NOT NULL,
-                client_state TEXT NOT NULL,
-                scopes TEXT NOT NULL,
-                code_challenge TEXT NOT NULL,
-                expires_at INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS oauth_consents (
-                id TEXT PRIMARY KEY,
-                csrf_hash BLOB NOT NULL UNIQUE,
-                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
-                redirect_uri TEXT NOT NULL,
-                client_state TEXT NOT NULL,
-                scopes TEXT NOT NULL,
-                code_challenge TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                expires_at INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS oauth_codes (
-                code_hash BLOB PRIMARY KEY,
-                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
-                redirect_uri TEXT NOT NULL,
-                scopes TEXT NOT NULL,
-                code_challenge TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                expires_at INTEGER NOT NULL,
-                used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1))
-             );
-             CREATE TABLE IF NOT EXISTS oauth_tokens (
-                token_hash BLOB PRIMARY KEY,
-                token_kind TEXT NOT NULL CHECK (token_kind IN ('access', 'refresh')),
-                family_id TEXT NOT NULL,
-                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
-                subject TEXT NOT NULL,
-                scopes TEXT NOT NULL,
-                issued_at INTEGER NOT NULL,
-                expires_at INTEGER NOT NULL,
-                status TEXT NOT NULL CHECK (status IN ('active', 'rotated', 'revoked'))
-             );
-             CREATE INDEX IF NOT EXISTS oauth_tokens_family_idx
-                ON oauth_tokens(family_id);
-             CREATE INDEX IF NOT EXISTS oauth_tokens_expiry_idx
-                ON oauth_tokens(expires_at);",
-        )?;
+        migrate_oauth_schema(&mut connection)?;
         connection.execute(
             "INSERT INTO schema_versions(component, version) VALUES ('oauth', ?1)
              ON CONFLICT(component) DO UPDATE SET version = excluded.version",
@@ -350,71 +294,276 @@ impl SqliteOAuthStore {
     }
 }
 
-impl OAuthStore for SqliteOAuthStore {
-    fn registered_client_count(&self) -> Result<usize, StoreError> {
-        self.call(|connection| {
-            let count = connection.query_row("SELECT COUNT(*) FROM oauth_clients", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            usize::try_from(count).map_err(|_| StoreError::Corrupt("invalid OAuth client count"))
-        })
-    }
+fn migrate_oauth_schema(connection: &mut Connection) -> Result<(), StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    migrate_registration_attempts(&transaction)?;
+    migrate_registered_clients(&transaction)?;
+    create_oauth_tables(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
 
-    fn consume_registration_slot(
+fn migrate_registration_attempts(connection: &Connection) -> Result<(), StoreError> {
+    if table_exists(connection, "oauth_registration_attempts")?
+        && !table_has_column(connection, "oauth_registration_attempts", "source_key")?
+    {
+        // Historical global attempts contain no caller identity and are not
+        // useful for the source-partitioned limiter.
+        connection.execute("DROP TABLE oauth_registration_attempts", [])?;
+    }
+    Ok(())
+}
+
+fn migrate_registered_clients(connection: &Connection) -> Result<(), StoreError> {
+    if !table_exists(connection, "oauth_clients")? {
+        return Ok(());
+    }
+    if !table_has_column(connection, "oauth_clients", "expires_at")? {
+        connection.execute(
+            "ALTER TABLE oauth_clients ADD COLUMN expires_at INTEGER",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "oauth_clients", "last_used_at")? {
+        connection.execute(
+            "ALTER TABLE oauth_clients ADD COLUMN last_used_at INTEGER",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "oauth_clients", "registration_source_hash")? {
+        connection.execute(
+            "ALTER TABLE oauth_clients ADD COLUMN registration_source_hash TEXT",
+            [],
+        )?;
+    }
+    let migration_expiry = (Utc::now() + chrono::Duration::days(30)).timestamp();
+    connection.execute(
+        "UPDATE oauth_clients
+         SET expires_at = COALESCE(expires_at, ?1),
+             registration_source_hash = COALESCE(registration_source_hash, 'legacy')",
+        [migration_expiry],
+    )?;
+    Ok(())
+}
+
+fn create_oauth_tables(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS oauth_registration_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_key TEXT NOT NULL,
+            attempted_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS oauth_registration_attempts_time_idx
+            ON oauth_registration_attempts(attempted_at);
+         CREATE INDEX IF NOT EXISTS oauth_registration_attempts_source_time_idx
+            ON oauth_registration_attempts(source_key, attempted_at);
+         CREATE TABLE IF NOT EXISTS oauth_clients (
+            client_id TEXT PRIMARY KEY,
+            client_name TEXT NOT NULL,
+            redirect_uris TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            last_used_at INTEGER,
+            registration_source_hash TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS oauth_clients_expiry_idx
+            ON oauth_clients(expires_at);
+         CREATE TABLE IF NOT EXISTS oauth_authorizations (
+            provider_state_hash BLOB PRIMARY KEY,
+            client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+            redirect_uri TEXT NOT NULL,
+            client_state TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            code_challenge TEXT NOT NULL,
+            expires_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS oauth_consents (
+            id TEXT PRIMARY KEY,
+            csrf_hash BLOB NOT NULL UNIQUE,
+            client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+            redirect_uri TEXT NOT NULL,
+            client_state TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            code_challenge TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            expires_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS oauth_codes (
+            code_hash BLOB PRIMARY KEY,
+            client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+            redirect_uri TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            code_challenge TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1))
+         );
+         CREATE TABLE IF NOT EXISTS oauth_tokens (
+            token_hash BLOB PRIMARY KEY,
+            token_kind TEXT NOT NULL CHECK (token_kind IN ('access', 'refresh')),
+            family_id TEXT NOT NULL,
+            client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+            subject TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('active', 'rotated', 'revoked'))
+         );
+         CREATE INDEX IF NOT EXISTS oauth_tokens_family_idx
+            ON oauth_tokens(family_id);
+         CREATE INDEX IF NOT EXISTS oauth_tokens_expiry_idx
+            ON oauth_tokens(expires_at);",
+    )?;
+    Ok(())
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool, StoreError> {
+    Ok(connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, StoreError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns.iter().any(|candidate| candidate == column))
+}
+
+fn prune_expired_clients(connection: &Connection, now: DateTime<Utc>) -> Result<usize, StoreError> {
+    Ok(connection.execute(
+        "DELETE FROM oauth_clients
+         WHERE expires_at <= ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM oauth_tokens
+             WHERE oauth_tokens.client_id = oauth_clients.client_id
+               AND oauth_tokens.status = 'active'
+               AND oauth_tokens.expires_at > ?1
+           )",
+        [now.timestamp()],
+    )?)
+}
+
+fn validate_registration_limits(limits: &RegistrationLimits) -> Result<(), StoreError> {
+    if limits.window_seconds <= 0
+        || limits.per_source_limit == 0
+        || limits.global_limit == 0
+        || limits.max_clients == 0
+        || limits.per_source_limit > limits.global_limit
+    {
+        return Err(StoreError::Corrupt(
+            "invalid OAuth registration limiter settings",
+        ));
+    }
+    Ok(())
+}
+
+fn limit_as_i64(value: usize) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::Corrupt("invalid OAuth registration limit"))
+}
+
+impl OAuthStore for SqliteOAuthStore {
+    fn register_client_limited(
         &self,
-        now: DateTime<Utc>,
-        window_seconds: i64,
-        limit: usize,
-    ) -> Result<bool, StoreError> {
-        if window_seconds <= 0 || limit == 0 {
-            return Err(StoreError::Corrupt(
-                "invalid OAuth registration limiter settings",
-            ));
-        }
-        let limit = i64::try_from(limit)
-            .map_err(|_| StoreError::Corrupt("invalid OAuth registration limit"))?;
+        client: &RegisteredClient,
+        limits: &RegistrationLimits,
+    ) -> Result<RegistrationOutcome, StoreError> {
+        validate_registration_limits(limits)?;
+        let client = client.clone();
+        let limits = limits.clone();
         self.call(move |connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let cutoff = now.timestamp().saturating_sub(window_seconds);
+            let cutoff = limits.now.timestamp().saturating_sub(limits.window_seconds);
             transaction.execute(
                 "DELETE FROM oauth_registration_attempts WHERE attempted_at <= ?1",
                 [cutoff],
             )?;
-            let count = transaction.query_row(
+            let global_count = transaction.query_row(
                 "SELECT COUNT(*) FROM oauth_registration_attempts",
                 [],
                 |row| row.get::<_, i64>(0),
             )?;
-            if count >= limit {
-                transaction.commit()?;
-                return Ok(false);
-            }
-            transaction.execute(
-                "INSERT INTO oauth_registration_attempts (attempted_at) VALUES (?1)",
-                [now.timestamp()],
+            let source_count = transaction.query_row(
+                "SELECT COUNT(*) FROM oauth_registration_attempts WHERE source_key = ?1",
+                [&client.registration_source_hash],
+                |row| row.get::<_, i64>(0),
             )?;
-            transaction.commit()?;
-            Ok(true)
-        })
-    }
-
-    fn register_client(&self, client: &RegisteredClient) -> Result<(), StoreError> {
-        let client = client.clone();
-        self.call(move |connection| {
+            if global_count >= limit_as_i64(limits.global_limit)?
+                || source_count >= limit_as_i64(limits.per_source_limit)?
+            {
+                transaction.commit()?;
+                return Ok(RegistrationOutcome::RateLimited);
+            }
+            prune_expired_clients(&transaction, limits.now)?;
+            let client_count =
+                transaction.query_row("SELECT COUNT(*) FROM oauth_clients", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            if client_count >= limit_as_i64(limits.max_clients)? {
+                transaction.commit()?;
+                return Ok(RegistrationOutcome::CapacityReached);
+            }
             let redirects = serde_json::to_string(&client.redirect_uris)
                 .map_err(|_| StoreError::Corrupt("client redirect URI serialization failed"))?;
-            connection.execute(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![client.client_id, client.client_name, redirects, client.scopes.to_space_delimited(), client.issued_at.timestamp()],
+            transaction.execute(
+                "INSERT INTO oauth_registration_attempts (source_key, attempted_at)
+                 VALUES (?1, ?2)",
+                params![client.registration_source_hash, limits.now.timestamp()],
             )?;
-            Ok(())
+            transaction.execute(
+                "INSERT INTO oauth_clients (
+                    client_id, client_name, redirect_uris, scopes, issued_at,
+                    expires_at, last_used_at, registration_source_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    client.client_id,
+                    client.client_name,
+                    redirects,
+                    client.scopes.to_space_delimited(),
+                    client.issued_at.timestamp(),
+                    client.expires_at.timestamp(),
+                    client.last_used_at.map(|value| value.timestamp()),
+                    client.registration_source_hash,
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(RegistrationOutcome::Registered)
         })
     }
 
     fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError> {
         let client_id = client_id.to_owned();
         self.call(move |connection| client_connection(connection, &client_id))
+    }
+
+    fn touch_client(
+        &self,
+        client_id: &str,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        let client_id = client_id.to_owned();
+        self.call(move |connection| {
+            Ok(connection.execute(
+                "UPDATE oauth_clients
+                 SET last_used_at = ?1,
+                     expires_at = CASE WHEN expires_at < ?2 THEN ?2 ELSE expires_at END
+                 WHERE client_id = ?3 AND expires_at > ?1",
+                params![now.timestamp(), expires_at.timestamp(), client_id],
+            )? == 1)
+        })
     }
 
     fn put_authorization(&self, pending: &PendingAuthorization) -> Result<(), StoreError> {
@@ -605,35 +754,73 @@ impl OAuthStore for SqliteOAuthStore {
 fn registered_clients_connection(
     connection: &mut Connection,
 ) -> Result<Vec<RegisteredClient>, StoreError> {
-    let mut statement = connection.prepare("SELECT client_id, client_name, redirect_uris, scopes, issued_at FROM oauth_clients ORDER BY issued_at DESC, client_id ASC")?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (client_id, client_name, redirect_json, scopes, issued_at) = row?;
-        Ok(RegisteredClient {
-            client_id,
-            client_name,
-            redirect_uris: serde_json::from_str(&redirect_json)
-                .map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?,
-            scopes: parse_scopes(&scopes)?,
-            issued_at: from_timestamp(issued_at)?,
-        })
-    })
-    .collect()
+    prune_expired_clients(connection, Utc::now())?;
+    let mut statement = connection.prepare(
+        "SELECT client_id, client_name, redirect_uris, scopes, issued_at,
+                expires_at, last_used_at, registration_source_hash
+         FROM oauth_clients
+         ORDER BY issued_at DESC, client_id ASC",
+    )?;
+    let rows = statement.query_map([], map_registered_client_row)?;
+    rows.map(|row| decode_registered_client(row?)).collect()
 }
 
 fn client_connection(
     connection: &mut Connection,
     client_id: &str,
 ) -> Result<Option<RegisteredClient>, StoreError> {
-    connection.query_row("SELECT client_id, client_name, redirect_uris, scopes, issued_at FROM oauth_clients WHERE client_id = ?1", [client_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?))).optional()?.map(|(client_id, client_name, redirect_json, scopes, timestamp)| Ok(RegisteredClient { client_id, client_name, redirect_uris: serde_json::from_str(&redirect_json).map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?, scopes: parse_scopes(&scopes)?, issued_at: from_timestamp(timestamp)? })).transpose()
+    let now = Utc::now();
+    prune_expired_clients(connection, now)?;
+    connection
+        .query_row(
+            "SELECT client_id, client_name, redirect_uris, scopes, issued_at,
+                    expires_at, last_used_at, registration_source_hash
+             FROM oauth_clients
+             WHERE client_id = ?1 AND expires_at > ?2",
+            params![client_id, now.timestamp()],
+            map_registered_client_row,
+        )
+        .optional()?
+        .map(decode_registered_client)
+        .transpose()
+}
+
+type RegisteredClientRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    String,
+);
+
+fn map_registered_client_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegisteredClientRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+fn decode_registered_client(row: RegisteredClientRow) -> Result<RegisteredClient, StoreError> {
+    Ok(RegisteredClient {
+        client_id: row.0,
+        client_name: row.1,
+        redirect_uris: serde_json::from_str(&row.2)
+            .map_err(|_| StoreError::Corrupt("invalid registered redirect URI"))?,
+        scopes: parse_scopes(&row.3)?,
+        issued_at: from_timestamp(row.4)?,
+        expires_at: from_timestamp(row.5)?,
+        last_used_at: row.6.map(from_timestamp).transpose()?,
+        registration_source_hash: row.7,
+    })
 }
 
 fn sessions_connection(
@@ -685,6 +872,11 @@ fn cleanup_expired_connection(
             [now.timestamp()],
         )?;
     }
+    removed += transaction.execute(
+        "DELETE FROM oauth_registration_attempts WHERE attempted_at <= ?1",
+        [now.timestamp().saturating_sub(3_600)],
+    )?;
+    removed += prune_expired_clients(&transaction, now)?;
     transaction.commit()?;
     Ok(removed)
 }
@@ -806,6 +998,26 @@ fn restrict_database_files(path: &Path) -> Result<(), StoreError> {
 mod tests {
     use super::*;
 
+    fn registered_client(
+        client_id: &str,
+        source: &str,
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> RegisteredClient {
+        RegisteredClient {
+            client_id: client_id.to_owned(),
+            client_name: format!("Client {client_id}"),
+            redirect_uris: vec![
+                Url::parse("https://client.example/callback").unwrap_or_else(|_| unreachable!()),
+            ],
+            scopes: ScopeSet::machine_read(),
+            issued_at,
+            expires_at,
+            last_used_at: None,
+            registration_source_hash: source.to_owned(),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn sqlite_database_directory_and_files_are_private() -> Result<(), StoreError> {
@@ -837,8 +1049,11 @@ mod tests {
         let now = Utc::now().timestamp();
         store.test_call(move |connection| {
             connection.execute(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
-                [now],
+                "INSERT INTO oauth_clients (
+                    client_id, client_name, redirect_uris, scopes, issued_at,
+                    expires_at, last_used_at, registration_source_hash
+                 ) VALUES ('client', 'Client', '[]', 'machine:read', ?1, ?2, NULL, 'test')",
+                params![now, now + 7_200],
             )?;
             connection.execute(
                 "INSERT INTO oauth_tokens (token_hash, token_kind, family_id, client_id, subject, scopes, issued_at, expires_at, status) VALUES (?1, 'access', ?2, 'client', 'owner', 'machine:read', ?3, ?4, 'active')",
@@ -865,8 +1080,11 @@ mod tests {
         let now = Utc::now();
         store.test_call(move |connection| {
             connection.execute(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('client', 'Client', '[]', 'machine:read', ?1)",
-                [now.timestamp()],
+                "INSERT INTO oauth_clients (
+                    client_id, client_name, redirect_uris, scopes, issued_at,
+                    expires_at, last_used_at, registration_source_hash
+                 ) VALUES ('client', 'Client', '[]', 'machine:read', ?1, ?2, NULL, 'test')",
+                params![now.timestamp(), now.timestamp() + 7_200],
             )?;
             for (hash, expiry) in [(vec![1_u8; 32], -1_i64), (vec![2_u8; 32], 3_600_i64)] {
                 connection.execute(
@@ -894,8 +1112,12 @@ mod tests {
         let family = Uuid::new_v4();
         store.test_call(move |connection| {
             connection.execute(
-                r#"INSERT INTO oauth_clients (client_id, client_name, redirect_uris, scopes, issued_at) VALUES ('client', 'Client', '["https://client.example/callback"]', 'machine:read', ?1)"#,
-                [now.timestamp()],
+                r#"INSERT INTO oauth_clients (
+                    client_id, client_name, redirect_uris, scopes, issued_at,
+                    expires_at, last_used_at, registration_source_hash
+                 ) VALUES ('client', 'Client', '["https://client.example/callback"]',
+                           'machine:read', ?1, ?2, NULL, 'test')"#,
+                params![now.timestamp(), now.timestamp() + 7_200],
             )?;
             for (index, kind) in ["access", "refresh"].into_iter().enumerate() {
                 connection.execute(
@@ -986,6 +1208,73 @@ mod tests {
         assert_eq!(version, OAUTH_SCHEMA_VERSION);
         assert_eq!(registration_table_count, 1);
         assert_eq!(token_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_unused_clients_are_pruned_before_capacity_check() -> Result<(), StoreError> {
+        let store = SqliteOAuthStore::in_memory()?;
+        let now = Utc::now();
+        let limits = RegistrationLimits {
+            now,
+            window_seconds: 60,
+            per_source_limit: 5,
+            global_limit: 20,
+            max_clients: 1,
+        };
+        let first = registered_client("first", "source-a", now, now + chrono::Duration::seconds(1));
+        assert_eq!(
+            store.register_client_limited(&first, &limits)?,
+            RegistrationOutcome::Registered
+        );
+        let second = registered_client("second", "source-b", now, now + chrono::Duration::days(1));
+        assert_eq!(
+            store.register_client_limited(&second, &limits)?,
+            RegistrationOutcome::CapacityReached
+        );
+
+        let later_limits = RegistrationLimits {
+            now: now + chrono::Duration::seconds(2),
+            ..limits
+        };
+        assert_eq!(
+            store.register_client_limited(&second, &later_limits)?,
+            RegistrationOutcome::Registered
+        );
+        let clients = store.registered_clients()?;
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].client_id, "second");
+        Ok(())
+    }
+
+    #[test]
+    fn touching_a_client_records_use_and_extends_expiry() -> Result<(), StoreError> {
+        let store = SqliteOAuthStore::in_memory()?;
+        let now = Utc::now();
+        let initial_expiry = now + chrono::Duration::hours(1);
+        let extended_expiry = now + chrono::Duration::days(90);
+        let client = registered_client("client", "source", now, initial_expiry);
+        let limits = RegistrationLimits {
+            now,
+            window_seconds: 60,
+            per_source_limit: 5,
+            global_limit: 20,
+            max_clients: 256,
+        };
+        assert_eq!(
+            store.register_client_limited(&client, &limits)?,
+            RegistrationOutcome::Registered
+        );
+        let touched_at =
+            DateTime::from_timestamp((now + chrono::Duration::minutes(10)).timestamp(), 0)
+                .ok_or(StoreError::Corrupt("test timestamp is invalid"))?;
+        let extended_expiry = DateTime::from_timestamp(extended_expiry.timestamp(), 0)
+            .ok_or(StoreError::Corrupt("test timestamp is invalid"))?;
+        assert!(store.touch_client("client", touched_at, extended_expiry)?);
+        let clients = store.registered_clients()?;
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].last_used_at, Some(touched_at));
+        assert_eq!(clients[0].expires_at, extended_expiry);
         Ok(())
     }
 

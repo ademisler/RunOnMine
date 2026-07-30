@@ -44,7 +44,7 @@ compromised.
 | Concurrent Quick URL, desktop, setup, browser, or policy writers lose unrelated configuration changes | owner-only configuration sidecar lock, reload-under-lock transaction API, validated atomic replacement |
 | A connector credential write/delete fails after another credential or config field changed | all connector credential writers use the config sidecar lock, snapshot each prior value, and restore snapshots before unlocking after handled mutation, validation, or save errors |
 | Concurrent local processes overwrite encrypted fallback secrets | owner-only inter-process file locking around every read-modify-write transaction |
-| OAuth registration floods survive behind a public tunnel | SQLite-backed atomic registration windows, registered-client cap, restart-persistent pruning |
+| OAuth registration floods or abandoned clients exhaust persistent capacity | owner-controlled 256-bit initial access token, validation before accounting, domain-hashed Cloudflare source keys, atomic per-source/global SQLite windows, 256-client cap, 24-hour unused-client expiry, use-based renewal, and pre-capacity pruning |
 | SQLite sidecars expose state | private parent directories and owner-only database, WAL, and shared-memory files |
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
