@@ -114,25 +114,29 @@ helper:
 3. the launchd plist or systemd unit is rendered to a staging file where the
    platform uses a file-backed service definition.
 
+A root/SYSTEM-only process lock serializes install and uninstall operations.
 RunOnMine then snapshots the existing executable, policy, service definition,
-and whether the service was installed and running. Only after every stage and
-snapshot succeeds does it stop the old service and activate the new files. The
-new service must start and answer an authenticated helper health request before
-the transaction commits.
+and whether the service was installed, enabled and running. Only after every
+stage and snapshot succeeds does it stop the old service and activate the new
+files. The new service must restart and answer an authenticated helper health
+request before the transaction commits.
 
 A binary/policy/service-definition activation error, platform service start
 error, or failed health check triggers rollback. The failed service is stopped,
-all previous artifacts are restored in reverse order, the former installed and
-running state is recreated, and a previously running helper is health-checked
-again using the owner from its restored policy. A failed first installation
-removes all newly activated files and unregisters the new service instead of
-leaving a partial privileged installation.
+all previous artifacts are restored in reverse order, the former installed,
+enabled and running state is recreated, and a previously running helper is
+health-checked again using the owner from its restored policy. If that owner
+cannot be recovered or restored health fails, rollback is reported as
+incomplete. A failed first installation removes all newly activated files and
+unregisters the new service instead of leaving a partial privileged installation.
 
 Staging files live in each destination's parent directory so activation does
 not cross filesystems. File modes and Windows ACL hardening are applied again
-after activation and restoration, and Unix parent directories are synchronized
-after each rename. This transaction handles reported installation failures;
-crash-recovery journaling is a separate lifecycle concern.
+after activation and restoration, Unix parent directories are synchronized
+after each rename, and staging files are removed on success or rollback. On
+Windows the installer waits for SCM to report the old service stopped before
+replacing its executable. This transaction handles reported installation
+failures; crash-recovery journaling is a separate lifecycle concern.
 
 ## Executable identity and spawn races
 

@@ -10,8 +10,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+#[cfg(test)]
+use super::install_transaction::InstallFault;
 use super::install_transaction::{
-    InstallFault, InstallRequest, ServiceLifecycle, ServiceState, install_transaction,
+    InstallLock, InstallRequest, ServiceLifecycle, ServiceState, install_lock_path,
+    install_transaction,
 };
 use super::{
     AdminPolicy, AdminProgramRule, HelperClient, HelperRequest, HelperResult, OwnerIdentity,
@@ -81,6 +84,7 @@ impl HelperManager {
                 policy_bytes: &policy_bytes,
                 service_definition: service_definition.as_deref(),
                 owner: options.owner,
+                #[cfg(test)]
                 fault: InstallFault::None,
             },
             &PlatformServiceLifecycle,
@@ -91,6 +95,8 @@ impl HelperManager {
     pub fn uninstall(&self) -> Result<()> {
         super::require_installer_identity()?;
         let paths = SystemPaths::discover()?;
+        prepare_system_directory(&paths.policy)?;
+        let install_lock = InstallLock::acquire(&paths)?;
         uninstall_platform_service(&paths)?;
         remove_regular_file_if_present(&paths.socket)?;
         remove_regular_file_if_present(&paths.policy)?;
@@ -99,6 +105,9 @@ impl HelperManager {
             remove_regular_file_if_present(service)?;
         }
         remove_empty_parent(&paths.socket)?;
+        drop(install_lock);
+        remove_regular_file_if_present(&install_lock_path(&paths))?;
+        remove_empty_parent(&paths.policy)?;
         Ok(())
     }
 
@@ -124,6 +133,7 @@ impl HelperManager {
             && let Ok(response) = client.request(&HelperRequest::health()).await
             && let HelperResult::Healthy {
                 allowlisted_programs,
+                ..
             } = response.result
         {
             available = true;

@@ -4588,6 +4588,7 @@ dependencies = [
  "command-group",
  "directories",
  "enigo",
+ "fs2",
  "image",
  "nix 0.31.3",
  "serde",

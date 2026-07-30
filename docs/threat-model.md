@@ -54,7 +54,7 @@ compromised.
 | An alternate executable path spelling avoids a canonical admin policy rule | MCP authorization and helper allowlist installation share the same root/SYSTEM-owned, non-symlink canonical program identity |
 | A hash-pinned helper executable is abused through dangerous subcommands, flags, response files, or path arguments | executable-specific command schemas; exact subcommand and positional sequence; allowlisted typed flag values; deny-first forbidden flags; response-file rejection; canonical existing/create path roots; argument-free compatibility entries |
 | An allowlisted helper executable is replaced between verification and process creation | opened-file identity and SHA-256 verification; `O_NOFOLLOW`; Linux execution through the verified `/proc/self/fd` inode; Windows read-sharing-only handle and volume/file-index checks; immediate handle/path identity and digest revalidation on other platforms |
-| Helper upgrade fails after replacing only part of the privileged installation | same-filesystem staging; previous binary/policy/service snapshots; explicit stop, activation, start and authenticated health phases; reverse-order artifact and service-state rollback; failed first-install cleanup |
+| Helper upgrade fails after replacing only part of the privileged installation, or overlaps another install/uninstall | root/SYSTEM-only process lock; same-filesystem staging; previous binary/policy/service snapshots; explicit stop, activation, restart and authenticated health phases; reverse-order artifact and installed/enabled/running service-state rollback; failed first-install cleanup |
 | Browser automation reaches an unrelated daily profile or internal network through a popup, worker, background target, WebSocket, mixed DNS answer, or DNS rebinding | isolated profile by default; process-wide loopback proxy with no implicit bypass; QUIC and non-proxied WebRTC UDP disabled; every connection re-resolves and rejects any mixed/private answer before exact-IP connect; CDP URL checks remain defense in depth; protected external CDP fails closed |
 | Audit rows are edited or reordered | BLAKE3 hash chain, retained chain anchor, startup and doctor verification |
 | A stale refresh token is replayed | one-time rotation and family-wide revocation on reuse |
@@ -104,8 +104,10 @@ guarantee. Root/SYSTEM or kernel compromise remains out of scope.
 
 Handled helper installation failures are fail-safe. The old service is not
 stopped until every replacement artifact is staged and every existing artifact
-is snapshotted. Activation, platform service startup and authenticated health
-are one transaction; rollback restores both files and the previous
-installed/running state. Sudden power loss or process termination between
+is snapshotted. A privileged process lock prevents overlapping install and
+uninstall operations. Activation, platform service restart and authenticated
+health are one transaction; rollback restores both files and the previous
+installed/enabled/running state. A previously running helper must pass health
+again after restoration. Sudden power loss or process termination between
 filesystem operations is not yet a durable journaled transaction and remains a
 separate recovery item.

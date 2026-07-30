@@ -1,11 +1,12 @@
 use std::fmt;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use anyhow::{Context, Result, anyhow, bail};
+use fs2::FileExt as _;
 use tempfile::NamedTempFile;
 
 use super::service::{
@@ -13,6 +14,66 @@ use super::service::{
     remove_regular_file_if_present,
 };
 use super::{AdminPolicy, OwnerIdentity};
+
+#[derive(Debug)]
+pub(super) struct InstallLock(File);
+
+impl InstallLock {
+    pub(super) fn acquire(paths: &SystemPaths) -> Result<Self> {
+        let lock_path = install_lock_path(paths);
+        reject_existing_symlink(&lock_path)?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+                .open(&lock_path)
+        };
+        #[cfg(not(unix))]
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path);
+        let file = file.with_context(|| {
+            format!(
+                "failed to open helper installation lock {}",
+                lock_path.display()
+            )
+        })?;
+        if !file
+            .metadata()
+            .context("failed to inspect helper installation lock")?
+            .is_file()
+        {
+            bail!("helper installation lock must be a regular file");
+        }
+        apply_artifact_permissions(&lock_path, false, 0o600)?;
+        file.lock_exclusive()
+            .context("failed to acquire the helper installation lock")?;
+        Ok(Self(file))
+    }
+}
+
+pub(super) fn install_lock_path(paths: &SystemPaths) -> PathBuf {
+    paths.policy.parent().map_or_else(
+        || PathBuf::from("helper-install.lock"),
+        |parent| parent.join("helper-install.lock"),
+    )
+}
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        let _ignored = self.0.unlock();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ServiceState {
@@ -71,6 +132,7 @@ impl StagedArtifact {
         std::io::copy(&mut source, temporary.as_file_mut())
             .context("failed to stage helper source artifact")?;
         finish_staging(&temporary, kind.mode())?;
+        apply_artifact_permissions(temporary.path(), kind.executable(), kind.mode())?;
         Ok(Self {
             destination,
             kind,
@@ -88,6 +150,7 @@ impl StagedArtifact {
             .write_all(bytes)
             .context("failed to write a staged helper artifact")?;
         finish_staging(&temporary, kind.mode())?;
+        apply_artifact_permissions(temporary.path(), kind.executable(), kind.mode())?;
         Ok(Self {
             destination,
             kind,
@@ -220,18 +283,15 @@ impl ArtifactSnapshot {
                     .context("failed to stage a helper rollback artifact")?;
                 temporary.write_all(bytes)?;
                 #[cfg(unix)]
-                temporary
-                    .as_file()
-                    .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(*mode))?;
+                let restore_mode = *mode;
+                #[cfg(not(unix))]
+                let restore_mode = kind.mode();
+                apply_artifact_permissions(temporary.path(), kind.executable(), restore_mode)?;
                 temporary.as_file().sync_all()?;
                 temporary
                     .persist(destination)
                     .map_err(|error| error.error)
                     .context("failed to restore a helper artifact")?;
-                #[cfg(unix)]
-                let restore_mode = *mode;
-                #[cfg(not(unix))]
-                let restore_mode = kind.mode();
                 apply_artifact_permissions(destination, kind.executable(), restore_mode)?;
                 sync_parent(destination)
             }
@@ -239,6 +299,7 @@ impl ArtifactSnapshot {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum InstallFault {
     #[default]
@@ -248,6 +309,7 @@ pub(super) enum InstallFault {
     AfterServiceDefinition,
 }
 
+#[cfg(test)]
 impl InstallFault {
     fn check(self, expected: Self) -> Result<()> {
         if self == expected {
@@ -263,6 +325,7 @@ pub(super) struct InstallRequest<'a> {
     pub(super) policy_bytes: &'a [u8],
     pub(super) service_definition: Option<&'a [u8]>,
     pub(super) owner: OwnerIdentity,
+    #[cfg(test)]
     pub(super) fault: InstallFault,
 }
 
@@ -274,7 +337,6 @@ impl fmt::Debug for InstallRequest<'_> {
             .field("source_executable", &self.source_executable)
             .field("has_service_definition", &self.service_definition.is_some())
             .field("owner", &self.owner)
-            .field("fault", &self.fault)
             .finish_non_exhaustive()
     }
 }
@@ -283,6 +345,7 @@ pub(super) async fn install_transaction(
     request: InstallRequest<'_>,
     lifecycle: &dyn ServiceLifecycle,
 ) -> Result<()> {
+    let _install_lock = InstallLock::acquire(request.paths)?;
     let mut binary = StagedArtifact::from_file(
         request.source_executable,
         request.paths.binary.clone(),
@@ -313,12 +376,15 @@ pub(super) async fn install_transaction(
     let result = async {
         lifecycle.stop(request.paths)?;
         binary.activate()?;
+        #[cfg(test)]
         request.fault.check(InstallFault::AfterBinary)?;
         policy.activate()?;
+        #[cfg(test)]
         request.fault.check(InstallFault::AfterPolicy)?;
         if let Some(service) = service.as_mut() {
             service.activate()?;
         }
+        #[cfg(test)]
         request.fault.check(InstallFault::AfterServiceDefinition)?;
         lifecycle.activate(request.paths)?;
         lifecycle.health(request.owner).await
@@ -602,6 +668,32 @@ mod tests {
             );
             Ok(())
         }
+
+        fn assert_no_staging_files(&self) -> Result<()> {
+            for parent in [
+                self.paths
+                    .binary
+                    .parent()
+                    .context("test binary path has no parent")?,
+                self.paths
+                    .policy
+                    .parent()
+                    .context("test policy path has no parent")?,
+                self.paths
+                    .service_definition
+                    .as_ref()
+                    .context("test service path is missing")?
+                    .parent()
+                    .context("test service path has no parent")?,
+            ] {
+                for entry in fs::read_dir(parent)? {
+                    let name = entry?.file_name();
+                    let name = name.to_string_lossy();
+                    assert!(!name.starts_with(".tmp"), "staging file remained: {name}");
+                }
+            }
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -618,6 +710,7 @@ mod tests {
                 .is_err()
         );
         fixture.assert_old_artifacts()?;
+        fixture.assert_no_staging_files()?;
         assert!(
             lifecycle
                 .events()?
@@ -744,6 +837,37 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn rollback_preserves_installed_but_disabled_and_stopped_state() -> Result<()> {
+        let fixture = Fixture::installed()?;
+        let mut lifecycle = FakeLifecycle::new(ServiceState {
+            installed: true,
+            enabled: false,
+            running: false,
+        });
+        lifecycle.fail_activate = true;
+        assert!(
+            install_transaction(fixture.request(InstallFault::None), &lifecycle)
+                .await
+                .is_err()
+        );
+        fixture.assert_old_artifacts()?;
+        assert!(
+            lifecycle
+                .events()?
+                .contains(&"restore:true:false:false".to_owned())
+        );
+        assert_eq!(
+            lifecycle
+                .events()?
+                .iter()
+                .filter(|event| *event == "health")
+                .count(),
+            0
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn symlinked_destination_is_rejected_before_service_stop() -> Result<()> {
@@ -826,6 +950,7 @@ mod tests {
             lifecycle.events()?,
             vec!["state", "stop", "activate", "health"]
         );
+        fixture.assert_no_staging_files()?;
         Ok(())
     }
 }

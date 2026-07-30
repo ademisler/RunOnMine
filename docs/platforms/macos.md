@@ -33,4 +33,4 @@ its device/inode identity and SHA-256 with a freshly opened canonical path
 immediately before spawn. This narrows the replacement window; unlike Linux,
 the current macOS implementation does not claim descriptor-path execution.
 
-Helper upgrades stage the executable, policy and launchd plist before booting out the old daemon. A failed bootstrap or health check restores all prior files, recreates the former launchd state and verifies the restored helper when it was previously running.
+Helper upgrades stage the executable, policy and launchd plist before booting out the old daemon. A failed bootstrap or health check restores all prior files, recreates the former loaded/running launchd state and verifies the restored helper when it was previously running.

@@ -132,7 +132,8 @@ current canonical path at the last possible point.
 Helper installation is a staged transaction rather than a sequence of
 independent writes. The installer prepares the executable, policy and service
 definition in their destination directories, snapshots the previous artifacts
-and service state, stops the service, atomically activates the files, starts the
-platform service and verifies authenticated health. Any handled failure restores
-the old artifacts and installed/running state; an unsuccessful first install is
-fully removed.
+and installed/enabled/running service state, stops the service, atomically
+activates the files, restarts the platform service and verifies authenticated
+health. A root/SYSTEM-only process lock serializes install and uninstall. Any
+handled failure restores the old artifacts and service state; an unsuccessful
+first install is fully removed.
