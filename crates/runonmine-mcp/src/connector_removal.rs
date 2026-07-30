@@ -105,6 +105,8 @@ pub fn reconcile_connector_removal(
     }
     if record.phase < ConnectorRemovalPhase::DirectoriesRemoved {
         remove_connector_directories(paths, &record.connector_id)?;
+        runonmine_core::QuickTunnelRuntimeStore::new(paths)
+            .clear_connector(&record.connector_id)?;
         record = journal.advance(&record, ConnectorRemovalPhase::DirectoriesRemoved)?;
     }
     journal.complete(&record)

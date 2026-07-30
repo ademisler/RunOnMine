@@ -15,7 +15,10 @@ use runonmine_connectors::{
     BinaryDiscovery, BinaryKind, ProcessEvent, ProcessState, ProcessSupervisor, RestartPolicy,
     SecretValue, SupervisorHandle, run_once,
 };
-use runonmine_core::{AppConfig, AppPaths, ConnectorConfig, ConnectorKind};
+use runonmine_core::{
+    AppConfig, AppPaths, ConnectorConfig, ConnectorKind, QuickTunnelGeneration,
+    QuickTunnelRuntimeStore,
+};
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -214,7 +217,7 @@ struct AsyncConnectorTask {
 #[derive(Debug, Default)]
 pub(super) struct ManagedConnectors {
     handles: Vec<SupervisorHandle>,
-    observers: Vec<tokio::task::JoinHandle<()>>,
+    observers: Vec<QuickObserverHandle>,
     async_tasks: Vec<AsyncConnectorTask>,
     degraded: Vec<ConnectorStartupFailure>,
     runtime: ConnectorRuntimeRegistry,
@@ -223,7 +226,8 @@ pub(super) struct ManagedConnectors {
 #[derive(Debug)]
 struct PendingQuickObserver {
     events: tokio::sync::broadcast::Receiver<ProcessEvent>,
-    connector_id: String,
+    store: QuickTunnelRuntimeStore,
+    generation: QuickTunnelGeneration,
 }
 
 impl ManagedConnectors {
@@ -308,17 +312,9 @@ impl ManagedConnectors {
         );
     }
 
-    fn activate_quick_observers(
-        &mut self,
-        config_path: &std::path::Path,
-        pending: Vec<PendingQuickObserver>,
-    ) {
+    fn activate_quick_observers(&mut self, pending: Vec<PendingQuickObserver>) {
         self.observers.extend(pending.into_iter().map(|observer| {
-            spawn_quick_url_observer(
-                observer.events,
-                config_path.to_path_buf(),
-                observer.connector_id,
-            )
+            spawn_quick_url_observer(observer.events, observer.store, observer.generation)
         }));
     }
 
@@ -369,8 +365,7 @@ impl ManagedConnectors {
             let _ignored = activation.task.await;
         }
         for observer in self.observers.drain(..) {
-            observer.abort();
-            let _ignored = observer.await;
+            observer.stop().await;
         }
         for handle in self.handles.drain(..) {
             let _ignored = handle.stop().await;
@@ -392,7 +387,7 @@ pub(super) async fn start_external_connectors(
         managed.stop().await;
         return Err(error);
     }
-    managed.activate_quick_observers(&paths.config_file(), pending_observers);
+    managed.activate_quick_observers(pending_observers);
     Ok(managed)
 }
 
@@ -406,6 +401,7 @@ async fn start_external_connectors_inner(
     let discovery = BinaryDiscovery::new(vec![paths.data_dir.join("bin")]);
     let supervisor = ProcessSupervisor;
     let origin = Url::parse(&format!("http://127.0.0.1:{}", config.port))?;
+    let quick_runtime = QuickTunnelRuntimeStore::new(paths);
     let blocked = managed.blocked_connector_ids();
     for connector in config
         .connectors
@@ -430,6 +426,7 @@ async fn start_external_connectors_inner(
         let startup = async {
             match connector.kind {
                 ConnectorKind::CloudflareQuick => {
+                    quick_runtime.clear_connector(&connector.id)?;
                     let settings = connector
                         .cloudflare_quick
                         .as_ref()
@@ -448,12 +445,21 @@ async fn start_external_connectors_inner(
                         tunnel.health_check()?,
                         RestartPolicy::default(),
                     )?;
-                    if let Some(events) = handle.take_initial_events() {
-                        pending_observers.push(PendingQuickObserver {
-                            events,
-                            connector_id: connector.id.clone(),
-                        });
-                    }
+                    let generation = match quick_runtime.begin(&connector.id) {
+                        Ok(generation) => generation,
+                        Err(error) => {
+                            let _ignored = handle.stop().await;
+                            return Err(error);
+                        }
+                    };
+                    let events = handle
+                        .take_initial_events()
+                        .unwrap_or_else(|| handle.subscribe());
+                    pending_observers.push(PendingQuickObserver {
+                        events,
+                        store: quick_runtime.clone(),
+                        generation,
+                    });
                     managed.handles.push(handle);
                 }
                 ConnectorKind::CloudflareOauth => {
@@ -835,55 +841,101 @@ async fn wait_for_openai_readiness(
 
 fn spawn_quick_url_observer(
     mut events: tokio::sync::broadcast::Receiver<ProcessEvent>,
-    config_path: PathBuf,
-    connector_id: String,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    store: QuickTunnelRuntimeStore,
+    generation: QuickTunnelGeneration,
+) -> QuickObserverHandle {
+    let handle_store = store.clone();
+    let handle_generation = generation.clone();
+    let task = tokio::spawn(async move {
+        let cleanup = QuickRuntimeCleanup {
+            store: store.clone(),
+            generation: generation.clone(),
+        };
         loop {
-            let event = match events.recv().await {
-                Ok(event) => event,
+            match events.recv().await {
+                Ok(ProcessEvent::StandardOutput { line }) => {
+                    if let Some(url) = parse_quick_tunnel_url(&line)
+                        && store.set_url(&generation, &url).is_err()
+                    {
+                        tracing::warn!(
+                            connector_id = generation.connector_id(),
+                            "failed to persist Quick Tunnel runtime URL"
+                        );
+                    }
+                }
+                Ok(
+                    ProcessEvent::HealthChanged { healthy: false, .. }
+                    | ProcessEvent::RestartScheduled { .. }
+                    | ProcessEvent::StateChanged {
+                        state: ProcessState::Starting { .. } | ProcessState::Backoff { .. },
+                    },
+                ) => {
+                    let _ignored = store.clear_url(&generation);
+                }
+                Ok(ProcessEvent::StateChanged {
+                    state: ProcessState::Failed { .. } | ProcessState::Stopped,
+                })
+                | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Ok(
+                    ProcessEvent::HealthChanged { .. }
+                    | ProcessEvent::StateChanged { .. }
+                    | ProcessEvent::StandardError { .. },
+                ) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(
-                        connector_id = %connector_id,
+                        connector_id = generation.connector_id(),
                         skipped,
-                        "Quick Tunnel observer skipped buffered process events"
+                        "Quick Tunnel runtime observer lagged"
                     );
-                    continue;
+                    let _ignored = store.clear_url(&generation);
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            };
-            let (ProcessEvent::StandardOutput { line } | ProcessEvent::StandardError { line }) =
-                event
-            else {
-                continue;
-            };
-            let Some(url) = parse_quick_tunnel_url(&line) else {
-                continue;
-            };
-            if let Err(error) = persist_quick_public_url(&config_path, &connector_id, url) {
-                tracing::error!(%error, "failed to persist Quick Tunnel public URL");
-            } else {
-                tracing::info!(connector_id = %connector_id, "Cloudflare Quick Tunnel is ready");
             }
         }
-    })
+        drop(cleanup);
+    });
+    QuickObserverHandle {
+        task: Some(task),
+        store: handle_store,
+        generation: handle_generation,
+    }
 }
 
-fn persist_quick_public_url(
-    config_path: &std::path::Path,
-    connector_id: &str,
-    url: Url,
-) -> Result<()> {
-    AppConfig::update(config_path, |config| {
-        let connector = config
-            .connector_mut(connector_id)
-            .context("Quick Tunnel connector was removed")?;
-        if connector.kind != ConnectorKind::CloudflareQuick {
-            bail!("connector is no longer a Quick Tunnel");
+#[derive(Debug)]
+struct QuickObserverHandle {
+    task: Option<tokio::task::JoinHandle<()>>,
+    store: QuickTunnelRuntimeStore,
+    generation: QuickTunnelGeneration,
+}
+
+impl QuickObserverHandle {
+    async fn stop(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ignored = task.await;
         }
-        connector.public_base_url = Some(url);
-        Ok(())
-    })
+        let _ignored = self.store.finish(&self.generation);
+    }
+}
+
+impl Drop for QuickObserverHandle {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        let _ignored = self.store.finish(&self.generation);
+    }
+}
+
+#[derive(Debug)]
+struct QuickRuntimeCleanup {
+    store: QuickTunnelRuntimeStore,
+    generation: QuickTunnelGeneration,
+}
+
+impl Drop for QuickRuntimeCleanup {
+    fn drop(&mut self) {
+        let _ignored = self.store.finish(&self.generation);
+    }
 }
 
 fn ensure_private_directory(path: &std::path::Path) -> Result<()> {
@@ -1092,6 +1144,57 @@ while :; do /bin/sleep 1; done
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn corrupt_quick_runtime_state_is_scoped_to_that_connector() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+
+        let mut local = ConnectorConfig::local_http_default();
+        local.enabled = true;
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "corrupt-runtime-quick".to_owned();
+        quick.name = "Corrupt runtime Quick".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.enabled = true;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings::default());
+        let config = AppConfig {
+            connectors: vec![local, quick],
+            ..AppConfig::default()
+        };
+        config.validate()?;
+
+        let store = QuickTunnelRuntimeStore::new(&paths);
+        let _generation = store.begin("corrupt-runtime-quick")?;
+        let runtime_directory = paths.state_dir.join("quick-tunnel-runtime");
+        let record_path = std::fs::read_dir(&runtime_directory)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+            .context("Quick runtime test record is missing")?;
+        std::fs::remove_file(&record_path)?;
+        let outside = temporary.path().join("outside-runtime-state");
+        std::fs::write(&outside, b"outside")?;
+        symlink(&outside, &record_path)?;
+
+        let runtime = ConnectorRuntimeRegistry::default();
+        let managed =
+            start_external_connectors(&paths, &config, Vec::new(), runtime.clone()).await?;
+        assert!(managed.handles.is_empty());
+        assert_eq!(managed.degraded.len(), 1);
+        assert_eq!(managed.degraded[0].connector_id, "corrupt-runtime-quick");
+        assert_runtime_phase(
+            &runtime,
+            "corrupt-runtime-quick",
+            ConnectorRuntimePhase::Degraded,
+        )?;
+        assert_eq!(std::fs::read(&outside)?, b"outside");
+        managed.stop().await;
+        Ok(())
+    }
+
     async fn wait_for_runtime_phase(
         runtime: &ConnectorRuntimeRegistry,
         connector_id: &str,
@@ -1196,14 +1299,17 @@ while :; do /bin/sleep 1; done
         let connector = test_openai_connector("slow-openai");
         let runtime = ConnectorRuntimeRegistry::default();
         let mut managed = ManagedConnectors::with_degraded(Vec::new(), runtime.clone());
+        let started = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(AtomicBool::new(false));
+        let started_for_future = Arc::clone(&started);
         let cancelled_for_future = Arc::clone(&cancelled);
         let preparation = async move {
+            started_for_future.store(true, Ordering::Release);
             let _flag = CancellationFlag(cancelled_for_future);
             std::future::pending::<Result<PreparedOpenAiActivation>>().await
         }
         .boxed();
-        let started = std::time::Instant::now();
+        let launched = std::time::Instant::now();
         managed.spawn_openai_activation_with(
             connector,
             preparation,
@@ -1212,8 +1318,18 @@ while :; do /bin/sleep 1; done
                 readiness: Duration::from_secs(30),
             },
         );
-        assert!(started.elapsed() < Duration::from_millis(50));
-        wait_for_runtime_phase(&runtime, "slow-openai", ConnectorRuntimePhase::Starting).await?;
+        assert!(launched.elapsed() < Duration::from_millis(50));
+        with_deadline(
+            Duration::from_secs(1),
+            async {
+                while !started.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+                Ok(())
+            },
+            "OpenAI preparation future was never polled",
+        )
+        .await?;
         tokio::time::timeout(Duration::from_secs(1), managed.stop())
             .await
             .context("managed connector shutdown waited for OpenAI preparation")?;
@@ -1309,58 +1425,11 @@ while :; do /bin/sleep 1; done
         Ok(())
     }
 
-    #[test]
-    fn quick_public_url_is_persisted_only_for_the_expected_connector_kind() -> Result<()> {
-        let temporary = tempfile::tempdir()?;
-        let paths = AppPaths::under(temporary.path().join("runonmine"));
-        paths.ensure()?;
-
-        let mut quick = ConnectorConfig::local_default();
-        quick.id = "quick-connector".to_owned();
-        quick.name = "Quick connector".to_owned();
-        quick.kind = ConnectorKind::CloudflareQuick;
-        quick.cloudflare_quick = Some(CloudflareQuickSettings::default());
-
-        let config = AppConfig {
-            connectors: vec![quick],
-            ..AppConfig::default()
-        };
-        config.save(&paths.config_file())?;
-
-        let public_url = Url::parse("https://example.trycloudflare.com/")?;
-        persist_quick_public_url(&paths.config_file(), "quick-connector", public_url.clone())?;
-        let updated = AppConfig::load(&paths.config_file())?;
-        assert_eq!(
-            updated
-                .connector("quick-connector")
-                .and_then(|connector| connector.public_base_url.as_ref()),
-            Some(&public_url)
-        );
-
-        assert!(
-            persist_quick_public_url(&paths.config_file(), "missing", public_url.clone()).is_err()
-        );
-
-        let mut changed = updated;
-        let connector = changed
-            .connector_mut("quick-connector")
-            .context("test connector is missing")?;
-        connector.kind = ConnectorKind::LocalHttp;
-        connector.cloudflare_quick = None;
-        connector.public_base_url = None;
-        changed.save(&paths.config_file())?;
-        assert!(
-            persist_quick_public_url(&paths.config_file(), "quick-connector", public_url).is_err()
-        );
-        Ok(())
-    }
-
     #[tokio::test]
-    async fn quick_url_side_effects_wait_for_successful_activation() -> Result<()> {
+    async fn quick_url_observer_uses_ephemeral_generation_state_only() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let paths = AppPaths::under(temporary.path().join("runonmine"));
         paths.ensure()?;
-
         let mut quick = ConnectorConfig::local_default();
         quick.id = "quick-connector".to_owned();
         quick.name = "Quick connector".to_owned();
@@ -1371,51 +1440,94 @@ while :; do /bin/sleep 1; done
             ..AppConfig::default()
         };
         config.save(&paths.config_file())?;
+        let durable_before = std::fs::read(paths.config_file())?;
 
-        let (sender, _) = tokio::sync::broadcast::channel(4);
-        let receiver = sender.subscribe();
-        for index in 0..12 {
-            sender.send(ProcessEvent::StandardOutput {
-                line: format!("buffered-noise-{index}"),
-            })?;
-        }
-        sender.send(ProcessEvent::StandardOutput {
-            line: "https://deferred-observer.trycloudflare.com".to_owned(),
-        })?;
+        let store = QuickTunnelRuntimeStore::new(&paths);
+        let generation = store.begin("quick-connector")?;
+        let (sender, _) = tokio::sync::broadcast::channel(16);
         let pending = vec![PendingQuickObserver {
-            events: receiver,
-            connector_id: "quick-connector".to_owned(),
+            events: sender.subscribe(),
+            store: store.clone(),
+            generation: generation.clone(),
         }];
-
-        let before = AppConfig::load(&paths.config_file())?;
-        assert!(
-            before
-                .connector("quick-connector")
-                .and_then(|connector| connector.public_base_url.as_ref())
-                .is_none()
-        );
-
         let mut managed = ManagedConnectors::default();
-        managed.activate_quick_observers(&paths.config_file(), pending);
-        let persisted = tokio::time::timeout(Duration::from_secs(2), async {
+        managed.activate_quick_observers(pending);
+
+        let first = Url::parse("https://first-observer.trycloudflare.com/")?;
+        sender.send(ProcessEvent::StandardOutput {
+            line: first.to_string(),
+        })?;
+        wait_for_quick_url(&store, "quick-connector", Some(&first)).await?;
+        assert_eq!(std::fs::read(paths.config_file())?, durable_before);
+
+        sender.send(ProcessEvent::RestartScheduled {
+            attempt: 1,
+            delay_ms: 50,
+        })?;
+        wait_for_quick_url(&store, "quick-connector", None).await?;
+
+        let second = Url::parse("https://second-observer.trycloudflare.com/")?;
+        sender.send(ProcessEvent::StandardOutput {
+            line: second.to_string(),
+        })?;
+        wait_for_quick_url(&store, "quick-connector", Some(&second)).await?;
+        assert_eq!(std::fs::read(paths.config_file())?, durable_before);
+
+        sender.send(ProcessEvent::StateChanged {
+            state: ProcessState::Stopped,
+        })?;
+        tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let current = AppConfig::load(&paths.config_file())?;
-                if let Some(url) = current
-                    .connector("quick-connector")
-                    .and_then(|connector| connector.public_base_url.clone())
-                {
-                    return Ok::<Url, anyhow::Error>(url);
+                if store.get("quick-connector")?.is_none() {
+                    return Ok::<(), anyhow::Error>(());
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .context("Quick URL observer did not persist the deferred event")??;
-        assert_eq!(
-            persisted,
-            Url::parse("https://deferred-observer.trycloudflare.com")?
-        );
+        .context("Quick runtime record was not removed after process stop")??;
+        assert!(!store.set_url(&generation, &second)?);
         managed.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aborting_quick_observer_removes_generation_state() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        let store = QuickTunnelRuntimeStore::new(&paths);
+        let generation = store.begin("aborted-quick")?;
+        let (_sender, receiver) = tokio::sync::broadcast::channel(4);
+        let mut managed = ManagedConnectors::default();
+        managed.activate_quick_observers(vec![PendingQuickObserver {
+            events: receiver,
+            store: store.clone(),
+            generation,
+        }]);
+        managed.stop().await;
+        assert!(store.get("aborted-quick")?.is_none());
+        Ok(())
+    }
+
+    async fn wait_for_quick_url(
+        store: &QuickTunnelRuntimeStore,
+        connector_id: &str,
+        expected: Option<&Url>,
+    ) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = store
+                    .get(connector_id)?
+                    .and_then(|record| record.public_url);
+                if current.as_ref() == expected {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("Quick runtime URL did not reach the expected state")??;
         Ok(())
     }
 

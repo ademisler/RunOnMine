@@ -81,7 +81,13 @@ runonmine connect cloudflare quick --rotate <connector-id>
 ```
 
 The agent reads the current secret for each request, so rotation immediately
-invalidates the previous URL. Unknown or incorrect paths return 404. Cloudflare
+invalidates the previous URL. Unknown or incorrect paths return 404. The
+`trycloudflare.com` origin discovered from `cloudflared` is not written to
+`config.toml`: it lives in a private, generation-bound runtime record, is cleared
+during restart/backoff, and is removed when the process or agent stops. A stale
+observer cannot overwrite a newer process generation. The desktop and
+`runonmine doctor` may show whether a current URL has been discovered, but local
+health details and support bundles never include the generated URL. Cloudflare
 describes Quick Tunnels as a testing and development facility; do not treat the
 secret URL as a long-term identity system.
 

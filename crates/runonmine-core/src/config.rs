@@ -354,6 +354,32 @@ fn combine_activation_rollback_errors(
 
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
+        Self::migrate_legacy_quick_runtime_urls(path)?;
+        Self::load_unlocked(path)
+    }
+
+    fn load_unlocked(path: &Path) -> Result<Self> {
+        let mut config = Self::read_unvalidated(path)?;
+        config.clear_legacy_quick_runtime_urls();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn migrate_legacy_quick_runtime_urls(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let _lock = ConfigFileLock::acquire(path)?;
+        let mut config = Self::read_unvalidated(path)?;
+        let changed = config.clear_legacy_quick_runtime_urls();
+        config.validate()?;
+        if changed {
+            config.save_unlocked(path)?;
+        }
+        Ok(changed)
+    }
+
+    fn read_unvalidated(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)
             .with_context(|| format!("failed to inspect {}", path.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -364,10 +390,19 @@ impl AppConfig {
         }
         let text = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let config: Self = toml::from_str(&text)
-            .with_context(|| format!("invalid config at {}", path.display()))?;
-        config.validate()?;
-        Ok(config)
+        toml::from_str(&text).with_context(|| format!("invalid config at {}", path.display()))
+    }
+
+    fn clear_legacy_quick_runtime_urls(&mut self) -> bool {
+        let mut changed = false;
+        for connector in &mut self.connectors {
+            if connector.kind == ConnectorKind::CloudflareQuick
+                && connector.public_base_url.take().is_some()
+            {
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn load_or_create(path: &Path) -> Result<Self> {
@@ -376,7 +411,7 @@ impl AppConfig {
         }
         let _lock = ConfigFileLock::acquire(path)?;
         if path.exists() {
-            return Self::load(path);
+            return Self::load_unlocked(path);
         }
         let config = Self::default();
         config.save_unlocked(path)?;
@@ -404,7 +439,7 @@ impl AppConfig {
     ) -> Result<T> {
         let _lock = ConfigFileLock::acquire(path)?;
         let mut config = if path.exists() {
-            Self::load(path)?
+            Self::load_unlocked(path)?
         } else {
             Self::default()
         };
@@ -433,7 +468,7 @@ impl AppConfig {
     ) -> Result<T> {
         let _lock = ConfigFileLock::acquire(path)?;
         let original = if path.exists() {
-            Some(Self::load(path)?)
+            Some(Self::load_unlocked(path)?)
         } else {
             None
         };
@@ -722,6 +757,7 @@ fn validate_connector_settings(connector: &ConnectorConfig, agent_port: u16) -> 
                 && connector.cloudflare_named.is_none()
                 && connector.oauth_owner.is_none()
                 && connector.openai_tunnel.is_none()
+                && connector.public_base_url.is_none()
         }
         ConnectorKind::CloudflareOauth => {
             connector.cloudflare_quick.is_none()
@@ -936,6 +972,55 @@ mod tests {
             .connectors
             .retain(|connector| connector.id != "first");
         assert!(config.validate().is_ok());
+        Ok(())
+    }
+
+    fn test_quick_connector(id: &str) -> ConnectorConfig {
+        ConnectorConfig {
+            id: id.to_owned(),
+            name: format!("Quick {id}"),
+            kind: ConnectorKind::CloudflareQuick,
+            enabled: true,
+            policy_preset: PolicyPreset::Safe,
+            pack_overrides: BTreeMap::new(),
+            tool_overrides: BTreeMap::new(),
+            policy_rules: Vec::new(),
+            public_base_url: None,
+            cloudflare_quick: Some(CloudflareQuickSettings::default()),
+            cloudflare_named: None,
+            oauth_owner: None,
+            openai_tunnel: None,
+        }
+    }
+
+    #[test]
+    fn legacy_quick_runtime_url_is_ignored_then_removed_under_config_lock() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        let mut config = AppConfig::default();
+        let mut quick = test_quick_connector("legacy-quick");
+        quick.public_base_url = Some(Url::parse("https://old-name.trycloudflare.com")?);
+        config.connectors.push(quick);
+        fs::write(&path, toml::to_string_pretty(&config)?)?;
+
+        let loaded = AppConfig::load(&path)?;
+        assert!(
+            loaded
+                .connector("legacy-quick")
+                .context("legacy Quick connector is missing")?
+                .public_base_url
+                .is_none()
+        );
+        assert!(!AppConfig::migrate_legacy_quick_runtime_urls(&path)?);
+        let persisted = fs::read_to_string(&path)?;
+        assert!(!persisted.contains("old-name.trycloudflare.com"));
+        assert!(
+            AppConfig::load(&path)?
+                .connector("legacy-quick")
+                .context("migrated Quick connector is missing")?
+                .public_base_url
+                .is_none()
+        );
         Ok(())
     }
 

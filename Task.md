@@ -49,7 +49,7 @@ Status markers:
 - [x] **P1-18 — Allocate OpenAI health ports safely or enforce singleton behavior.** Avoid fixed-port collisions and side effects before validation.
 - [x] **P1-19 — Isolate connector startup failures.** One failed connector must become degraded without taking healthy local or remote connectors down.
 - [x] **P1-20 — Move OpenAI init/doctor out of blocking agent startup.** Activate connectors asynchronously with visible states and deadlines.
-- [ ] **P1-21 — Store Quick Tunnel runtime URL as ephemeral state.** Clear stale URLs and keep runtime discovery out of durable desired configuration.
+- [x] **P1-21 — Store Quick Tunnel runtime URL as ephemeral state.** Clear stale URLs and keep runtime discovery out of durable desired configuration.
 - [ ] **P1-22 — Add managed connector binary update and rollback.** Use versioned verified installs and atomic activation.
 - [ ] **P1-23 — Distinguish and harden unmanaged external binaries.** Show trust level and optionally pin ownership/digest.
 - [ ] **P1-24 — Strengthen connector binary supply-chain verification.** Add signed manifests/provenance and independent trust roots.

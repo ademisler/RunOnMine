@@ -763,6 +763,7 @@ pub(super) async fn doctor() -> Result<()> {
     .is_ok_and(|result| result.is_ok());
     println!("Agent loopback listener: {agent_reachable}");
     let secrets = default_secret_store(&paths)?;
+    let quick_runtime = QuickTunnelRuntimeStore::new(&paths);
     for connector in config
         .connectors
         .iter()
@@ -794,12 +795,24 @@ pub(super) async fn doctor() -> Result<()> {
                 )? {
                     Some(binary) => {
                         match BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await {
-                            Ok(probe) => println!(
-                                "{}: cloudflared {}, public URL discovered={}",
-                                connector.id,
-                                probe.version,
-                                connector.public_base_url.is_some()
-                            ),
+                            Ok(probe) => {
+                                let runtime_url_discovered = match quick_runtime.get(&connector.id)
+                                {
+                                    Ok(record) => record.and_then(|item| item.public_url).is_some(),
+                                    Err(_) => {
+                                        println!(
+                                            "{}: Quick Tunnel runtime state FAILED",
+                                            connector.id
+                                        );
+                                        failures = failures.saturating_add(1);
+                                        false
+                                    }
+                                };
+                                println!(
+                                    "{}: cloudflared {}, public URL discovered={runtime_url_discovered}",
+                                    connector.id, probe.version
+                                );
+                            }
                             Err(_) => {
                                 println!("{}: cloudflared probe FAILED", connector.id);
                                 failures = failures.saturating_add(1);

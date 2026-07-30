@@ -13,7 +13,7 @@ mod theme;
 
 #[cfg(feature = "desktop-ui")]
 mod desktop {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ mod desktop {
     use runonmine_core::secrets::default_secret_store;
     use runonmine_core::{
         AppConfig, AppPaths, ApprovalDecision, ApprovalRequest, AuditRecord, ConnectorKind,
-        PersistentGrant, PolicyPreset, StateStore,
+        PersistentGrant, PolicyPreset, QuickTunnelRuntimeStore, StateStore,
     };
     use secrecy::SecretString;
 
@@ -36,6 +36,7 @@ mod desktop {
     use runonmine_platform::UserService;
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+    use url::Url;
     use uuid::Uuid;
 
     pub fn run() -> Result<()> {
@@ -115,6 +116,7 @@ mod desktop {
         audit: Vec<AuditRecord>,
         oauth_clients: Vec<RegisteredClient>,
         oauth_sessions: Vec<OAuthSession>,
+        quick_runtime_urls: HashMap<String, Url>,
         known: HashSet<Uuid>,
         last_refresh: Instant,
         status: String,
@@ -151,6 +153,7 @@ mod desktop {
                 audit: Vec::new(),
                 oauth_clients: Vec::new(),
                 oauth_sessions: Vec::new(),
+                quick_runtime_urls: HashMap::new(),
                 known: HashSet::new(),
                 last_refresh: now.checked_sub(Duration::from_secs(10)).unwrap_or(now),
                 status: "Starting".to_owned(),
@@ -245,6 +248,21 @@ mod desktop {
             let oauth = SqliteOAuthStore::open(&paths.state_db())?;
             self.oauth_clients = oauth.registered_clients()?;
             self.oauth_sessions = oauth.sessions(None)?;
+            let quick_runtime = QuickTunnelRuntimeStore::new(paths);
+            let mut quick_runtime_urls = HashMap::new();
+            for connector in config
+                .connectors
+                .iter()
+                .filter(|connector| connector.kind == ConnectorKind::CloudflareQuick)
+            {
+                if let Some(url) = quick_runtime
+                    .get(&connector.id)?
+                    .and_then(|record| record.public_url)
+                {
+                    quick_runtime_urls.insert(connector.id.clone(), url);
+                }
+            }
+            self.quick_runtime_urls = quick_runtime_urls;
             self.status = if !self.pending.is_empty() {
                 format!("{} approval(s) waiting", self.pending.len())
             } else if self.agent_reachable {
@@ -1238,6 +1256,11 @@ mod desktop {
             for connector in connectors {
                 let confirming_delete =
                     self.pending_connector_delete.as_deref() == Some(&connector.id);
+                let public_url = if connector.kind == ConnectorKind::CloudflareQuick {
+                    self.quick_runtime_urls.get(&connector.id).cloned()
+                } else {
+                    connector.public_base_url.clone()
+                };
                 theme::card(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
@@ -1279,7 +1302,7 @@ mod desktop {
                                     .monospace()
                                     .color(theme::MUTED),
                             );
-                            if let Some(url) = &connector.public_base_url {
+                            if let Some(url) = &public_url {
                                 ui.label(
                                     egui::RichText::new(format!("Public endpoint  {url}"))
                                         .size(12.0)

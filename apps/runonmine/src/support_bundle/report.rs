@@ -4,7 +4,7 @@ use std::fs;
 use chrono::{DateTime, Utc};
 use runonmine_core::{
     AppConfig, AppPaths, AuditOutcome, BrowserProfileMode, ConnectorConfig, ConnectorKind,
-    PolicyPreset, StateStore,
+    PolicyPreset, QuickTunnelRuntimeStore, StateStore,
 };
 #[cfg(target_os = "linux")]
 use runonmine_platform::LinuxSystemService;
@@ -58,9 +58,17 @@ pub(super) struct ConnectorSummary {
 
 #[derive(Debug, Serialize)]
 pub(super) struct ConnectorFeatures {
-    public_endpoint_configured: bool,
+    public_endpoint: PublicEndpointStatus,
     external_binary_override_configured: bool,
     immutable_owner_bound: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PublicEndpointStatus {
+    NotConfigured,
+    Configured,
+    RuntimeUnavailable,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,12 +145,15 @@ pub(super) fn config_report(paths: &AppPaths) -> (ConfigReport, Option<AppConfig
         port: config.port,
         default_preset: config.default_preset,
         allowed_root_count: config.allowed_roots.len(),
-        connectors: config
-            .connectors
-            .iter()
-            .enumerate()
-            .map(|(index, connector)| connector_summary(index, connector))
-            .collect(),
+        connectors: {
+            let quick_runtime = QuickTunnelRuntimeStore::new(paths);
+            config
+                .connectors
+                .iter()
+                .enumerate()
+                .map(|(index, connector)| connector_summary(index, connector, &quick_runtime))
+                .collect()
+        },
         browser: BrowserSummary {
             profile_mode: config.browser.profile_mode,
             external_cdp_configured: config.browser.external_cdp_url.is_some(),
@@ -161,7 +172,11 @@ pub(super) fn config_report(paths: &AppPaths) -> (ConfigReport, Option<AppConfig
     (report, Some(config))
 }
 
-fn connector_summary(index: usize, connector: &ConnectorConfig) -> ConnectorSummary {
+fn connector_summary(
+    index: usize,
+    connector: &ConnectorConfig,
+    quick_runtime: &QuickTunnelRuntimeStore,
+) -> ConnectorSummary {
     let external_binary_override_configured = connector
         .cloudflare_quick
         .as_ref()
@@ -179,6 +194,17 @@ fn connector_summary(index: usize, connector: &ConnectorConfig) -> ConnectorSumm
                 .and_then(|settings| settings.tunnel_client_path.as_ref())
         })
         .is_some();
+    let public_endpoint = if connector.kind == ConnectorKind::CloudflareQuick {
+        match quick_runtime.get(&connector.id) {
+            Ok(Some(record)) if record.public_url.is_some() => PublicEndpointStatus::Configured,
+            Ok(_) => PublicEndpointStatus::NotConfigured,
+            Err(_) => PublicEndpointStatus::RuntimeUnavailable,
+        }
+    } else if connector.public_base_url.is_some() {
+        PublicEndpointStatus::Configured
+    } else {
+        PublicEndpointStatus::NotConfigured
+    };
     ConnectorSummary {
         index,
         kind: connector.kind,
@@ -188,7 +214,7 @@ fn connector_summary(index: usize, connector: &ConnectorConfig) -> ConnectorSumm
         tool_override_count: connector.tool_overrides.len(),
         policy_rule_count: connector.policy_rules.len(),
         features: ConnectorFeatures {
-            public_endpoint_configured: connector.public_base_url.is_some(),
+            public_endpoint,
             external_binary_override_configured,
             immutable_owner_bound: connector
                 .oauth_owner

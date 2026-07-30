@@ -10,6 +10,7 @@ pub mod filesystem;
 pub mod paths;
 pub mod policy;
 pub mod process;
+pub mod quick_tunnel_runtime;
 pub mod secrets;
 pub mod storage;
 
@@ -31,6 +32,10 @@ pub use paths::AppPaths;
 pub use policy::{
     Capability, DecisionSource, PolicyContext, PolicyDecision, PolicyEngine, PolicyMode,
     PolicyPreset, PolicyRule, PrincipalContext, PrincipalMatcher, ResourceContext, ResourceMatcher,
+};
+pub use quick_tunnel_runtime::{
+    QuickTunnelGeneration, QuickTunnelRuntimeRecord, QuickTunnelRuntimeStore,
+    validate_quick_tunnel_url,
 };
 pub use storage::{AuditRecord, ConnectorAuthorizationCleanup, StateStore};
 

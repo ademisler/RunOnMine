@@ -110,6 +110,9 @@ curl -sS http://127.0.0.1:47821/healthz/connectors
 It reports `starting`, `backoff`, `ready`, `degraded`, and `stopped` states. The
 detailed endpoint rejects forwarded/public-host requests and never includes
 credentials, child-process output, command lines, or generated public URLs.
+Cloudflare Quick Tunnel discovery is kept separately in private,
+generation-bound runtime state rather than durable configuration; it is cleared
+on restart/backoff and removed on process stop.
 
 ## Security model
 
