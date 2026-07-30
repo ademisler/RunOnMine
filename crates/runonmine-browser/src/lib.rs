@@ -1,6 +1,9 @@
 //! Isolated browser-profile and CDP automation primitives.
 
 mod network_proxy;
+mod orphan_reaper;
+
+pub use orphan_reaper::{BrowserOrphanReport, reap_orphaned_browser_sessions};
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -10,6 +13,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use chromiumoxide::Handler;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::fetch::{
     ContinueRequestParams, DisableParams as FetchDisableParams, EnableParams as FetchEnableParams,
@@ -22,6 +26,7 @@ use futures::StreamExt;
 use network_proxy::{
     BrowserNetworkGuard, DestinationResolver, SystemDestinationResolver, canonical_destination_host,
 };
+use orphan_reaper::BrowserLease;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
 use url::Url;
@@ -29,6 +34,7 @@ use url::Url;
 const MAX_BROWSER_INPUT_BYTES: usize = 256 * 1_024;
 const DEFAULT_BROWSER_OPERATION_TIMEOUT: Duration = Duration::from_secs(45);
 const BROWSER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const BROWSER_REQUEST_GUARD_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Serialize)]
@@ -109,8 +115,17 @@ struct ActiveBrowser {
     handler_task: tokio::task::JoinHandle<()>,
     interceptor_task: tokio::task::JoinHandle<()>,
     network_guard: Option<BrowserNetworkGuard>,
+    lease: Option<BrowserLease>,
     owned_process: bool,
     page_owned: bool,
+}
+
+struct BrowserLaunch {
+    browser: Browser,
+    handler: Handler,
+    network_guard: Option<BrowserNetworkGuard>,
+    lease: Option<BrowserLease>,
+    owned_process: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,7 +171,9 @@ async fn teardown_active_browser(mut active: ActiveBrowser, mode: TeardownMode) 
             }
         })
         .await;
-        if !matches!(killed, Ok(Ok(()))) {
+        if matches!(killed, Ok(Ok(()))) {
+            process_stopped = true;
+        } else {
             tracing::warn!("owned Chromium did not confirm forced termination before its deadline");
         }
     }
@@ -165,6 +182,40 @@ async fn teardown_active_browser(mut active: ActiveBrowser, mode: TeardownMode) 
     if let Some(mut guard) = active.network_guard.take() {
         guard.stop().await;
     }
+    if process_stopped && let Some(mut lease) = active.lease.take() {
+        if lease.ephemeral() {
+            let profile = lease.profile_directory().to_path_buf();
+            if remove_ephemeral_profile_with_retries(&profile).await {
+                lease.release();
+            } else {
+                tracing::warn!(
+                    path = %profile.display(),
+                    "retained browser ownership lease because the ephemeral profile could not be removed"
+                );
+            }
+        } else {
+            lease.release();
+        }
+    }
+}
+
+async fn remove_ephemeral_profile_with_retries(profile: &Path) -> bool {
+    for delay in [0_u64, 50, 200, 500, 1_000] {
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        match std::fs::remove_dir_all(profile) {
+            Ok(()) => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                if !profile.exists() {
+                    return true;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) => {}
+        }
+    }
+    false
 }
 
 pub struct BrowserSession {
@@ -354,14 +405,13 @@ impl BrowserSession {
         let active = slot.take();
         if let Some(active) = active {
             let cleanup = teardown_active_browser(active, TeardownMode::Forced);
-            if tokio::time::timeout(BROWSER_RECOVERY_TIMEOUT, cleanup)
+            if tokio::time::timeout(BROWSER_TEARDOWN_TIMEOUT, cleanup)
                 .await
                 .is_err()
             {
                 tracing::warn!(operation, "forced browser cleanup exceeded its deadline");
             }
         }
-        self.cleanup_profile();
         drop(slot);
         true
     }
@@ -564,8 +614,9 @@ impl BrowserSession {
         let mut slot = self.active.lock().await;
         if let Some(active) = slot.take() {
             teardown_active_browser(active, TeardownMode::Graceful).await;
+        } else {
+            self.cleanup_profile();
         }
-        self.cleanup_profile();
         Ok(())
     }
 
@@ -592,86 +643,158 @@ impl BrowserSession {
     async fn ensure_active(&self) -> Result<MutexGuard<'_, Option<ActiveBrowser>>> {
         let mut slot = self.active.lock().await;
         if slot.is_none() {
-            validate_browser_network_mode(&self.profile, self.allow_private_network)?;
-            let (mut browser, mut handler, owned_process, network_guard) = match &self.profile {
-                BrowserProfile::Isolated { directory, .. } => {
-                    ensure_private_directory(directory)?;
-                    let executable = chromium_executable()
-                        .context("a supported Chromium installation was not found")?;
-                    let mut network_guard = if self.allow_private_network {
-                        None
-                    } else {
-                        Some(BrowserNetworkGuard::start(Arc::clone(&self.resolver)).await?)
-                    };
-                    let mut builder = BrowserConfig::builder()
-                        .chrome_executable(executable)
-                        .user_data_dir(directory)
-                        .window_size(1_280, 900)
-                        .launch_timeout(self.operation_timeout.min(Duration::from_secs(30)))
-                        .request_timeout(self.operation_timeout.min(Duration::from_secs(30)));
-                    if let Some(guard) = network_guard.as_ref() {
-                        for argument in guarded_browser_arguments(guard.address()) {
-                            builder = match argument.value {
-                                Some(value) => builder.arg((argument.key, value.as_str())),
-                                None => builder.arg(argument.key),
-                            };
-                        }
-                    }
-                    #[cfg(test)]
-                    for (key, value) in &self.extra_browser_args {
-                        builder = builder.arg((key.as_str(), value.as_str()));
-                    }
-                    if !self.headless {
-                        builder = builder.with_head();
-                    }
-                    let config = builder.build().map_err(anyhow::Error::msg)?;
-                    let launched = Browser::launch(config).await;
-                    if launched.is_err()
-                        && let Some(guard) = network_guard.as_mut()
-                    {
-                        guard.stop().await;
-                    }
-                    let (browser, handler) = launched?;
-                    (browser, handler, true, network_guard)
-                }
-                BrowserProfile::ExternalCdp { endpoint } => {
-                    let (browser, handler) = Browser::connect(endpoint.to_string()).await?;
-                    (browser, handler, false, None)
-                }
-            };
-            let handler_task = tokio::spawn(async move {
-                while let Some(event) = handler.next().await {
-                    if let Err(error) = event {
-                        tracing::warn!(%error, "Chromium handler stopped");
-                        break;
-                    }
-                }
-            });
-            if !owned_process {
-                browser.fetch_targets().await?;
-            }
-            let existing_page = browser.pages().await?.into_iter().next();
-            let (page, page_owned) = match existing_page {
-                Some(page) => (page, owned_process),
-                None => (browser.new_page("about:blank").await?, true),
-            };
-            let interceptor_task = install_request_guard(
-                &page,
-                self.allow_private_network,
-                Arc::clone(&self.resolver),
-            )
-            .await?;
-            *slot = Some(ActiveBrowser {
-                browser,
-                page,
-                handler_task,
-                interceptor_task,
-                network_guard,
-                owned_process,
-                page_owned,
-            });
+            *slot = Some(Box::pin(self.start_active_browser()).await?);
         }
         Ok(slot)
+    }
+
+    async fn start_active_browser(&self) -> Result<ActiveBrowser> {
+        validate_browser_network_mode(&self.profile, self.allow_private_network)?;
+        let launch = match &self.profile {
+            BrowserProfile::Isolated {
+                directory,
+                ephemeral,
+            } => self.launch_isolated_browser(directory, *ephemeral).await?,
+            BrowserProfile::ExternalCdp { endpoint } => {
+                let (browser, handler) = Browser::connect(endpoint.to_string()).await?;
+                BrowserLaunch {
+                    browser,
+                    handler,
+                    network_guard: None,
+                    lease: None,
+                    owned_process: false,
+                }
+            }
+        };
+        self.finish_browser_launch(launch).await
+    }
+
+    async fn launch_isolated_browser(
+        &self,
+        directory: &Path,
+        ephemeral: bool,
+    ) -> Result<BrowserLaunch> {
+        ensure_private_directory(directory)?;
+        let executable =
+            chromium_executable().context("a supported Chromium installation was not found")?;
+        let mut lease = BrowserLease::prepare(directory, &executable, ephemeral)?;
+        let mut network_guard = if self.allow_private_network {
+            None
+        } else {
+            Some(BrowserNetworkGuard::start(Arc::clone(&self.resolver)).await?)
+        };
+        let config = match self.build_isolated_browser_config(
+            directory,
+            executable,
+            network_guard.as_ref(),
+            &lease,
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                lease.release();
+                self.cleanup_profile();
+                return Err(error);
+            }
+        };
+        let launched = Browser::launch(config).await;
+        if launched.is_err() {
+            if let Some(guard) = network_guard.as_mut() {
+                guard.stop().await;
+            }
+            lease.release();
+            self.cleanup_profile();
+        }
+        let (mut browser, handler) = launched?;
+        if let Err(error) = lease.activate(&mut browser) {
+            let stopped = matches!(
+                tokio::time::timeout(BROWSER_RECOVERY_TIMEOUT, browser.kill()).await,
+                Ok(Some(Ok(())))
+            );
+            if stopped {
+                lease.release();
+                self.cleanup_profile();
+            }
+            if let Some(guard) = network_guard.as_mut() {
+                guard.stop().await;
+            }
+            return Err(error.context("failed to activate browser ownership lease"));
+        }
+        Ok(BrowserLaunch {
+            browser,
+            handler,
+            network_guard,
+            lease: Some(lease),
+            owned_process: true,
+        })
+    }
+
+    fn build_isolated_browser_config(
+        &self,
+        directory: &Path,
+        executable: PathBuf,
+        network_guard: Option<&BrowserNetworkGuard>,
+        lease: &BrowserLease,
+    ) -> Result<BrowserConfig> {
+        let (lease_argument, lease_token) = lease.chromium_argument();
+        let mut builder = BrowserConfig::builder()
+            .chrome_executable(executable)
+            .user_data_dir(directory)
+            .arg((lease_argument.as_str(), lease_token.as_str()))
+            .window_size(1_280, 900)
+            .launch_timeout(self.operation_timeout.min(Duration::from_secs(30)))
+            .request_timeout(self.operation_timeout.min(Duration::from_secs(30)));
+        if let Some(guard) = network_guard {
+            for argument in guarded_browser_arguments(guard.address()) {
+                builder = match argument.value {
+                    Some(value) => builder.arg((argument.key, value.as_str())),
+                    None => builder.arg(argument.key),
+                };
+            }
+        }
+        #[cfg(test)]
+        for (key, value) in &self.extra_browser_args {
+            builder = builder.arg((key.as_str(), value.as_str()));
+        }
+        if !self.headless {
+            builder = builder.with_head();
+        }
+        builder.build().map_err(anyhow::Error::msg)
+    }
+
+    async fn finish_browser_launch(&self, mut launch: BrowserLaunch) -> Result<ActiveBrowser> {
+        let mut handler = launch.handler;
+        let handler_task = tokio::spawn(async move {
+            while let Some(event) = handler.next().await {
+                if let Err(error) = event {
+                    tracing::warn!(%error, "Chromium handler stopped");
+                    break;
+                }
+            }
+        });
+        if !launch.owned_process {
+            launch.browser.fetch_targets().await?;
+        }
+        let existing_page = launch.browser.pages().await?.into_iter().next();
+        let (page, page_owned) = match existing_page {
+            Some(page) => (page, launch.owned_process),
+            None => (launch.browser.new_page("about:blank").await?, true),
+        };
+        let interceptor_task = install_request_guard(
+            &page,
+            self.allow_private_network,
+            Arc::clone(&self.resolver),
+        )
+        .await?;
+        Ok(ActiveBrowser {
+            browser: launch.browser,
+            page,
+            handler_task,
+            interceptor_task,
+            network_guard: launch.network_guard,
+            lease: launch.lease,
+            owned_process: launch.owned_process,
+            page_owned,
+        })
     }
 
     fn cleanup_profile(&self) {
@@ -685,30 +808,9 @@ impl Drop for BrowserSession {
     fn drop(&mut self) {
         if let Ok(mut slot) = self.active.try_lock()
             && let Some(active) = slot.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
-            let page = active.page.clone();
-            let interceptor_task = active.interceptor_task;
-            let handler_task = active.handler_task;
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ignored = page.execute(FetchDisableParams::default()).await;
-                    interceptor_task.abort();
-                    handler_task.abort();
-                });
-            } else {
-                interceptor_task.abort();
-                handler_task.abort();
-            }
-        }
-        if let Some(directory) = self.profile.cleanup_directory() {
-            std::thread::spawn(move || {
-                for delay in [50_u64, 200, 500, 1_000] {
-                    std::thread::sleep(Duration::from_millis(delay));
-                    if !directory.exists() || std::fs::remove_dir_all(&directory).is_ok() {
-                        return;
-                    }
-                }
-            });
+            runtime.spawn(teardown_active_browser(active, TeardownMode::Forced));
         }
     }
 }
@@ -1193,8 +1295,9 @@ mod tests {
             return Ok(());
         }
         let temporary = tempfile::tempdir()?;
+        let profile = temporary.path().join("profile");
         let session = BrowserSession::with_operation_timeout(
-            BrowserProfile::isolated_ephemeral(temporary.path().join("profile")),
+            BrowserProfile::isolated_ephemeral(profile.clone()),
             true,
             false,
             1_024 * 1_024,
@@ -1220,10 +1323,12 @@ mod tests {
             after_timeout.last_timeout_operation.as_deref(),
             Some("test_active_hang")
         );
+        assert!(!profile.exists());
 
         assert_eq!(session.open("about:blank").await?, "about:blank");
         assert!(session.info().await?.active);
         session.close().await?;
+        assert!(!profile.exists());
         Ok(())
     }
 

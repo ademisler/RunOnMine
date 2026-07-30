@@ -100,6 +100,28 @@ its connection but never kills the independently owned browser process. Profile
 diagnostics expose only the configured deadline, recovery count, and last bounded
 operation category.
 
+## Crash leases and startup reconciliation
+
+Before launching an owned Chromium process, RunOnMine creates an owner-only lease
+inside that exact browser profile. The lease contains a random per-launch token,
+the disposable/persistent mode, the canonical profile and executable, the agent
+PID/start time, and the browser PID/start time once the process is observable.
+The token is also passed as an exact Chromium command-line argument. Lease updates
+are written through an owner-only temporary file, synchronized, and atomically
+renamed.
+
+Both HTTP-agent and stdio startup inventory the browser profile tree before they
+serve MCP requests. A live owning agent causes the lease to be deferred. An
+orphan process is terminated only when its operating-system owner matches the
+current user and the token, exact `--user-data-dir`, executable, PID, and process
+start time match the lease. PID reuse, unreadable process identity, unsafe file
+permissions, symlinks, malformed leases, and any other ambiguity fail closed: the
+process and profile are left untouched and a bounded warning is logged. Once the
+process is confirmed stopped, the lease is removed; disposable profiles are
+deleted and persistent profile data remains. Legacy disposable UUID directories
+without a lease are removed only when no live process references their exact
+profile path.
+
 ## Output and policy
 
 Screenshots are encoded as complete JPEG images and rejected when they exceed

@@ -92,6 +92,19 @@ RunOnMine connection is quarantined and must be reattached on the next call.
 Recovery count and the last bounded operation category are available through
 browser profile diagnostics without exposing page content or JavaScript.
 
+Owned Chromium launch is registered before process creation with a private,
+atomically replaced lease inside the exact profile directory. The lease binds a
+random launch token, profile mode/path, launcher identity, agent PID/start time,
+and—after launch—the real browser PID/start time and executable. HTTP and stdio
+startup inventory these leases before accepting requests. A process is killed
+only when it is owned by the current user and all available token, profile,
+executable, PID, and start-time evidence agrees. A live owner defers cleanup;
+invalid, symlinked, broadly readable, PID-reused, or otherwise ambiguous entries
+are logged and retained. Confirmed stale leases are removed, disposable profiles
+are deleted, and persistent profile data is preserved. Legacy three-level UUID
+disposable profiles are removed only when no live process references their exact
+`--user-data-dir`.
+
 When private-network access is disabled, the isolated Chromium process is
 launched behind a RunOnMine-owned loopback HTTP proxy. Process-level proxy,
 host-resolver, QUIC, loopback-bypass, and WebRTC settings make the boundary

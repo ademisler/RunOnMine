@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Track every owned Chromium launch with an owner-only crash lease and reconcile browser leftovers before HTTP or stdio startup. Reaping requires same-user, token, exact profile, executable and PID/start-time evidence; ambiguous processes are retained and reported, while stale disposable profiles are removed.
 - Bound every browser/CDP operation with a configurable deadline and recover timed-out sessions by quarantining the connection, force-terminating owned Chromium, cleaning ephemeral state, and lazily starting a fresh session; expose only bounded timeout counters and operation categories in browser diagnostics.
 - Replace 250 ms approval database polling with cross-process native filesystem notifications emitted after committed approval changes. MCP approval waits now re-check state immediately on owner decisions and use a five-second SQLite poll only as recovery when watcher events are unavailable or missed.
 - Replace live GitHub release-metadata trust for managed connector downloads with embedded threshold-signed provenance catalogs: every accepted Cloudflare or OpenAI artifact is bound to an official source repository and commit, release tag, exact asset URL, SHA-256, size and archive format by both a shared RunOnMine Ed25519 root and an independent provider root. Persist the signed envelope in new receipts and re-verify it during managed binary startup; legacy digest-only receipts remain readable and upgrade on the next managed update.

@@ -18,7 +18,9 @@ use rmcp::transport::stdio;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
-use runonmine_browser::{BrowserProfile, BrowserSession, chromium_available};
+use runonmine_browser::{
+    BrowserProfile, BrowserSession, chromium_available, reap_orphaned_browser_sessions,
+};
 use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::process::{ProcessRequest, execute_shell};
 use runonmine_core::secrets::SecretStore;
@@ -1916,9 +1918,31 @@ const TOOL_CAPABILITIES: &[(&str, Capability)] = &[
     ("browser_profile_info", Capability::BrowserRead),
 ];
 
+pub(crate) async fn reconcile_browser_orphans(paths: &AppPaths) -> Result<()> {
+    let profiles = paths.browser_profiles();
+    let report = tokio::task::spawn_blocking(move || reap_orphaned_browser_sessions(&profiles))
+        .await
+        .context("browser orphan inventory task failed")??;
+    if report.changed() || report.has_warnings() {
+        tracing::info!(
+            leases_examined = report.leases_examined,
+            processes_reaped = report.processes_reaped,
+            stale_leases_removed = report.stale_leases_removed,
+            ephemeral_profiles_removed = report.ephemeral_profiles_removed,
+            live_owners_deferred = report.live_owners_deferred,
+            live_profiles_deferred = report.live_profiles_deferred,
+            unsafe_entries = report.unsafe_entries,
+            failed_reaps = report.failed_reaps,
+            "reconciled browser ownership leases and ephemeral profiles"
+        );
+    }
+    Ok(())
+}
+
 pub async fn serve_stdio(connector_id: &str) -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
+    reconcile_browser_orphans(&paths).await?;
     let reconciled = connector_removal::reconcile_pending_connector_removals(&paths)?;
     if reconciled > 0 {
         tracing::info!(reconciled, "completed pending connector removals");

@@ -116,6 +116,7 @@ struct HttpConnectorBuild {
 pub async fn serve_loopback() -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
+    super::reconcile_browser_orphans(&paths).await?;
     let reconciled = super::connector_removal::reconcile_pending_connector_removals(&paths)?;
     if reconciled > 0 {
         tracing::info!(reconciled, "completed pending connector removals");
