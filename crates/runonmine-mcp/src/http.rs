@@ -33,7 +33,10 @@ use url::Url;
 
 use super::{
     IdleSessionManager, REQUEST_ACCESS, REQUEST_RUNTIME, RequestAccess, RequestPrincipal,
-    RunOnMineServer, Runtime, TOOL_CAPABILITIES, managed_connectors::start_external_connectors,
+    RunOnMineServer, Runtime, TOOL_CAPABILITIES,
+    managed_connectors::{
+        ConnectorStartupFailure, ConnectorStartupStage, start_external_connectors,
+    },
     oauth_scope_for_capability, required_secret,
 };
 
@@ -97,6 +100,12 @@ struct HttpConnectorState {
     sessions: Arc<AsyncMutex<HashMap<String, SessionBinding>>>,
 }
 
+#[derive(Debug)]
+struct HttpConnectorBuild {
+    state: HttpConnectorState,
+    degraded: Vec<ConnectorStartupFailure>,
+}
+
 pub async fn serve_loopback() -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
@@ -105,7 +114,8 @@ pub async fn serve_loopback() -> Result<()> {
         tracing::info!(reconciled, "completed pending connector removals");
     }
     let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
-    let connector_state = Arc::new(build_http_connector_state(&paths, &config)?);
+    let HttpConnectorBuild { state, degraded } = build_http_connector_state(&paths, &config);
+    let connector_state = Arc::new(state);
     let mut allowed_hosts = vec![
         "localhost".to_owned(),
         "127.0.0.1".to_owned(),
@@ -166,7 +176,8 @@ pub async fn serve_loopback() -> Result<()> {
         instance_id = %runtime_marker.status().instance_id,
         "published running agent version handshake"
     );
-    let managed_connectors = start_external_connectors(&paths, &config).await?;
+    let managed_connectors = start_external_connectors(&paths, &config, degraded).await?;
+    managed_connectors.log_startup_summary();
     tracing::info!(%address, "RunOnMine agent listening on loopback");
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -209,58 +220,104 @@ fn spawn_session_sweeper(
     })
 }
 
-fn build_http_connector_state(paths: &AppPaths, config: &AppConfig) -> Result<HttpConnectorState> {
-    let secrets = default_secret_store(paths)?;
-    let mut local = None;
-    let mut quick = None;
-    let mut oauth = None;
+fn build_http_connector_state(paths: &AppPaths, config: &AppConfig) -> HttpConnectorBuild {
+    match default_secret_store(paths) {
+        Ok(secrets) => build_http_connector_state_with_store(paths, config, secrets.as_ref()),
+        Err(_) => HttpConnectorBuild {
+            state: empty_http_connector_state(config),
+            degraded: config
+                .connectors
+                .iter()
+                .filter(|connector| connector.enabled)
+                .filter(|connector| {
+                    matches!(
+                        connector.kind,
+                        ConnectorKind::LocalHttp
+                            | ConnectorKind::CloudflareQuick
+                            | ConnectorKind::CloudflareOauth
+                    )
+                })
+                .map(|connector| {
+                    ConnectorStartupFailure::new(
+                        &connector.id,
+                        connector.kind,
+                        ConnectorStartupStage::Authentication,
+                    )
+                })
+                .collect(),
+        },
+    }
+}
+
+fn build_http_connector_state_with_store(
+    paths: &AppPaths,
+    config: &AppConfig,
+    secrets: &dyn SecretStore,
+) -> HttpConnectorBuild {
+    let mut state = empty_http_connector_state(config);
+    let mut degraded = Vec::new();
     for connector in config
         .connectors
         .iter()
         .filter(|connector| connector.enabled)
     {
-        match connector.kind {
-            ConnectorKind::LocalHttp => {
-                let secret_name = format!("connector.{}.local_http_token", connector.id);
-                if let Some(token) = secrets.get(&secret_name)? {
-                    validate_local_http_token(token.expose_secret())?;
-                    local = Some(LocalHttpConnector {
-                        runtime: Runtime::load(&connector.id)?,
-                        token: Arc::new(token),
-                    });
-                } else {
-                    tracing::warn!(
-                        connector_id = %connector.id,
-                        "local HTTP connector is enabled without a bearer token and will remain unavailable"
-                    );
-                }
-            }
-            ConnectorKind::CloudflareQuick => {
-                let path_secret = required_secret(
-                    secrets.as_ref(),
-                    &format!("connector.{}.path_secret", connector.id),
-                )?;
-                validate_quick_path_secret(path_secret.expose_secret())?;
-                quick = Some(QuickHttpConnector {
-                    runtime: Runtime::load(&connector.id)?,
-                    paths: paths.clone(),
-                });
-            }
-            ConnectorKind::CloudflareOauth => {
-                oauth = Some(build_oauth_connector(paths, connector, secrets.as_ref())?);
-            }
-            ConnectorKind::LocalStdio | ConnectorKind::OpenAiTunnel => {}
+        let prepared = match connector.kind {
+            ConnectorKind::LocalHttp => build_local_http_connector(paths, connector, secrets)
+                .map(|value| state.local = Some(value)),
+            ConnectorKind::CloudflareQuick => build_quick_http_connector(paths, connector, secrets)
+                .map(|value| state.quick = Some(value)),
+            ConnectorKind::CloudflareOauth => build_oauth_connector(paths, connector, secrets)
+                .map(|value| state.oauth = Some(value)),
+            ConnectorKind::LocalStdio | ConnectorKind::OpenAiTunnel => Ok(()),
+        };
+        if prepared.is_err() {
+            degraded.push(ConnectorStartupFailure::new(
+                &connector.id,
+                connector.kind,
+                ConnectorStartupStage::Authentication,
+            ));
         }
     }
-    Ok(HttpConnectorState {
-        local,
-        quick,
-        oauth,
+    HttpConnectorBuild { state, degraded }
+}
+
+fn empty_http_connector_state(config: &AppConfig) -> HttpConnectorState {
+    HttpConnectorState {
+        local: None,
+        quick: None,
+        oauth: None,
         agent_port: config.port,
         session_idle_ttl: Duration::from_secs(
             config.limits.session_idle_minutes.saturating_mul(60),
         ),
         sessions: Arc::new(AsyncMutex::new(HashMap::new())),
+    }
+}
+
+fn build_local_http_connector(
+    paths: &AppPaths,
+    connector: &ConnectorConfig,
+    secrets: &dyn SecretStore,
+) -> Result<LocalHttpConnector> {
+    let secret_name = format!("connector.{}.local_http_token", connector.id);
+    let token = required_secret(secrets, &secret_name)?;
+    validate_local_http_token(token.expose_secret())?;
+    Ok(LocalHttpConnector {
+        runtime: Runtime::load_from_paths(paths, &connector.id)?,
+        token: Arc::new(token),
+    })
+}
+
+fn build_quick_http_connector(
+    paths: &AppPaths,
+    connector: &ConnectorConfig,
+    secrets: &dyn SecretStore,
+) -> Result<QuickHttpConnector> {
+    let path_secret = required_secret(secrets, &format!("connector.{}.path_secret", connector.id))?;
+    validate_quick_path_secret(path_secret.expose_secret())?;
+    Ok(QuickHttpConnector {
+        runtime: Runtime::load_from_paths(paths, &connector.id)?,
+        paths: paths.clone(),
     })
 }
 
@@ -339,7 +396,7 @@ fn build_oauth_connector(
         .join(".well-known/oauth-protected-resource")
         .context("OAuth protected resource metadata URL is invalid")?;
     Ok(OAuthHttpConnector {
-        runtime: Runtime::load(&connector.id)?,
+        runtime: Runtime::load_from_paths(paths, &connector.id)?,
         service: Arc::new(service),
         public_host,
         resource_metadata,
@@ -636,10 +693,105 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
     use super::*;
     use axum::body::Body;
-    use runonmine_core::Capability;
+    use runonmine_core::secrets::SecretStore;
+    use runonmine_core::{Capability, CloudflareQuickSettings};
     use runonmine_oauth::Scope;
+    use secrecy::SecretString;
+
+    #[derive(Default)]
+    struct TestSecretStore {
+        values: Mutex<BTreeMap<String, String>>,
+    }
+
+    impl SecretStore for TestSecretStore {
+        fn get(&self, name: &str) -> Result<Option<SecretString>> {
+            Ok(self
+                .values
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test secret store lock failed"))?
+                .get(name)
+                .cloned()
+                .map(SecretString::from))
+        }
+
+        fn set(&self, name: &str, value: &SecretString) -> Result<()> {
+            self.values
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test secret store lock failed"))?
+                .insert(name.to_owned(), value.expose_secret().to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, name: &str) -> Result<()> {
+            self.values
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test secret store lock failed"))?
+                .remove(name);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn quick_auth_failure_does_not_disable_healthy_local_http() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        let mut config = AppConfig::default();
+        let local = config
+            .connectors
+            .iter_mut()
+            .find(|connector| connector.kind == ConnectorKind::LocalHttp)
+            .context("default local HTTP connector is missing")?;
+        local.id = "healthy-local".to_owned();
+        local.enabled = true;
+
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "missing-quick-secret".to_owned();
+        quick.name = "Missing Quick secret".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings::default());
+        config.connectors.push(quick);
+        config.validate()?;
+        config.save(&paths.config_file())?;
+
+        let store = TestSecretStore::default();
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([11_u8; 32]);
+        store.set(
+            "connector.healthy-local.local_http_token",
+            &SecretString::from(token),
+        )?;
+
+        let build = build_http_connector_state_with_store(&paths, &config, &store);
+        assert!(build.state.local.is_some());
+        assert!(build.state.quick.is_none());
+        assert!(build.state.oauth.is_none());
+        assert_eq!(build.degraded.len(), 1);
+        assert_eq!(build.degraded[0].connector_id, "missing-quick-secret");
+        assert_eq!(build.degraded[0].kind, ConnectorKind::CloudflareQuick);
+        assert_eq!(
+            build.degraded[0].stage,
+            ConnectorStartupStage::Authentication
+        );
+        assert_eq!(
+            build.degraded[0].message,
+            "connector authentication could not be prepared"
+        );
+
+        let managed = start_external_connectors(&paths, &config, build.degraded).await?;
+        assert_eq!(managed.running_count(), 0);
+        assert_eq!(managed.degraded_failures().len(), 1);
+        assert_eq!(
+            managed.degraded_failures()[0].connector_id,
+            "missing-quick-secret"
+        );
+        managed.stop().await;
+        Ok(())
+    }
 
     #[test]
     fn bearer_parser_requires_exact_bearer_syntax() -> Result<()> {

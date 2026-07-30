@@ -148,6 +148,10 @@ fn oauth_scopes_allow_capability(scopes: &ScopeSet, capability: Capability) -> b
 impl Runtime {
     fn load(connector_id: &str) -> Result<Self> {
         let paths = AppPaths::discover()?;
+        Self::load_from_paths(&paths, connector_id)
+    }
+
+    fn load_from_paths(paths: &AppPaths, connector_id: &str) -> Result<Self> {
         paths.ensure()?;
         let config =
             AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;

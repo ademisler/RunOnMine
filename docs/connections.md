@@ -37,6 +37,21 @@ store. The agent listens on `127.0.0.1:47821`;
 configuration rejects public bind addresses and reserves port `45799` for the
 existing MacMCP installation.
 
+## Degraded connector startup
+
+An enabled external connector that cannot discover its binary, prepare its
+connector-specific artifacts, load its required credential, pass startup checks,
+or create its supervisor is marked degraded for that agent process and logged
+with its connector ID, kind and sanitized authentication/process stage. That failure does not stop the loopback HTTP
+agent, local connectors, or external connectors that already started
+successfully. A later agent restart retries the connector from desired
+configuration.
+
+The degraded record is currently in-memory plus structured logs; persistent and
+UI-visible lifecycle states are tracked separately in the roadmap. Quick Tunnel
+URL discovery starts only for a successfully supervised Quick connector, and an
+OpenAI credential-store failure is confined to the OpenAI connector.
+
 ## Cloudflare Quick Tunnel
 
 ```console

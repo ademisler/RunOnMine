@@ -1,5 +1,6 @@
 //! External connector process lifecycle and managed connector artifacts.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,17 +13,64 @@ use runonmine_connectors::{
     BinaryDiscovery, BinaryKind, ProcessEvent, ProcessSupervisor, RestartPolicy, SecretValue,
     SupervisorHandle, run_once,
 };
-use runonmine_core::secrets::default_secret_store;
 use runonmine_core::{AppConfig, AppPaths, ConnectorKind};
 use secrecy::ExposeSecret;
 use url::Url;
 
 use super::required_secret;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ConnectorStartupStage {
+    Authentication,
+    Process,
+}
+
+impl ConnectorStartupStage {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Authentication => "connector authentication could not be prepared",
+            Self::Process => "connector process could not be prepared",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ConnectorStartupFailure {
+    pub(super) connector_id: String,
+    pub(super) kind: ConnectorKind,
+    pub(super) stage: ConnectorStartupStage,
+    pub(super) message: String,
+}
+
+impl ConnectorStartupFailure {
+    pub(super) fn new(
+        connector_id: impl Into<String>,
+        kind: ConnectorKind,
+        stage: ConnectorStartupStage,
+    ) -> Self {
+        Self {
+            connector_id: connector_id.into(),
+            kind,
+            stage,
+            message: stage.message().to_owned(),
+        }
+    }
+
+    fn log(&self) {
+        tracing::error!(
+            connector_id = %self.connector_id,
+            kind = ?self.kind,
+            stage = ?self.stage,
+            "connector is degraded; continuing with healthy connectors"
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ManagedConnectors {
     handles: Vec<SupervisorHandle>,
     observers: Vec<tokio::task::JoinHandle<()>>,
+    degraded: Vec<ConnectorStartupFailure>,
 }
 
 #[derive(Debug)]
@@ -32,6 +80,64 @@ struct PendingQuickObserver {
 }
 
 impl ManagedConnectors {
+    fn with_degraded(degraded: Vec<ConnectorStartupFailure>) -> Self {
+        for failure in &degraded {
+            failure.log();
+        }
+        Self {
+            degraded,
+            ..Self::default()
+        }
+    }
+
+    fn blocked_connector_ids(&self) -> HashSet<String> {
+        self.degraded
+            .iter()
+            .map(|failure| failure.connector_id.clone())
+            .collect()
+    }
+
+    fn record_degraded(
+        &mut self,
+        connector_id: &str,
+        kind: ConnectorKind,
+        stage: ConnectorStartupStage,
+    ) {
+        if self
+            .degraded
+            .iter()
+            .any(|failure| failure.connector_id == connector_id)
+        {
+            return;
+        }
+        let failure = ConnectorStartupFailure::new(connector_id, kind, stage);
+        failure.log();
+        self.degraded.push(failure);
+    }
+
+    #[cfg(test)]
+    #[cfg(test)]
+    pub(super) fn running_count(&self) -> usize {
+        self.handles.len()
+    }
+
+    #[cfg(test)]
+    #[cfg(test)]
+    pub(super) fn degraded_failures(&self) -> &[ConnectorStartupFailure] {
+        &self.degraded
+    }
+
+    pub(super) fn log_startup_summary(&self) {
+        if self.degraded.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            degraded = self.degraded.len(),
+            running = self.handles.len(),
+            "RunOnMine started with degraded connectors"
+        );
+    }
+
     fn activate_quick_observers(
         &mut self,
         config_path: &std::path::Path,
@@ -60,8 +166,9 @@ impl ManagedConnectors {
 pub(super) async fn start_external_connectors(
     paths: &AppPaths,
     config: &AppConfig,
+    degraded: Vec<ConnectorStartupFailure>,
 ) -> Result<ManagedConnectors> {
-    let mut managed = ManagedConnectors::default();
+    let mut managed = ManagedConnectors::with_degraded(degraded);
     let mut pending_observers = Vec::new();
     if let Err(error) =
         start_external_connectors_inner(paths, config, &mut managed, &mut pending_observers).await
@@ -82,133 +189,152 @@ async fn start_external_connectors_inner(
 ) -> Result<()> {
     let discovery = BinaryDiscovery::new(vec![paths.data_dir.join("bin")]);
     let supervisor = ProcessSupervisor;
-    let secrets = default_secret_store(paths)?;
     let origin = Url::parse(&format!("http://127.0.0.1:{}", config.port))?;
+    let blocked = managed.blocked_connector_ids();
     for connector in config
         .connectors
         .iter()
         .filter(|connector| connector.enabled)
+        .filter(|connector| !blocked.contains(connector.id.as_str()))
     {
-        match connector.kind {
-            ConnectorKind::CloudflareQuick => {
-                let settings = connector
-                    .cloudflare_quick
-                    .as_ref()
-                    .context("Cloudflare Quick settings are missing")?;
-                let binary = discovery
-                    .discover(
-                        BinaryKind::Cloudflared,
-                        settings.cloudflared_path.as_deref(),
-                    )?
-                    .context("cloudflared is not installed; run the connector setup again")?;
-                let tunnel = QuickTunnelConfig::builder(origin.clone())
+        let startup = async {
+            match connector.kind {
+                ConnectorKind::CloudflareQuick => {
+                    let settings = connector
+                        .cloudflare_quick
+                        .as_ref()
+                        .context("Cloudflare Quick settings are missing")?;
+                    let binary = discovery
+                        .discover(
+                            BinaryKind::Cloudflared,
+                            settings.cloudflared_path.as_deref(),
+                        )?
+                        .context("cloudflared is not installed; run the connector setup again")?;
+                    let tunnel = QuickTunnelConfig::builder(origin.clone())
+                        .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
+                        .build()?;
+                    let mut handle = supervisor.start(
+                        tunnel.command(&binary)?,
+                        tunnel.health_check()?,
+                        RestartPolicy::default(),
+                    )?;
+                    if let Some(events) = handle.take_initial_events() {
+                        pending_observers.push(PendingQuickObserver {
+                            events,
+                            connector_id: connector.id.clone(),
+                        });
+                    }
+                    managed.handles.push(handle);
+                }
+                ConnectorKind::CloudflareOauth => {
+                    let settings = connector
+                        .cloudflare_named
+                        .as_ref()
+                        .context("Cloudflare Named Tunnel settings are missing")?;
+                    let binary = discovery
+                        .discover(
+                            BinaryKind::Cloudflared,
+                            settings.cloudflared_path.as_deref(),
+                        )?
+                        .context("cloudflared is not installed; run the connector setup again")?;
+                    let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
+                    ensure_private_directory(&connector_dir)?;
+                    let tunnel = NamedTunnelConfig::builder(
+                        &settings.tunnel_id,
+                        settings.credentials_file.clone(),
+                        &settings.hostname,
+                        origin.join("mcp")?,
+                        connector_dir.join("cloudflared.yml"),
+                    )
                     .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
                     .build()?;
-                let mut handle = supervisor.start(
-                    tunnel.command(&binary)?,
-                    tunnel.health_check()?,
-                    RestartPolicy::default(),
-                )?;
-                if let Some(events) = handle.take_initial_events() {
-                    pending_observers.push(PendingQuickObserver {
-                        events,
-                        connector_id: connector.id.clone(),
-                    });
+                    tunnel.write_config()?;
+                    managed.handles.push(supervisor.start(
+                        tunnel.command(&binary)?,
+                        tunnel.health_check()?,
+                        RestartPolicy::default(),
+                    )?);
                 }
-                managed.handles.push(handle);
-            }
-            ConnectorKind::CloudflareOauth => {
-                let settings = connector
-                    .cloudflare_named
-                    .as_ref()
-                    .context("Cloudflare Named Tunnel settings are missing")?;
-                let binary = discovery
-                    .discover(
-                        BinaryKind::Cloudflared,
-                        settings.cloudflared_path.as_deref(),
-                    )?
-                    .context("cloudflared is not installed; run the connector setup again")?;
-                let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
-                ensure_private_directory(&connector_dir)?;
-                let tunnel = NamedTunnelConfig::builder(
-                    &settings.tunnel_id,
-                    settings.credentials_file.clone(),
-                    &settings.hostname,
-                    origin.join("mcp")?,
-                    connector_dir.join("cloudflared.yml"),
-                )
-                .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
-                .build()?;
-                tunnel.write_config()?;
-                managed.handles.push(supervisor.start(
-                    tunnel.command(&binary)?,
-                    tunnel.health_check()?,
-                    RestartPolicy::default(),
-                )?);
-            }
-            ConnectorKind::OpenAiTunnel => {
-                let settings = connector
-                    .openai_tunnel
-                    .as_ref()
-                    .context("OpenAI tunnel settings are missing")?;
-                let binary = discovery
-                    .discover(
-                        BinaryKind::OpenAiTunnelClient,
-                        settings.tunnel_client_path.as_deref(),
-                    )?
-                    .context("tunnel-client is not installed; run the connector setup again")?;
-                let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
-                let profile_directory = connector_dir.join("openai-profiles");
-                let health_directory = paths.state_dir.join("connectors").join(&connector.id);
-                ensure_private_directory(&profile_directory)?;
-                ensure_private_directory(&health_directory)?;
-                let target =
-                    OpenAiMcpTarget::runonmine_stdio(runonmine_cli_executable()?, &connector.id)?;
-                let profile =
-                    OpenAiTunnelProfile::builder(&settings.profile, &settings.tunnel_id, target)
-                        .profile_directory(profile_directory.clone())
-                        .health_address(format!("127.0.0.1:{}", settings.health_port).parse()?)
-                        .health_url_file(health_directory.join("tunnel-health.url"))
-                        .build()?;
-                let profile_file = profile_directory.join(format!("{}.yaml", profile.profile()));
-                if !profile_file.exists() {
-                    let initialized = run_once(
-                        profile.init_command(&binary)?,
+                ConnectorKind::OpenAiTunnel => {
+                    let settings = connector
+                        .openai_tunnel
+                        .as_ref()
+                        .context("OpenAI tunnel settings are missing")?;
+                    let binary = discovery
+                        .discover(
+                            BinaryKind::OpenAiTunnelClient,
+                            settings.tunnel_client_path.as_deref(),
+                        )?
+                        .context("tunnel-client is not installed; run the connector setup again")?;
+                    let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
+                    let profile_directory = connector_dir.join("openai-profiles");
+                    let health_directory = paths.state_dir.join("connectors").join(&connector.id);
+                    ensure_private_directory(&profile_directory)?;
+                    ensure_private_directory(&health_directory)?;
+                    let target = OpenAiMcpTarget::runonmine_stdio(
+                        runonmine_cli_executable()?,
+                        &connector.id,
+                    )?;
+                    let profile = OpenAiTunnelProfile::builder(
+                        &settings.profile,
+                        &settings.tunnel_id,
+                        target,
+                    )
+                    .profile_directory(profile_directory.clone())
+                    .health_address(format!("127.0.0.1:{}", settings.health_port).parse()?)
+                    .health_url_file(health_directory.join("tunnel-health.url"))
+                    .build()?;
+                    let profile_file =
+                        profile_directory.join(format!("{}.yaml", profile.profile()));
+                    if !profile_file.exists() {
+                        let initialized = run_once(
+                            profile.init_command(&binary)?,
+                            Duration::from_secs(30),
+                            128 * 1_024,
+                        )
+                        .await?;
+                        if !initialized.success {
+                            bail!("tunnel-client profile initialization failed");
+                        }
+                        restrict_private_file(&profile_file)?;
+                    }
+                    let secrets = runonmine_core::secrets::default_secret_store(paths)?;
+                    let runtime_key = required_secret(
+                        secrets.as_ref(),
+                        &format!("connector.{}.runtime_api_key", connector.id),
+                    )?;
+                    let doctor = run_once(
+                        profile.doctor_command(
+                            &binary,
+                            SecretValue::new(runtime_key.expose_secret().to_owned())?,
+                        )?,
                         Duration::from_secs(30),
-                        128 * 1_024,
+                        256 * 1_024,
                     )
                     .await?;
-                    if !initialized.success {
-                        bail!("tunnel-client profile initialization failed");
+                    if !doctor.success {
+                        bail!("tunnel-client doctor failed; run `runonmine doctor` for guidance");
                     }
-                    restrict_private_file(&profile_file)?;
+                    managed.handles.push(supervisor.start(
+                        profile.run_command(
+                            &binary,
+                            SecretValue::new(runtime_key.expose_secret().to_owned())?,
+                        )?,
+                        profile.readiness_check()?,
+                        RestartPolicy::default(),
+                    )?);
                 }
-                let runtime_key = required_secret(
-                    secrets.as_ref(),
-                    &format!("connector.{}.runtime_api_key", connector.id),
-                )?;
-                let doctor = run_once(
-                    profile.doctor_command(
-                        &binary,
-                        SecretValue::new(runtime_key.expose_secret().to_owned())?,
-                    )?,
-                    Duration::from_secs(30),
-                    256 * 1_024,
-                )
-                .await?;
-                if !doctor.success {
-                    bail!("tunnel-client doctor failed; run `runonmine doctor` for guidance");
-                }
-                managed.handles.push(supervisor.start(
-                    profile.run_command(
-                        &binary,
-                        SecretValue::new(runtime_key.expose_secret().to_owned())?,
-                    )?,
-                    profile.readiness_check()?,
-                    RestartPolicy::default(),
-                )?);
+                ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => {}
             }
-            ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => {}
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if startup.is_err() {
+            managed.record_degraded(
+                &connector.id,
+                connector.kind,
+                ConnectorStartupStage::Process,
+            );
         }
     }
     Ok(())
@@ -324,7 +450,144 @@ fn runonmine_cli_executable() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runonmine_core::{CloudflareQuickSettings, ConnectorConfig};
+    use runonmine_core::{
+        CloudflareQuickSettings, ConnectorConfig, OpenAiTunnelSettings, PolicyPreset,
+    };
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn healthy_remote_supervisor_survives_later_connector_failure() -> Result<()> {
+        use runonmine_connectors::ProcessState;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        let cloudflared = temporary.path().join("cloudflared");
+        std::fs::write(
+            &cloudflared,
+            b"#!/bin/sh
+printf '%s\n' 'https://healthy.trycloudflare.com'
+trap 'exit 0' TERM INT
+while :; do /bin/sleep 1; done
+",
+        )?;
+        std::fs::set_permissions(&cloudflared, std::fs::Permissions::from_mode(0o700))?;
+
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "healthy-quick".to_owned();
+        quick.name = "Healthy Quick".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.enabled = true;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings {
+            cloudflared_path: Some(cloudflared),
+            ..CloudflareQuickSettings::default()
+        });
+
+        let openai = ConnectorConfig {
+            id: "broken-openai".to_owned(),
+            name: "Broken OpenAI".to_owned(),
+            kind: ConnectorKind::OpenAiTunnel,
+            enabled: true,
+            policy_preset: PolicyPreset::Safe,
+            pack_overrides: std::collections::BTreeMap::default(),
+            tool_overrides: std::collections::BTreeMap::default(),
+            policy_rules: Vec::new(),
+            public_base_url: None,
+            cloudflare_quick: None,
+            cloudflare_named: None,
+            oauth_owner: None,
+            openai_tunnel: Some(OpenAiTunnelSettings {
+                tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".to_owned(),
+                profile: "runonmine".to_owned(),
+                tunnel_client_path: Some(temporary.path().join("missing-tunnel-client")),
+                health_port: 47_823,
+            }),
+        };
+        let mut config = AppConfig::default();
+        config.connectors.push(quick);
+        config.connectors.push(openai);
+        config.validate()?;
+        config.save(&paths.config_file())?;
+
+        let managed = start_external_connectors(&paths, &config, Vec::new()).await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(managed.handles.len(), 1);
+        assert_eq!(managed.degraded.len(), 1);
+        assert_eq!(managed.degraded[0].connector_id, "broken-openai");
+        assert!(matches!(
+            managed.handles[0].state(),
+            ProcessState::Starting { .. } | ProcessState::Running { .. }
+        ));
+        managed.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connector_startup_failures_are_degraded_without_aborting_local_agent() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+
+        let mut local = ConnectorConfig::local_http_default();
+        local.enabled = true;
+
+        let mut quick = ConnectorConfig::local_default();
+        quick.id = "broken-quick".to_owned();
+        quick.name = "Broken Quick".to_owned();
+        quick.kind = ConnectorKind::CloudflareQuick;
+        quick.enabled = true;
+        quick.cloudflare_quick = Some(CloudflareQuickSettings {
+            cloudflared_path: Some(temporary.path().join("missing-cloudflared")),
+            ..CloudflareQuickSettings::default()
+        });
+
+        let openai = ConnectorConfig {
+            id: "broken-openai".to_owned(),
+            name: "Broken OpenAI".to_owned(),
+            kind: ConnectorKind::OpenAiTunnel,
+            enabled: true,
+            policy_preset: PolicyPreset::Safe,
+            pack_overrides: std::collections::BTreeMap::default(),
+            tool_overrides: std::collections::BTreeMap::default(),
+            policy_rules: Vec::new(),
+            public_base_url: None,
+            cloudflare_quick: None,
+            cloudflare_named: None,
+            oauth_owner: None,
+            openai_tunnel: Some(OpenAiTunnelSettings {
+                tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".to_owned(),
+                profile: "runonmine".to_owned(),
+                tunnel_client_path: Some(temporary.path().join("missing-tunnel-client")),
+                health_port: 47_823,
+            }),
+        };
+        let config = AppConfig {
+            connectors: vec![local, quick, openai],
+            ..AppConfig::default()
+        };
+        config.validate()?;
+
+        let managed = start_external_connectors(&paths, &config, Vec::new()).await?;
+        assert!(managed.handles.is_empty());
+        assert_eq!(managed.degraded.len(), 2);
+        assert_eq!(managed.degraded[0].connector_id, "broken-quick");
+        assert_eq!(managed.degraded[0].kind, ConnectorKind::CloudflareQuick);
+        assert_eq!(managed.degraded[0].stage, ConnectorStartupStage::Process);
+        assert_eq!(
+            managed.degraded[0].message,
+            "connector process could not be prepared"
+        );
+        assert_eq!(managed.degraded[1].connector_id, "broken-openai");
+        assert_eq!(managed.degraded[1].kind, ConnectorKind::OpenAiTunnel);
+        assert_eq!(managed.degraded[1].stage, ConnectorStartupStage::Process);
+        assert_eq!(
+            managed.degraded[1].message,
+            "connector process could not be prepared"
+        );
+        managed.stop().await;
+        Ok(())
+    }
 
     #[test]
     fn quick_public_url_is_persisted_only_for_the_expected_connector_kind() -> Result<()> {

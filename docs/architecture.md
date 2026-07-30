@@ -106,6 +106,23 @@ Quick Tunnel URL discovery plus desktop, setup, browser, policy, and connector l
 
 The audit log is hash-chained. Retention pruning stores a chain anchor, so the remaining records continue to verify after the default 30-day/100-MiB retention window removes old records. State directories use owner-only permissions; SQLite database, WAL, and shared-memory files are restricted to the owning account. Dedicated database workers and connector supervisor tasks have explicit shutdown and join lifecycles.
 
+## Connector startup isolation
+
+Managed external connectors start behind a per-connector error boundary. Binary
+discovery, connector-specific directories and profiles, credential lookup,
+health-command construction and supervisor startup may mark only that connector
+as degraded. The failure is retained in the in-memory managed-connector set and
+emitted as a structured log with connector ID, kind and a sanitized authentication/process stage.
+Already-started healthy child processes and their observers remain active, and
+the loopback HTTP agent continues serving local and healthy remote connectors.
+
+Only agent-wide prerequisites outside an individual connector boundary—such as
+an invalid common loopback origin—abort managed-connector initialization. Secret
+storage is opened lazily by the OpenAI branch so an unavailable credential
+backend cannot prevent Cloudflare or local connectors from starting. Quick
+Tunnel URL observers are attached only to Quick supervisors that started
+successfully.
+
 ## Recoverable connector removal
 
 Connector deletion is a durable phase transaction. An owner-only journal records
