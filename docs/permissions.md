@@ -90,7 +90,9 @@ runonmine approvals grants revoke <connector> --principal-fingerprint <fingerpri
 Named Tunnel tokens may contain `machine:read`, `files:read`, `files:write`,
 `shell:exec`, `browser:read`, `browser:act`, `desktop:control`, and
 `admin:exec`. A tool runs only when both the token scope and local policy allow
-it. Platform-native scripting maps to `shell:exec` for OAuth and retains its
+it. Dynamic clients that omit `scope` are registered with only `machine:read`;
+all broader capabilities require explicit registration and explicit authorization
+consent. Platform-native scripting maps to `shell:exec` for OAuth and retains its
 separate local capability policy.
 
 ## Important boundaries

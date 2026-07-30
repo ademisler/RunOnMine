@@ -209,7 +209,7 @@ impl OAuthService {
             .as_deref()
             .map(ScopeSet::parse)
             .transpose()?
-            .unwrap_or_else(ScopeSet::all);
+            .unwrap_or_else(ScopeSet::dynamic_registration_default);
         if scopes.is_empty() || !scopes.is_subset(&ScopeSet::all()) {
             return Err(OAuthError::invalid_scope());
         }
@@ -748,6 +748,54 @@ mod tests {
             .query_pairs()
             .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
             .ok_or_else(OAuthError::server)
+    }
+
+    #[test]
+    fn missing_dynamic_registration_scope_gets_machine_read_only() -> Result<(), OAuthError> {
+        let service = service()?;
+        let mut request = registration_request()?;
+        request.scope = None;
+        let response =
+            service.register_client(request, TEST_REGISTRATION_TOKEN, "missing-scope-source")?;
+        assert_eq!(response.scope, "machine:read");
+        let stored = service
+            .store
+            .client(&response.client_id)
+            .map_err(map_store_server_error)?
+            .ok_or_else(OAuthError::server)?;
+        assert_eq!(stored.scopes.to_space_delimited(), "machine:read");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_scope_client_cannot_request_unregistered_file_scope() -> Result<(), OAuthError> {
+        let service = service()?;
+        let mut request = registration_request()?;
+        request.scope = None;
+        let client = service.register_client(
+            request,
+            TEST_REGISTRATION_TOKEN,
+            "missing-scope-auth-source",
+        )?;
+        let result = service.begin_authorization(AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: client.client_id,
+            redirect_uri: Url::parse("https://client.example/callback")
+                .map_err(|_| OAuthError::invalid_request())?,
+            scope: "files:read".to_owned(),
+            state: "client-csrf-state-123456789".to_owned(),
+            code_challenge: challenge(&verifier()),
+            code_challenge_method: "S256".to_owned(),
+            resource: Some(
+                Url::parse("https://mine.example/mcp")
+                    .map_err(|_| OAuthError::invalid_request())?,
+            ),
+        });
+        assert!(matches!(
+            result,
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidScope
+        ));
+        Ok(())
     }
 
     #[tokio::test]

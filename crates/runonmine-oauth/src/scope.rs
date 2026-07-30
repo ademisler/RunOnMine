@@ -85,6 +85,12 @@ impl ScopeSet {
         Self(BTreeSet::from([Scope::MachineRead]))
     }
 
+    /// Least-privilege scope set for dynamic clients that omit `scope`.
+    #[must_use]
+    pub fn dynamic_registration_default() -> Self {
+        Self::machine_read()
+    }
+
     pub fn parse(value: &str) -> Result<Self, OAuthError> {
         if value.len() > 2_048 {
             return Err(OAuthError::invalid_scope());
@@ -168,6 +174,16 @@ mod tests {
         let parsed = parsed.unwrap_or_default();
         assert_eq!(parsed.to_space_delimited(), "machine:read files:read");
         assert!(ScopeSet::parse("files:read root:everything").is_err());
+    }
+
+    #[test]
+    fn dynamic_registration_default_is_read_only_machine_metadata() {
+        let default = ScopeSet::dynamic_registration_default();
+        assert_eq!(default.to_space_delimited(), "machine:read");
+        assert!(default.contains(Scope::MachineRead));
+        assert!(!default.contains(Scope::FilesRead));
+        assert!(!default.contains(Scope::ShellExec));
+        assert!(!default.contains(Scope::AdminExec));
     }
 
     #[test]
