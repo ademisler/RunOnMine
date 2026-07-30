@@ -98,6 +98,19 @@ profiles, audit arguments, connector identifiers, hostnames, URLs, and selected
 filesystem roots. Redaction is defense in depth, so review the ZIP before
 sharing it.
 
+## Local connector health
+
+The base health probe remains `http://127.0.0.1:47821/healthz`. For sanitized
+managed-connector lifecycle details, query the owner-only loopback route:
+
+```console
+curl -sS http://127.0.0.1:47821/healthz/connectors
+```
+
+It reports `starting`, `backoff`, `ready`, `degraded`, and `stopped` states. The
+detailed endpoint rejects forwarded/public-host requests and never includes
+credentials, child-process output, command lines, or generated public URLs.
+
 ## Security model
 
 - Connector policy first evaluates principal/resource rules, then tool override, capability override, preset, and finally deny. Explicit deny decisions are evaluated before exact-action grants. Grants are bound to the connector, exact requester principal, tool, and argument hash. Multi-path operations such as `fs_move` authorize every canonical selected-root source and destination resource.

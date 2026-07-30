@@ -13,7 +13,7 @@ use axum::http::uri::Authority;
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::{Router, routing::get};
+use axum::{Json, Router, routing::get};
 use base64::Engine;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use runonmine_core::secrets::{SecretStore, default_secret_store};
@@ -35,6 +35,7 @@ use super::{
     IdleSessionManager, REQUEST_ACCESS, REQUEST_RUNTIME, RequestAccess, RequestPrincipal,
     RunOnMineServer, Runtime, TOOL_CAPABILITIES,
     managed_connectors::{
+        ConnectorRuntimePhase, ConnectorRuntimeRegistry, ConnectorRuntimeStatus,
         ConnectorStartupFailure, ConnectorStartupStage, start_external_connectors,
     },
     oauth_scope_for_capability, required_secret,
@@ -42,6 +43,12 @@ use super::{
 
 const MCP_BODY_LIMIT: usize = 2 * 1_024 * 1_024;
 const MCP_CONCURRENCY_LIMIT: usize = 64;
+
+#[derive(serde::Serialize)]
+struct ConnectorHealthResponse {
+    status: &'static str,
+    connectors: Vec<ConnectorRuntimeStatus>,
+}
 
 #[derive(Clone)]
 struct LocalHttpConnector {
@@ -115,6 +122,7 @@ pub async fn serve_loopback() -> Result<()> {
     }
     let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
     let HttpConnectorBuild { state, degraded } = build_http_connector_state(&paths, &config);
+    let connector_runtime = ConnectorRuntimeRegistry::from_failures(&degraded);
     let connector_state = Arc::new(state);
     let mut allowed_hosts = vec![
         "localhost".to_owned(),
@@ -158,8 +166,17 @@ pub async fn serve_loopback() -> Result<()> {
             Arc::clone(&connector_state),
             http_connector_auth,
         ));
+    let health_runtime = connector_runtime.clone();
+    let health_port = config.port;
     let mut router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/healthz/connectors",
+            get(move |request: Request| {
+                let runtime = health_runtime.clone();
+                async move { connector_health_response(&runtime, &request, health_port) }
+            }),
+        )
         .merge(mcp_router);
     if let Some(oauth) = &connector_state.oauth {
         let oauth_routes = oauth_router(Arc::clone(&oauth.service)).layer(from_fn_with_state(
@@ -176,7 +193,8 @@ pub async fn serve_loopback() -> Result<()> {
         instance_id = %runtime_marker.status().instance_id,
         "published running agent version handshake"
     );
-    let managed_connectors = start_external_connectors(&paths, &config, degraded).await?;
+    let managed_connectors =
+        start_external_connectors(&paths, &config, degraded, connector_runtime).await?;
     managed_connectors.log_startup_summary();
     tracing::info!(%address, "RunOnMine agent listening on loopback");
     let result = axum::serve(listener, router)
@@ -187,6 +205,61 @@ pub async fn serve_loopback() -> Result<()> {
     managed_connectors.stop().await;
     drop(runtime_marker);
     result.map_err(Into::into)
+}
+
+fn connector_health_response(
+    runtime: &ConnectorRuntimeRegistry,
+    request: &Request,
+    agent_port: u16,
+) -> Response {
+    if !is_direct_loopback_health_request(request, agent_port) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    connector_health_payload(runtime).into_response()
+}
+
+fn connector_health_payload(runtime: &ConnectorRuntimeRegistry) -> Json<ConnectorHealthResponse> {
+    let connectors = runtime.snapshot();
+    let status = if connectors.iter().any(|connector| {
+        matches!(
+            connector.phase,
+            ConnectorRuntimePhase::Degraded | ConnectorRuntimePhase::Backoff
+        )
+    }) {
+        "degraded"
+    } else if connectors
+        .iter()
+        .any(|connector| connector.phase == ConnectorRuntimePhase::Starting)
+    {
+        "starting"
+    } else {
+        "ok"
+    };
+    Json(ConnectorHealthResponse { status, connectors })
+}
+
+fn is_direct_loopback_health_request(request: &Request, agent_port: u16) -> bool {
+    if [
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "cf-connecting-ip",
+        "cf-ray",
+    ]
+    .iter()
+    .any(|header| request.headers().contains_key(*header))
+    {
+        return false;
+    }
+    let Ok(authority) = request_authority(request) else {
+        return false;
+    };
+    let host = authority.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    is_loopback_host(host) && authority.port_u16() == Some(agent_port)
 }
 
 fn spawn_session_sweeper(
@@ -782,15 +855,46 @@ mod tests {
             "connector authentication could not be prepared"
         );
 
-        let managed = start_external_connectors(&paths, &config, build.degraded).await?;
+        let runtime = ConnectorRuntimeRegistry::from_failures(&build.degraded);
+        let managed =
+            start_external_connectors(&paths, &config, build.degraded, runtime.clone()).await?;
         assert_eq!(managed.running_count(), 0);
         assert_eq!(managed.degraded_failures().len(), 1);
+        assert_eq!(runtime.snapshot()[0].phase, ConnectorRuntimePhase::Degraded);
         assert_eq!(
             managed.degraded_failures()[0].connector_id,
             "missing-quick-secret"
         );
         managed.stop().await;
         Ok(())
+    }
+
+    #[test]
+    fn connector_health_response_prioritizes_degraded_then_starting() {
+        let runtime = ConnectorRuntimeRegistry::default();
+        runtime.set_ready("ready", ConnectorKind::CloudflareQuick);
+        runtime.set_starting(
+            "starting",
+            ConnectorKind::OpenAiTunnel,
+            ConnectorStartupStage::Preparation,
+        );
+        let response = connector_health_payload(&runtime);
+        assert_eq!(response.0.status, "starting");
+        assert_eq!(response.0.connectors.len(), 2);
+        runtime.set_backoff(
+            "backoff",
+            ConnectorKind::OpenAiTunnel,
+            ConnectorStartupStage::Readiness,
+        );
+        assert_eq!(connector_health_payload(&runtime).0.status, "degraded");
+        runtime.set_degraded(ConnectorStartupFailure::new(
+            "failed",
+            ConnectorKind::CloudflareOauth,
+            ConnectorStartupStage::Process,
+        ));
+        let response = connector_health_payload(&runtime);
+        assert_eq!(response.0.status, "degraded");
+        assert_eq!(response.0.connectors.len(), 4);
     }
 
     #[test]
@@ -827,6 +931,35 @@ mod tests {
                 .body(Body::empty())?;
             assert!(parse_bearer_token(&request).is_err(), "accepted {value:?}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn connector_health_details_require_a_direct_loopback_host() -> Result<()> {
+        let runtime = ConnectorRuntimeRegistry::default();
+        runtime.set_ready("ready", ConnectorKind::CloudflareQuick);
+        for host in ["127.0.0.1:47821", "localhost:47821", "[::1]:47821"] {
+            let request = Request::builder().header(HOST, host).body(Body::empty())?;
+            assert_eq!(
+                connector_health_response(&runtime, &request, 47_821).status(),
+                StatusCode::OK
+            );
+        }
+        for host in ["mcp.example.com", "127.0.0.1:47822", "localhost"] {
+            let request = Request::builder().header(HOST, host).body(Body::empty())?;
+            assert_eq!(
+                connector_health_response(&runtime, &request, 47_821).status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        let proxied = Request::builder()
+            .header(HOST, "127.0.0.1:47821")
+            .header("cf-connecting-ip", "203.0.113.1")
+            .body(Body::empty())?;
+        assert_eq!(
+            connector_health_response(&runtime, &proxied, 47_821).status(),
+            StatusCode::NOT_FOUND
+        );
         Ok(())
     }
 

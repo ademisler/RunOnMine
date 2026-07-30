@@ -1,40 +1,67 @@
 //! External connector process lifecycle and managed connector artifacts.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use futures::FutureExt as _;
 use runonmine_connectors::cloudflare::{
     NamedTunnelConfig, QuickTunnelConfig, parse_quick_tunnel_url,
 };
 use runonmine_connectors::openai::{OpenAiMcpTarget, OpenAiTunnelProfile};
 use runonmine_connectors::{
-    BinaryDiscovery, BinaryKind, ProcessEvent, ProcessSupervisor, RestartPolicy, SecretValue,
-    SupervisorHandle, run_once,
+    BinaryDiscovery, BinaryKind, ProcessEvent, ProcessState, ProcessSupervisor, RestartPolicy,
+    SecretValue, SupervisorHandle, run_once,
 };
-use runonmine_core::{AppConfig, AppPaths, ConnectorKind};
+use runonmine_core::{AppConfig, AppPaths, ConnectorConfig, ConnectorKind};
 use secrecy::ExposeSecret;
+use serde::Serialize;
+use tokio::sync::oneshot;
 use url::Url;
 
 use super::required_secret;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+const OPENAI_PREPARATION_DEADLINE: Duration = Duration::from_secs(75);
+const OPENAI_READINESS_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug)]
+struct OpenAiActivationDeadlines {
+    preparation: Duration,
+    readiness: Duration,
+}
+
+impl Default for OpenAiActivationDeadlines {
+    fn default() -> Self {
+        Self {
+            preparation: OPENAI_PREPARATION_DEADLINE,
+            readiness: OPENAI_READINESS_DEADLINE,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ConnectorStartupStage {
     Authentication,
+    Preparation,
     Process,
+    Readiness,
 }
 
 impl ConnectorStartupStage {
     const fn message(self) -> &'static str {
         match self {
             Self::Authentication => "connector authentication could not be prepared",
+            Self::Preparation => "connector preparation did not complete",
             Self::Process => "connector process could not be prepared",
+            Self::Readiness => "connector did not become ready before its deadline",
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct ConnectorStartupFailure {
     pub(super) connector_id: String,
     pub(super) kind: ConnectorKind,
@@ -66,11 +93,131 @@ impl ConnectorStartupFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ConnectorRuntimePhase {
+    Starting,
+    Backoff,
+    Ready,
+    Degraded,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct ConnectorRuntimeStatus {
+    pub(super) connector_id: String,
+    pub(super) kind: ConnectorKind,
+    pub(super) phase: ConnectorRuntimePhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) stage: Option<ConnectorStartupStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ConnectorRuntimeRegistry {
+    inner: Arc<Mutex<BTreeMap<String, ConnectorRuntimeStatus>>>,
+}
+
+impl ConnectorRuntimeRegistry {
+    pub(super) fn from_failures(failures: &[ConnectorStartupFailure]) -> Self {
+        let registry = Self::default();
+        for failure in failures {
+            registry.set_degraded(failure.clone());
+        }
+        registry
+    }
+
+    pub(super) fn set_starting(
+        &self,
+        connector_id: &str,
+        kind: ConnectorKind,
+        stage: ConnectorStartupStage,
+    ) {
+        self.replace(ConnectorRuntimeStatus {
+            connector_id: connector_id.to_owned(),
+            kind,
+            phase: ConnectorRuntimePhase::Starting,
+            stage: Some(stage),
+            message: None,
+        });
+    }
+
+    pub(super) fn set_backoff(
+        &self,
+        connector_id: &str,
+        kind: ConnectorKind,
+        stage: ConnectorStartupStage,
+    ) {
+        self.replace(ConnectorRuntimeStatus {
+            connector_id: connector_id.to_owned(),
+            kind,
+            phase: ConnectorRuntimePhase::Backoff,
+            stage: Some(stage),
+            message: Some("connector restart is waiting for backoff".to_owned()),
+        });
+    }
+
+    pub(super) fn set_ready(&self, connector_id: &str, kind: ConnectorKind) {
+        self.replace(ConnectorRuntimeStatus {
+            connector_id: connector_id.to_owned(),
+            kind,
+            phase: ConnectorRuntimePhase::Ready,
+            stage: None,
+            message: None,
+        });
+    }
+
+    pub(super) fn set_degraded(&self, failure: ConnectorStartupFailure) {
+        self.replace(ConnectorRuntimeStatus {
+            connector_id: failure.connector_id,
+            kind: failure.kind,
+            phase: ConnectorRuntimePhase::Degraded,
+            stage: Some(failure.stage),
+            message: Some(failure.message),
+        });
+    }
+
+    pub(super) fn set_stopped(&self, connector_id: &str, kind: ConnectorKind) {
+        self.replace(ConnectorRuntimeStatus {
+            connector_id: connector_id.to_owned(),
+            kind,
+            phase: ConnectorRuntimePhase::Stopped,
+            stage: None,
+            message: None,
+        });
+    }
+
+    pub(super) fn snapshot(&self) -> Vec<ConnectorRuntimeStatus> {
+        let guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.values().cloned().collect()
+    }
+
+    fn replace(&self, status: ConnectorRuntimeStatus) {
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(status.connector_id.clone(), status);
+    }
+}
+
+#[derive(Debug)]
+struct AsyncConnectorTask {
+    shutdown: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ManagedConnectors {
     handles: Vec<SupervisorHandle>,
     observers: Vec<tokio::task::JoinHandle<()>>,
+    async_tasks: Vec<AsyncConnectorTask>,
     degraded: Vec<ConnectorStartupFailure>,
+    runtime: ConnectorRuntimeRegistry,
 }
 
 #[derive(Debug)]
@@ -80,12 +227,17 @@ struct PendingQuickObserver {
 }
 
 impl ManagedConnectors {
-    fn with_degraded(degraded: Vec<ConnectorStartupFailure>) -> Self {
+    fn with_degraded(
+        degraded: Vec<ConnectorStartupFailure>,
+        runtime: ConnectorRuntimeRegistry,
+    ) -> Self {
         for failure in &degraded {
             failure.log();
+            runtime.set_degraded(failure.clone());
         }
         Self {
             degraded,
+            runtime,
             ..Self::default()
         }
     }
@@ -112,29 +264,42 @@ impl ManagedConnectors {
         }
         let failure = ConnectorStartupFailure::new(connector_id, kind, stage);
         failure.log();
+        self.runtime.set_degraded(failure.clone());
         self.degraded.push(failure);
     }
 
-    #[cfg(test)]
     #[cfg(test)]
     pub(super) fn running_count(&self) -> usize {
         self.handles.len()
     }
 
     #[cfg(test)]
-    #[cfg(test)]
     pub(super) fn degraded_failures(&self) -> &[ConnectorStartupFailure] {
         &self.degraded
     }
 
     pub(super) fn log_startup_summary(&self) {
-        if self.degraded.is_empty() {
+        let statuses = self.runtime.snapshot();
+        let degraded = statuses
+            .iter()
+            .filter(|status| status.phase == ConnectorRuntimePhase::Degraded)
+            .count();
+        let starting = statuses
+            .iter()
+            .filter(|status| status.phase == ConnectorRuntimePhase::Starting)
+            .count();
+        let ready = statuses
+            .iter()
+            .filter(|status| status.phase == ConnectorRuntimePhase::Ready)
+            .count();
+        if degraded == 0 && starting == 0 {
             return;
         }
         tracing::warn!(
-            degraded = self.degraded.len(),
-            running = self.handles.len(),
-            "RunOnMine started with degraded connectors"
+            degraded,
+            starting,
+            ready,
+            "RunOnMine started while managed connectors were still activating or degraded"
         );
     }
 
@@ -152,7 +317,52 @@ impl ManagedConnectors {
         }));
     }
 
+    fn spawn_openai_activation(&mut self, paths: AppPaths, connector: ConnectorConfig) {
+        let preparation_connector = connector.clone();
+        let preparation =
+            async move { prepare_openai_activation(&paths, &preparation_connector).await }.boxed();
+        self.spawn_openai_activation_with(
+            connector,
+            preparation,
+            OpenAiActivationDeadlines::default(),
+        );
+    }
+
+    fn spawn_openai_activation_with(
+        &mut self,
+        connector: ConnectorConfig,
+        preparation: futures::future::BoxFuture<'static, Result<PreparedOpenAiActivation>>,
+        deadlines: OpenAiActivationDeadlines,
+    ) {
+        self.runtime.set_starting(
+            &connector.id,
+            connector.kind,
+            ConnectorStartupStage::Preparation,
+        );
+        let runtime = self.runtime.clone();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(run_openai_activation(
+            connector,
+            runtime,
+            shutdown_rx,
+            preparation,
+            deadlines,
+        ));
+        self.async_tasks.push(AsyncConnectorTask {
+            shutdown: Some(shutdown),
+            task,
+        });
+    }
+
     pub(super) async fn stop(mut self) {
+        for activation in &mut self.async_tasks {
+            if let Some(shutdown) = activation.shutdown.take() {
+                let _ignored = shutdown.send(());
+            }
+        }
+        for activation in self.async_tasks.drain(..) {
+            let _ignored = activation.task.await;
+        }
         for observer in self.observers.drain(..) {
             observer.abort();
             let _ignored = observer.await;
@@ -167,8 +377,9 @@ pub(super) async fn start_external_connectors(
     paths: &AppPaths,
     config: &AppConfig,
     degraded: Vec<ConnectorStartupFailure>,
+    runtime: ConnectorRuntimeRegistry,
 ) -> Result<ManagedConnectors> {
-    let mut managed = ManagedConnectors::with_degraded(degraded);
+    let mut managed = ManagedConnectors::with_degraded(degraded, runtime);
     let mut pending_observers = Vec::new();
     if let Err(error) =
         start_external_connectors_inner(paths, config, &mut managed, &mut pending_observers).await
@@ -197,6 +408,20 @@ async fn start_external_connectors_inner(
         .filter(|connector| connector.enabled)
         .filter(|connector| !blocked.contains(connector.id.as_str()))
     {
+        if connector.kind == ConnectorKind::OpenAiTunnel {
+            managed.spawn_openai_activation(paths.clone(), connector.clone());
+            continue;
+        }
+        if matches!(
+            connector.kind,
+            ConnectorKind::CloudflareQuick | ConnectorKind::CloudflareOauth
+        ) {
+            managed.runtime.set_starting(
+                &connector.id,
+                connector.kind,
+                ConnectorStartupStage::Process,
+            );
+        }
         let startup = async {
             match connector.kind {
                 ConnectorKind::CloudflareQuick => {
@@ -255,75 +480,7 @@ async fn start_external_connectors_inner(
                         RestartPolicy::default(),
                     )?);
                 }
-                ConnectorKind::OpenAiTunnel => {
-                    let settings = connector
-                        .openai_tunnel
-                        .as_ref()
-                        .context("OpenAI tunnel settings are missing")?;
-                    let binary = discovery
-                        .discover(
-                            BinaryKind::OpenAiTunnelClient,
-                            settings.tunnel_client_path.as_deref(),
-                        )?
-                        .context("tunnel-client is not installed; run the connector setup again")?;
-                    let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
-                    let profile_directory = connector_dir.join("openai-profiles");
-                    let health_directory = paths.state_dir.join("connectors").join(&connector.id);
-                    ensure_private_directory(&profile_directory)?;
-                    ensure_private_directory(&health_directory)?;
-                    let target = OpenAiMcpTarget::runonmine_stdio(
-                        runonmine_cli_executable()?,
-                        &connector.id,
-                    )?;
-                    let profile = OpenAiTunnelProfile::builder(
-                        &settings.profile,
-                        &settings.tunnel_id,
-                        target,
-                    )
-                    .profile_directory(profile_directory.clone())
-                    .health_address(format!("127.0.0.1:{}", settings.health_port).parse()?)
-                    .health_url_file(health_directory.join("tunnel-health.url"))
-                    .build()?;
-                    let profile_file =
-                        profile_directory.join(format!("{}.yaml", profile.profile()));
-                    if !profile_file.exists() {
-                        let initialized = run_once(
-                            profile.init_command(&binary)?,
-                            Duration::from_secs(30),
-                            128 * 1_024,
-                        )
-                        .await?;
-                        if !initialized.success {
-                            bail!("tunnel-client profile initialization failed");
-                        }
-                        restrict_private_file(&profile_file)?;
-                    }
-                    let secrets = runonmine_core::secrets::default_secret_store(paths)?;
-                    let runtime_key = required_secret(
-                        secrets.as_ref(),
-                        &format!("connector.{}.runtime_api_key", connector.id),
-                    )?;
-                    let doctor = run_once(
-                        profile.doctor_command(
-                            &binary,
-                            SecretValue::new(runtime_key.expose_secret().to_owned())?,
-                        )?,
-                        Duration::from_secs(30),
-                        256 * 1_024,
-                    )
-                    .await?;
-                    if !doctor.success {
-                        bail!("tunnel-client doctor failed; run `runonmine doctor` for guidance");
-                    }
-                    managed.handles.push(supervisor.start(
-                        profile.run_command(
-                            &binary,
-                            SecretValue::new(runtime_key.expose_secret().to_owned())?,
-                        )?,
-                        profile.readiness_check()?,
-                        RestartPolicy::default(),
-                    )?);
-                }
+                ConnectorKind::OpenAiTunnel => unreachable!("OpenAI activation is asynchronous"),
                 ConnectorKind::LocalStdio | ConnectorKind::LocalHttp => {}
             }
             Ok::<(), anyhow::Error>(())
@@ -335,9 +492,340 @@ async fn start_external_connectors_inner(
                 connector.kind,
                 ConnectorStartupStage::Process,
             );
+        } else if matches!(
+            connector.kind,
+            ConnectorKind::CloudflareQuick | ConnectorKind::CloudflareOauth
+        ) {
+            managed.runtime.set_ready(&connector.id, connector.kind);
         }
     }
     Ok(())
+}
+
+struct PreparedOpenAiActivation {
+    binary: runonmine_connectors::InstalledBinary,
+    profile: OpenAiTunnelProfile,
+    runtime_key: secrecy::SecretString,
+}
+
+async fn run_openai_activation(
+    connector: ConnectorConfig,
+    runtime: ConnectorRuntimeRegistry,
+    mut shutdown: oneshot::Receiver<()>,
+    preparation: futures::future::BoxFuture<'static, Result<PreparedOpenAiActivation>>,
+    deadlines: OpenAiActivationDeadlines,
+) {
+    let connector_id = connector.id.clone();
+    let kind = connector.kind;
+    let preparation = with_deadline(
+        deadlines.preparation,
+        preparation,
+        "OpenAI connector preparation exceeded its deadline",
+    );
+    tokio::pin!(preparation);
+    let prepared = tokio::select! {
+        _ = &mut shutdown => {
+            runtime.set_stopped(&connector_id, kind);
+            return;
+        }
+        result = &mut preparation => {
+            let Ok(prepared) = result else {
+                mark_openai_degraded(
+                    &runtime,
+                    &connector_id,
+                    kind,
+                    ConnectorStartupStage::Preparation,
+                );
+                return;
+            };
+            prepared
+        }
+    };
+
+    if shutdown_requested(&mut shutdown) {
+        runtime.set_stopped(&connector_id, kind);
+        return;
+    }
+    runtime.set_starting(&connector_id, kind, ConnectorStartupStage::Process);
+    let Ok((handle, mut events)) = start_openai_supervisor(&prepared) else {
+        mark_openai_degraded(
+            &runtime,
+            &connector_id,
+            kind,
+            ConnectorStartupStage::Process,
+        );
+        return;
+    };
+    runtime.set_starting(&connector_id, kind, ConnectorStartupStage::Readiness);
+    let Some(handle) = await_openai_readiness_or_shutdown(
+        handle,
+        &mut events,
+        &mut shutdown,
+        &runtime,
+        &connector_id,
+        kind,
+        deadlines.readiness,
+    )
+    .await
+    else {
+        return;
+    };
+    runtime.set_ready(&connector_id, kind);
+    tracing::info!(connector_id = %connector_id, "OpenAI connector is ready");
+    observe_openai_runtime(handle, events, shutdown, runtime, connector_id, kind).await;
+}
+
+fn shutdown_requested(shutdown: &mut oneshot::Receiver<()>) -> bool {
+    match shutdown.try_recv() {
+        Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => true,
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => false,
+    }
+}
+
+fn start_openai_supervisor(
+    prepared: &PreparedOpenAiActivation,
+) -> Result<(
+    SupervisorHandle,
+    tokio::sync::broadcast::Receiver<ProcessEvent>,
+)> {
+    let runtime_key = SecretValue::new(prepared.runtime_key.expose_secret().to_owned())?;
+    let command = prepared
+        .profile
+        .run_command(&prepared.binary, runtime_key)?;
+    let readiness = prepared.profile.readiness_check()?;
+    let supervisor = ProcessSupervisor;
+    let mut handle = supervisor.start(command, readiness, RestartPolicy::default())?;
+    let events = handle
+        .take_initial_events()
+        .unwrap_or_else(|| handle.subscribe());
+    Ok((handle, events))
+}
+
+async fn await_openai_readiness_or_shutdown(
+    handle: SupervisorHandle,
+    events: &mut tokio::sync::broadcast::Receiver<ProcessEvent>,
+    shutdown: &mut oneshot::Receiver<()>,
+    runtime: &ConnectorRuntimeRegistry,
+    connector_id: &str,
+    kind: ConnectorKind,
+    readiness_deadline: Duration,
+) -> Option<SupervisorHandle> {
+    let readiness = wait_for_openai_readiness(events, readiness_deadline);
+    tokio::pin!(readiness);
+    tokio::select! {
+        _ = &mut *shutdown => {
+            let _ignored = handle.stop().await;
+            runtime.set_stopped(connector_id, kind);
+            None
+        }
+        result = &mut readiness => {
+            if result.is_err() {
+                let _ignored = handle.stop().await;
+                mark_openai_degraded(
+                    runtime,
+                    connector_id,
+                    kind,
+                    ConnectorStartupStage::Readiness,
+                );
+                return None;
+            }
+            Some(handle)
+        }
+    }
+}
+
+async fn observe_openai_runtime(
+    handle: SupervisorHandle,
+    mut events: tokio::sync::broadcast::Receiver<ProcessEvent>,
+    mut shutdown: oneshot::Receiver<()>,
+    runtime: ConnectorRuntimeRegistry,
+    connector_id: String,
+    kind: ConnectorKind,
+) {
+    let mut handle = Some(handle);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                stop_supervisor(&mut handle).await;
+                runtime.set_stopped(&connector_id, kind);
+                return;
+            }
+            event = events.recv() => {
+                if apply_openai_runtime_event(&runtime, &connector_id, kind, &event) {
+                    stop_supervisor(&mut handle).await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn stop_supervisor(handle: &mut Option<SupervisorHandle>) {
+    if let Some(handle) = handle.take() {
+        let _ignored = handle.stop().await;
+    }
+}
+
+fn apply_openai_runtime_event(
+    runtime: &ConnectorRuntimeRegistry,
+    connector_id: &str,
+    kind: ConnectorKind,
+    event: &Result<ProcessEvent, tokio::sync::broadcast::error::RecvError>,
+) -> bool {
+    match event {
+        Ok(ProcessEvent::HealthChanged { healthy: true, .. }) => {
+            runtime.set_ready(connector_id, kind);
+        }
+        Ok(
+            ProcessEvent::HealthChanged { healthy: false, .. }
+            | ProcessEvent::StateChanged {
+                state: ProcessState::Starting { .. },
+            },
+        ) => {
+            runtime.set_starting(connector_id, kind, ConnectorStartupStage::Readiness);
+        }
+        Ok(
+            ProcessEvent::RestartScheduled { .. }
+            | ProcessEvent::StateChanged {
+                state: ProcessState::Backoff { .. },
+            },
+        ) => {
+            runtime.set_backoff(connector_id, kind, ConnectorStartupStage::Readiness);
+        }
+        Ok(ProcessEvent::StateChanged {
+            state: ProcessState::Stopped,
+        }) => {
+            runtime.set_stopped(connector_id, kind);
+            return true;
+        }
+        Ok(ProcessEvent::StateChanged {
+            state: ProcessState::Failed { .. },
+        })
+        | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            mark_openai_degraded(runtime, connector_id, kind, ConnectorStartupStage::Process);
+            return true;
+        }
+        Ok(
+            ProcessEvent::StateChanged { .. }
+            | ProcessEvent::StandardOutput { .. }
+            | ProcessEvent::StandardError { .. },
+        ) => {}
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+            tracing::warn!(connector_id = %connector_id, skipped, "OpenAI connector state observer lagged");
+        }
+    }
+    false
+}
+
+fn mark_openai_degraded(
+    runtime: &ConnectorRuntimeRegistry,
+    connector_id: &str,
+    kind: ConnectorKind,
+    stage: ConnectorStartupStage,
+) {
+    tracing::warn!(connector_id = %connector_id, ?kind, ?stage, "OpenAI connector activation degraded");
+    let failure = ConnectorStartupFailure::new(connector_id, kind, stage);
+    failure.log();
+    runtime.set_degraded(failure);
+}
+
+async fn prepare_openai_activation(
+    paths: &AppPaths,
+    connector: &ConnectorConfig,
+) -> Result<PreparedOpenAiActivation> {
+    let settings = connector
+        .openai_tunnel
+        .as_ref()
+        .context("OpenAI tunnel settings are missing")?;
+    let discovery = BinaryDiscovery::new(vec![paths.data_dir.join("bin")]);
+    let binary = discovery
+        .discover(
+            BinaryKind::OpenAiTunnelClient,
+            settings.tunnel_client_path.as_deref(),
+        )?
+        .context("tunnel-client is not installed; run the connector setup again")?;
+    let connector_dir = paths.data_dir.join("connectors").join(&connector.id);
+    let profile_directory = connector_dir.join("openai-profiles");
+    let health_directory = paths.state_dir.join("connectors").join(&connector.id);
+    ensure_private_directory(&profile_directory)?;
+    ensure_private_directory(&health_directory)?;
+    let target = OpenAiMcpTarget::runonmine_stdio(runonmine_cli_executable()?, &connector.id)?;
+    let profile = OpenAiTunnelProfile::builder(&settings.profile, &settings.tunnel_id, target)
+        .profile_directory(profile_directory.clone())
+        .health_address(format!("127.0.0.1:{}", settings.health_port).parse()?)
+        .health_url_file(health_directory.join("tunnel-health.url"))
+        .build()?;
+    let profile_file = profile_directory.join(format!("{}.yaml", profile.profile()));
+    if !profile_file.exists() {
+        let initialized = run_once(
+            profile.init_command(&binary)?,
+            Duration::from_secs(30),
+            128 * 1_024,
+        )
+        .await?;
+        if !initialized.success {
+            bail!("tunnel-client profile initialization failed");
+        }
+        restrict_private_file(&profile_file)?;
+    }
+    let secrets = runonmine_core::secrets::default_secret_store(paths)?;
+    let runtime_key = required_secret(
+        secrets.as_ref(),
+        &format!("connector.{}.runtime_api_key", connector.id),
+    )?;
+    let doctor = run_once(
+        profile.doctor_command(
+            &binary,
+            SecretValue::new(runtime_key.expose_secret().to_owned())?,
+        )?,
+        Duration::from_secs(30),
+        256 * 1_024,
+    )
+    .await?;
+    if !doctor.success {
+        bail!("tunnel-client doctor failed; run `runonmine doctor` for guidance");
+    }
+    Ok(PreparedOpenAiActivation {
+        binary,
+        profile,
+        runtime_key,
+    })
+}
+
+async fn with_deadline<T>(
+    deadline: Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+    message: &'static str,
+) -> Result<T> {
+    match tokio::time::timeout(deadline, future).await {
+        Ok(result) => result,
+        Err(_) => bail!(message),
+    }
+}
+
+async fn wait_for_openai_readiness(
+    events: &mut tokio::sync::broadcast::Receiver<ProcessEvent>,
+    deadline: Duration,
+) -> Result<()> {
+    with_deadline(
+        deadline,
+        async {
+            loop {
+                match events.recv().await {
+                    Ok(ProcessEvent::HealthChanged { healthy: true, .. }) => return Ok(()),
+                    Ok(ProcessEvent::StateChanged {
+                        state: ProcessState::Failed { .. } | ProcessState::Stopped,
+                    }) => bail!("OpenAI connector supervisor stopped before readiness"),
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        bail!("OpenAI connector supervisor closed before readiness")
+                    }
+                }
+            }
+        },
+        "OpenAI connector readiness exceeded its deadline",
+    )
+    .await
 }
 
 fn spawn_quick_url_observer(
@@ -449,6 +937,8 @@ fn runonmine_cli_executable() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
     use runonmine_core::{
         CloudflareQuickSettings, ConnectorConfig, OpenAiTunnelSettings, PolicyPreset,
@@ -510,11 +1000,12 @@ while :; do /bin/sleep 1; done
         config.validate()?;
         config.save(&paths.config_file())?;
 
-        let managed = start_external_connectors(&paths, &config, Vec::new()).await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let runtime = ConnectorRuntimeRegistry::default();
+        let managed =
+            start_external_connectors(&paths, &config, Vec::new(), runtime.clone()).await?;
+        wait_for_runtime_phase(&runtime, "broken-openai", ConnectorRuntimePhase::Degraded).await?;
         assert_eq!(managed.handles.len(), 1);
-        assert_eq!(managed.degraded.len(), 1);
-        assert_eq!(managed.degraded[0].connector_id, "broken-openai");
+        assert!(managed.degraded.is_empty());
         assert!(matches!(
             managed.handles[0].state(),
             ProcessState::Starting { .. } | ProcessState::Running { .. }
@@ -568,24 +1059,182 @@ while :; do /bin/sleep 1; done
         };
         config.validate()?;
 
-        let managed = start_external_connectors(&paths, &config, Vec::new()).await?;
+        let runtime = ConnectorRuntimeRegistry::default();
+        let managed = tokio::time::timeout(
+            Duration::from_millis(250),
+            start_external_connectors(&paths, &config, Vec::new(), runtime.clone()),
+        )
+        .await
+        .context("managed connector startup blocked on OpenAI preparation")??;
         assert!(managed.handles.is_empty());
-        assert_eq!(managed.degraded.len(), 2);
+        assert_eq!(managed.degraded.len(), 1);
         assert_eq!(managed.degraded[0].connector_id, "broken-quick");
-        assert_eq!(managed.degraded[0].kind, ConnectorKind::CloudflareQuick);
-        assert_eq!(managed.degraded[0].stage, ConnectorStartupStage::Process);
+        wait_for_runtime_phase(&runtime, "broken-openai", ConnectorRuntimePhase::Degraded).await?;
+        let statuses = runtime.snapshot();
         assert_eq!(
-            managed.degraded[0].message,
-            "connector process could not be prepared"
+            statuses
+                .iter()
+                .filter(|status| status.phase == ConnectorRuntimePhase::Degraded)
+                .count(),
+            2
         );
-        assert_eq!(managed.degraded[1].connector_id, "broken-openai");
-        assert_eq!(managed.degraded[1].kind, ConnectorKind::OpenAiTunnel);
-        assert_eq!(managed.degraded[1].stage, ConnectorStartupStage::Process);
+        assert!(statuses.iter().any(|status| {
+            status.connector_id == "broken-openai"
+                && status.kind == ConnectorKind::OpenAiTunnel
+                && status.stage == Some(ConnectorStartupStage::Preparation)
+        }));
+        managed.stop().await;
+        Ok(())
+    }
+
+    async fn wait_for_runtime_phase(
+        runtime: &ConnectorRuntimeRegistry,
+        connector_id: &str,
+        phase: ConnectorRuntimePhase,
+    ) -> Result<()> {
+        with_deadline(
+            Duration::from_secs(2),
+            async {
+                loop {
+                    if runtime
+                        .snapshot()
+                        .iter()
+                        .any(|status| status.connector_id == connector_id && status.phase == phase)
+                    {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+            "connector runtime state did not reach the expected phase",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn async_activation_returns_immediately_and_shutdown_cancels_preparation() -> Result<()> {
+        #[derive(Debug)]
+        struct CancellationFlag(Arc<AtomicBool>);
+
+        impl Drop for CancellationFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let connector = test_openai_connector("slow-openai");
+        let runtime = ConnectorRuntimeRegistry::default();
+        let mut managed = ManagedConnectors::with_degraded(Vec::new(), runtime.clone());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_for_future = Arc::clone(&cancelled);
+        let preparation = async move {
+            let _flag = CancellationFlag(cancelled_for_future);
+            std::future::pending::<Result<PreparedOpenAiActivation>>().await
+        }
+        .boxed();
+        let started = std::time::Instant::now();
+        managed.spawn_openai_activation_with(
+            connector,
+            preparation,
+            OpenAiActivationDeadlines {
+                preparation: Duration::from_secs(30),
+                readiness: Duration::from_secs(30),
+            },
+        );
+        assert!(started.elapsed() < Duration::from_millis(50));
+        wait_for_runtime_phase(&runtime, "slow-openai", ConnectorRuntimePhase::Starting).await?;
+        tokio::time::timeout(Duration::from_secs(1), managed.stop())
+            .await
+            .context("managed connector shutdown waited for OpenAI preparation")?;
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(runtime.snapshot().iter().any(|status| {
+            status.connector_id == "slow-openai" && status.phase == ConnectorRuntimePhase::Stopped
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn preparation_deadline_marks_async_connector_degraded() -> Result<()> {
+        let connector = test_openai_connector("deadline-openai");
+        let runtime = ConnectorRuntimeRegistry::default();
+        let mut managed = ManagedConnectors::with_degraded(Vec::new(), runtime.clone());
+        managed.spawn_openai_activation_with(
+            connector,
+            std::future::pending::<Result<PreparedOpenAiActivation>>().boxed(),
+            OpenAiActivationDeadlines {
+                preparation: Duration::from_millis(20),
+                readiness: Duration::from_secs(1),
+            },
+        );
+        wait_for_runtime_phase(&runtime, "deadline-openai", ConnectorRuntimePhase::Degraded)
+            .await?;
+        let status = runtime
+            .snapshot()
+            .into_iter()
+            .find(|status| status.connector_id == "deadline-openai")
+            .context("deadline connector status is missing")?;
+        assert_eq!(status.stage, Some(ConnectorStartupStage::Preparation));
         assert_eq!(
-            managed.degraded[1].message,
-            "connector process could not be prepared"
+            status.message.as_deref(),
+            Some("connector preparation did not complete")
         );
         managed.stop().await;
+        Ok(())
+    }
+
+    fn test_openai_connector(id: &str) -> ConnectorConfig {
+        ConnectorConfig {
+            id: id.to_owned(),
+            name: "OpenAI activation test".to_owned(),
+            kind: ConnectorKind::OpenAiTunnel,
+            enabled: true,
+            policy_preset: PolicyPreset::Safe,
+            pack_overrides: std::collections::BTreeMap::default(),
+            tool_overrides: std::collections::BTreeMap::default(),
+            policy_rules: Vec::new(),
+            public_base_url: None,
+            cloudflare_quick: None,
+            cloudflare_named: None,
+            oauth_owner: None,
+            openai_tunnel: Some(OpenAiTunnelSettings {
+                tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".to_owned(),
+                profile: "runonmine".to_owned(),
+                tunnel_client_path: None,
+                health_port: 47_823,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_deadline_cancels_a_pending_activation() {
+        let result = with_deadline(
+            Duration::from_millis(20),
+            std::future::pending::<Result<()>>(),
+            "deadline reached",
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_a_healthy_event_before_deadline() -> Result<()> {
+        let (events, mut receiver) = tokio::sync::broadcast::channel(8);
+        events.send(ProcessEvent::HealthChanged {
+            healthy: false,
+            detail: "starting".to_owned(),
+        })?;
+        events.send(ProcessEvent::HealthChanged {
+            healthy: true,
+            detail: "ready".to_owned(),
+        })?;
+        wait_for_openai_readiness(&mut receiver, Duration::from_secs(1)).await?;
+
+        let (_events, mut receiver) = tokio::sync::broadcast::channel(1);
+        assert!(
+            wait_for_openai_readiness(&mut receiver, Duration::from_millis(20))
+                .await
+                .is_err()
+        );
         Ok(())
     }
 

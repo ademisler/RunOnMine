@@ -123,6 +123,37 @@ backend cannot prevent Cloudflare or local connectors from starting. Quick
 Tunnel URL observers are attached only to Quick supervisors that started
 successfully.
 
+OpenAI profile initialization and `doctor` run in a cancellable background
+activation task after the loopback agent is ready to serve. Preparation and
+readiness have explicit deadlines; shutdown cancels pending activation and
+stops any acquired supervisor before joining the task. An in-memory runtime
+registry tracks `starting`, `backoff`, `ready`, `degraded`, and `stopped` states.
+A sanitized snapshot is available at `/healthz/connectors` only for a direct
+loopback request whose Host includes the configured agent port; forwarded or
+public-host requests receive `404` so tunnel clients cannot enumerate local
+connector lifecycle details.
+
+## Asynchronous OpenAI activation and runtime health
+
+The loopback listener and local MCP router do not wait for OpenAI tunnel-client
+profile initialization or `doctor`. After the listener binds, each configured
+OpenAI connector receives an owned activation task. The task performs binary
+and profile discovery, optional profile `init`, credential lookup and `doctor`
+inside a 75-second preparation deadline, then starts the supervisor and requires
+a healthy readiness event within a separate 30-second deadline. Dropping a
+timed-out preparation future cancels its bounded child process, and the task
+owns the supervisor handle until agent shutdown so no detached connector process
+is leaked.
+
+A shared in-memory registry records `starting`, `backoff`, `ready`, `degraded`
+and `stopped` phases plus the sanitized authentication, preparation, process or
+readiness stage. Supervisor health/restart events update the registry throughout
+the agent lifetime. `/healthz` remains the stable plain-text liveness endpoint;
+`/healthz/connectors` returns the runtime snapshot as JSON only when the request
+uses the exact direct-loopback Host and contains no proxy/forwarding headers.
+Public tunnel hosts, wrong ports and forwarded requests receive `404` so local
+connector IDs and lifecycle state are not exposed remotely.
+
 ## Recoverable connector removal
 
 Connector deletion is a durable phase transaction. An owner-only journal records

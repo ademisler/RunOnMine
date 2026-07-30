@@ -47,10 +47,23 @@ agent, local connectors, or external connectors that already started
 successfully. A later agent restart retries the connector from desired
 configuration.
 
-The degraded record is currently in-memory plus structured logs; persistent and
-UI-visible lifecycle states are tracked separately in the roadmap. Quick Tunnel
-URL discovery starts only for a successfully supervised Quick connector, and an
-OpenAI credential-store failure is confined to the OpenAI connector.
+Runtime lifecycle state is kept in memory and exposed to the local owner at:
+
+```console
+curl -sS http://127.0.0.1:47821/healthz/connectors
+```
+
+The response reports a sanitized aggregate plus per-connector `starting`,
+`backoff`, `ready`, `degraded`, or `stopped` state and the current startup stage.
+The detailed route accepts only a direct loopback Host with the configured port
+and returns `404` for forwarded/public requests. It contains no credentials,
+process output, command lines, or external URLs.
+
+OpenAI `init` and `doctor` execute asynchronously after the agent begins serving,
+with bounded preparation and readiness deadlines. Stopping the agent cancels a
+pending activation and joins cleanup. Quick Tunnel URL discovery starts only for
+a successfully supervised Quick connector, and an OpenAI credential-store
+failure remains confined to the OpenAI connector.
 
 ## Cloudflare Quick Tunnel
 
