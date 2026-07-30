@@ -4,12 +4,15 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[cfg(target_os = "linux")]
+use super::LinuxSystemService;
+
 use super::{
     AppConfig, AppPaths, BinaryKind, BinaryProbe, ConnectorConfig, ConnectorKind, DoctorArgs,
-    ExposeSecret, InstalledBinary, LinuxSystemService, OpenAiMcpTarget, OpenAiTunnelProfile,
-    OpenAiTunnelSettings, Path, QuickTunnelRuntimeStore, ReleaseProvider, Result, SecretString,
-    SecretValue, StateStore, UserService, bail, current, default_secret_store,
-    load_connector_binary, local_http_secret_name, resolve_browser_executable, run_once,
+    ExposeSecret, InstalledBinary, OpenAiMcpTarget, OpenAiTunnelProfile, OpenAiTunnelSettings,
+    Path, QuickTunnelRuntimeStore, ReleaseProvider, Result, SecretString, SecretValue, StateStore,
+    UserService, bail, current, default_secret_store, load_connector_binary,
+    local_http_secret_name, resolve_browser_executable, run_once,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

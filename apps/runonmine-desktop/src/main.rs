@@ -1442,7 +1442,7 @@ mod desktop {
                         );
                         ui.add_sized(
                             [ui.available_width(), 36.0],
-                            egui::TextEdit::singleline(&mut self.credential_secret).password(true),
+                            egui::TextEdit::singleline(&mut *self.credential_secret).password(true),
                         );
                         ui.add_space(14.0);
                         ui.horizontal(|ui| {
@@ -1785,8 +1785,8 @@ mod desktop {
                 });
                 ui.add_space(8.0);
             }
-            if let Some(family) = revoke {
-                let result = self.revoke_oauth_session(family);
+            if let Some((connector_id, family_id)) = revoke {
+                let result = self.revoke_oauth_session(&connector_id, family_id);
                 self.apply_result(result);
             }
         }
