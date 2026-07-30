@@ -24,9 +24,9 @@ use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::process::{ProcessRequest, execute_shell};
 use runonmine_core::secrets::SecretStore;
 use runonmine_core::{
-    AppConfig, AppPaths, ApprovalRequest, ApprovalStatus, AuditEvent, AuditOutcome,
-    BrowserProfileMode, Capability, ConnectorConfig, ConnectorKind, PolicyContext, PolicyEngine,
-    PolicyMode, PrincipalContext, StateStore,
+    AppConfig, AppPaths, ApprovalRequest, ApprovalStatus, AuditOutcome, BrowserProfileMode,
+    Capability, ConnectorConfig, ConnectorKind, PolicyContext, PolicyEngine, PolicyMode,
+    PrincipalContext, StateStore,
 };
 use runonmine_oauth::{Scope, ScopeSet};
 use runonmine_platform::desktop::{self, ScreenshotTarget};
@@ -37,10 +37,12 @@ use runonmine_platform::native::{self, DbusCall};
 use serde::Serialize;
 use serde_json::json;
 
+mod audit;
 mod http;
 mod managed_connectors;
 mod rate_limit;
 mod session;
+use audit::AuditRecorder;
 pub use http::serve_loopback;
 use rate_limit::PrincipalRateLimiter;
 use session::{IdleSessionManager, SessionPermit};
@@ -64,6 +66,7 @@ struct RuntimeInner {
     config_path: PathBuf,
     connector_id: String,
     store: StateStore,
+    audit: AuditRecorder,
     filesystem: ScopedFilesystem,
     approval_timeout: Duration,
     process_timeout: Duration,
@@ -138,6 +141,7 @@ impl Runtime {
         Ok(Self(Arc::new(RuntimeInner {
             config_path: paths.config_file(),
             connector_id: connector_id.to_owned(),
+            audit: AuditRecorder::new(connector_id, store.clone()),
             store,
             filesystem,
             approval_timeout: Duration::from_secs(config.limits.approval_timeout_seconds),
@@ -169,6 +173,10 @@ impl Runtime {
 
     fn check_rate_limit(&self, principal: &str) -> Result<()> {
         self.0.rate_limiter.check(principal)
+    }
+
+    fn audit(&self) -> &AuditRecorder {
+        &self.0.audit
     }
 }
 
@@ -288,7 +296,7 @@ impl RunOnMineServer {
             .try_with(RequestAccess::rate_limit_key)
             .unwrap_or_else(|_| "stdio".to_owned());
         if self.runtime.check_rate_limit(&rate_limit_key).is_err() {
-            self.audit(
+            self.runtime.audit().record(
                 tool_name,
                 capability,
                 AuditOutcome::Denied,
@@ -347,25 +355,29 @@ impl RunOnMineServer {
             .unwrap_or(false);
         match pre_approval_decision(modes, grant_allows) {
             PreApprovalDecision::Allow => {
-                self.audit_authorization_required(
-                    tool_name,
-                    capability,
-                    AuditOutcome::Allowed,
-                    &argument_hash,
-                    summary,
-                )
-                .await?;
+                self.runtime
+                    .audit()
+                    .record_required(
+                        tool_name,
+                        capability,
+                        AuditOutcome::Allowed,
+                        &argument_hash,
+                        summary,
+                    )
+                    .await?;
                 return Ok(());
             }
             PreApprovalDecision::Deny => {
-                self.audit_authorization_required(
-                    tool_name,
-                    capability,
-                    AuditOutcome::Denied,
-                    &argument_hash,
-                    summary,
-                )
-                .await?;
+                self.runtime
+                    .audit()
+                    .record_required(
+                        tool_name,
+                        capability,
+                        AuditOutcome::Denied,
+                        &argument_hash,
+                        summary,
+                    )
+                    .await?;
                 return Err(McpError::invalid_request(
                     "Tool is denied by local policy",
                     None,
@@ -392,7 +404,10 @@ impl RunOnMineServer {
                 McpError::internal_error("Could not create a local approval request", None)
             })?;
         if let Err(error) = self
-            .audit_authorization_required(
+            .runtime
+            .0
+            .audit
+            .record_required(
                 tool_name,
                 capability,
                 AuditOutcome::PendingApproval,
@@ -412,14 +427,16 @@ impl RunOnMineServer {
         let deadline = Instant::now() + self.runtime.0.approval_timeout;
         loop {
             if Instant::now() >= deadline {
-                self.audit_authorization_required(
-                    tool_name,
-                    capability,
-                    AuditOutcome::Denied,
-                    &argument_hash,
-                    "local approval timed out",
-                )
-                .await?;
+                self.runtime
+                    .audit()
+                    .record_required(
+                        tool_name,
+                        capability,
+                        AuditOutcome::Denied,
+                        &argument_hash,
+                        "local approval timed out",
+                    )
+                    .await?;
                 return Err(McpError::invalid_request("Local approval timed out", None));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -433,118 +450,50 @@ impl RunOnMineServer {
                 .map_or(ApprovalStatus::Expired, |request| request.status);
             match status {
                 ApprovalStatus::Approved => {
-                    self.audit_authorization_required(
-                        tool_name,
-                        capability,
-                        AuditOutcome::Allowed,
-                        &argument_hash,
-                        summary,
-                    )
-                    .await?;
+                    self.runtime
+                        .audit()
+                        .record_required(
+                            tool_name,
+                            capability,
+                            AuditOutcome::Allowed,
+                            &argument_hash,
+                            summary,
+                        )
+                        .await?;
                     return Ok(());
                 }
                 ApprovalStatus::Denied => {
-                    self.audit_authorization_required(
-                        tool_name,
-                        capability,
-                        AuditOutcome::Denied,
-                        &argument_hash,
-                        "denied by the machine owner",
-                    )
-                    .await?;
+                    self.runtime
+                        .audit()
+                        .record_required(
+                            tool_name,
+                            capability,
+                            AuditOutcome::Denied,
+                            &argument_hash,
+                            "denied by the machine owner",
+                        )
+                        .await?;
                     return Err(McpError::invalid_request(
                         "Denied by the machine owner",
                         None,
                     ));
                 }
                 ApprovalStatus::Expired => {
-                    self.audit_authorization_required(
-                        tool_name,
-                        capability,
-                        AuditOutcome::Denied,
-                        &argument_hash,
-                        "local approval expired",
-                    )
-                    .await?;
+                    self.runtime
+                        .audit()
+                        .record_required(
+                            tool_name,
+                            capability,
+                            AuditOutcome::Denied,
+                            &argument_hash,
+                            "local approval expired",
+                        )
+                        .await?;
                     return Err(McpError::invalid_request("Local approval timed out", None));
                 }
                 ApprovalStatus::Pending => {}
             }
         }
-    }
-
-    async fn audit_authorization_required(
-        &self,
-        tool_name: &str,
-        capability: Capability,
-        outcome: AuditOutcome,
-        argument_hash: &str,
-        summary: &str,
-    ) -> Result<(), McpError> {
-        let event = AuditEvent::new(
-            &self.runtime.0.connector_id,
-            tool_name,
-            capability_name(capability),
-            outcome,
-            argument_hash,
-            summary,
-        );
-        match self.runtime.0.store.append_audit_async(event).await {
-            Ok(_) => Ok(()),
-            Err(error) if capability_requires_reliable_audit(capability) => {
-                tracing::error!(%error, "refusing dangerous tool call because audit is unavailable");
-                Err(McpError::internal_error(
-                    "Local audit storage is unavailable; the tool call was blocked",
-                    None,
-                ))
-            }
-            Err(error) => {
-                tracing::error!(%error, "failed to append audit event");
-                Ok(())
-            }
-        }
-    }
-
-    fn audit<T: Serialize>(
-        &self,
-        tool_name: &str,
-        capability: Capability,
-        outcome: AuditOutcome,
-        arguments: &T,
-        summary: &str,
-    ) {
-        match argument_hash(arguments) {
-            Ok(hash) => self.audit_with_hash(tool_name, capability, outcome, &hash, summary),
-            Err(error) => tracing::error!(
-                %error,
-                tool_name,
-                "failed to serialize tool arguments for audit"
-            ),
-        }
-    }
-
-    fn audit_with_hash(
-        &self,
-        tool_name: &str,
-        capability: Capability,
-        outcome: AuditOutcome,
-        argument_hash: &str,
-        summary: &str,
-    ) {
-        let event = AuditEvent::new(
-            &self.runtime.0.connector_id,
-            tool_name,
-            capability_name(capability),
-            outcome,
-            argument_hash,
-            summary,
-        );
-        let store = self.runtime.0.store.clone();
-        tokio::spawn(async move {
-            if let Err(error) = store.append_audit_async(event).await {
-                tracing::error!(%error, "failed to append audit event");
-            }
-        });
     }
 
     fn success<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
@@ -559,7 +508,7 @@ impl RunOnMineServer {
         capability: Capability,
         arguments: &impl Serialize,
     ) -> McpError {
-        self.audit(
+        self.runtime.audit().record(
             tool_name,
             capability,
             AuditOutcome::Failed,
@@ -1015,7 +964,7 @@ impl RunOnMineServer {
                 } else {
                     AuditOutcome::Failed
                 };
-                self.audit(
+                self.runtime.audit().record(
                     "shell_exec",
                     Capability::ShellExec,
                     outcome,
@@ -1870,9 +1819,9 @@ fn required_secret(store: &dyn SecretStore, name: &str) -> Result<secrecy::Secre
 #[allow(clippy::too_many_lines)]
 mod validation;
 use validation::{
-    approval_preview, argument_hash, browser_should_be_headless, capability_name,
-    capability_requires_reliable_audit, validate_dbus_arguments, validate_nonempty_text,
-    validate_optional_path, validate_path, validate_string_arguments, validate_text,
+    approval_preview, argument_hash, browser_should_be_headless, validate_dbus_arguments,
+    validate_nonempty_text, validate_optional_path, validate_path, validate_string_arguments,
+    validate_text,
 };
 
 #[cfg(test)]
@@ -1902,13 +1851,6 @@ mod tests {
         assert!(preview.contains("[REDACTED]"));
         assert!(!preview.contains("top-secret"));
         assert!(!preview.contains("abc123"));
-    }
-
-    #[test]
-    fn dangerous_capabilities_require_reliable_audit() {
-        assert!(capability_requires_reliable_audit(Capability::ShellExec));
-        assert!(capability_requires_reliable_audit(Capability::FilesWrite));
-        assert!(!capability_requires_reliable_audit(Capability::FilesRead));
     }
 
     #[test]
