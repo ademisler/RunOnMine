@@ -38,6 +38,25 @@ Notification delivery and pulse-write failures are exposed through
 `approval_notification_metrics`; notification failure never changes the result
 of an already committed owner decision.
 
+## Sanitized failure correlation
+
+Every MCP tool call runs inside a request UUID scope. Internal failures generate
+a separate incident UUID and return only the generic public message plus that
+opaque incident reference. Local structured logs bind incident and request UUIDs
+to the connector, a code-owned category and operation, the tool name when
+applicable, and the audit event UUID when a failure audit or atomic timeout audit
+exists. Audit append failures retain the event UUID even when persistence itself
+fails. Raw error chains, arguments, commands, paths, tokens and provider payloads
+are not copied into these correlation fields.
+
+OAuth endpoint middleware creates an equivalent request UUID scope. Store errors
+are reduced to code-owned corruption/database/I/O categories and logged with the
+connector and operation. OAuth response codes and descriptions remain the
+standard low-detail protocol values and do not expose the local incident, store
+cause or connector identity. Access-token authentication performed by MCP HTTP
+also records the MCP-side request and connector when OAuth reports an internal or
+temporarily unavailable condition.
+
 The normal agent always runs as the signed-in user. The Linux per-user unit keeps
 home and the system read-only except for RunOnMine state plus the exact canonical
 roots selected in configuration. Root additions and removals reconcile an

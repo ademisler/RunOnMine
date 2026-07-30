@@ -160,6 +160,12 @@ on restart/backoff and removed on process stop.
 - OAuth clients, authorization state, codes, tokens, and refresh families are isolated by connector/issuer even when connectors share one local SQLite database.
 - Audit records contain argument summaries and hashes rather than raw command,
   token, cookie, or stdin contents.
+- MCP internal failures return a generic message plus an opaque incident reference.
+  Local structured logs correlate that incident with a request UUID, connector,
+  bounded category/operation, and an audit UUID when one exists. OAuth protocol
+  errors remain standard and generic while local storage failures use the same
+  request/connector/category discipline. Raw causes and tool arguments are not
+  copied into these diagnostic fields.
 - Audit records form a tamper-evident chain and retain 30 days or 100 MiB by default.
 - Shell execution is not a sandbox; when allowed, it has the full authority of
   the account running the agent, but starts from a cleared environment so agent

@@ -4,6 +4,7 @@ use rmcp::ErrorData as McpError;
 use runonmine_core::{AuditEvent, AuditOutcome, Capability, StateStore};
 use serde::Serialize;
 
+use crate::diagnostics::{self, DiagnosticCategory};
 use crate::validation::{argument_hash, capability_name, capability_requires_reliable_audit};
 
 #[async_trait]
@@ -56,13 +57,30 @@ impl AuditRecorder {
         arguments: &T,
         summary: &str,
     ) {
-        match argument_hash(arguments) {
-            Ok(hash) => self.record_with_hash(tool_name, capability, outcome, &hash, summary),
-            Err(error) => tracing::error!(
-                %error,
-                tool_name,
-                "failed to serialize tool arguments for audit"
-            ),
+        let _reference =
+            self.record_with_reference(tool_name, capability, outcome, arguments, summary);
+    }
+
+    pub(super) fn record_with_reference<T: Serialize>(
+        &self,
+        tool_name: &str,
+        capability: Capability,
+        outcome: AuditOutcome,
+        arguments: &T,
+        summary: &str,
+    ) -> Option<uuid::Uuid> {
+        if let Ok(hash) = argument_hash(arguments) {
+            Some(self.record_with_hash(tool_name, capability, outcome, &hash, summary))
+        } else {
+            diagnostics::log_internal(
+                diagnostics::current_request_id(),
+                &self.connector_id,
+                DiagnosticCategory::AuditStorage,
+                "serialize_audit_arguments",
+                Some(tool_name),
+                None,
+            );
+            None
         }
     }
 
@@ -73,14 +91,26 @@ impl AuditRecorder {
         outcome: AuditOutcome,
         argument_hash: &str,
         summary: &str,
-    ) {
+    ) -> uuid::Uuid {
         let event = self.event(tool_name, capability, outcome, argument_hash, summary);
+        let audit_id = event.id;
+        let request_id = diagnostics::current_request_id();
+        let connector_id = event.connector_id.clone();
+        let tool_name = event.tool_name.clone();
         let store = self.store.clone();
         tokio::spawn(async move {
-            if let Err(error) = store.append_audit_async(event).await {
-                tracing::error!(%error, "failed to append audit event");
+            if store.append_audit_async(event).await.is_err() {
+                diagnostics::log_internal(
+                    request_id,
+                    &connector_id,
+                    DiagnosticCategory::AuditStorage,
+                    "append_audit_event",
+                    Some(&tool_name),
+                    Some(audit_id),
+                );
             }
         });
+        audit_id
     }
 
     fn event(
@@ -107,17 +137,30 @@ async fn append_required(
     event: AuditEvent,
     capability: Capability,
 ) -> Result<(), McpError> {
+    let audit_id = event.id;
+    let connector_id = event.connector_id.clone();
+    let tool_name = event.tool_name.clone();
     match sink.append(event).await {
         Ok(()) => Ok(()),
-        Err(error) if capability_requires_reliable_audit(capability) => {
-            tracing::error!(%error, "refusing dangerous tool call because audit is unavailable");
-            Err(McpError::internal_error(
+        Err(_) if capability_requires_reliable_audit(capability) => {
+            Err(diagnostics::internal_error(
+                &connector_id,
+                DiagnosticCategory::AuditStorage,
+                "append_required_audit",
+                Some(&tool_name),
+                Some(audit_id),
                 "Local audit storage is unavailable; the tool call was blocked",
-                None,
             ))
         }
-        Err(error) => {
-            tracing::error!(%error, "failed to append audit event");
+        Err(_) => {
+            diagnostics::log_internal(
+                diagnostics::current_request_id(),
+                &connector_id,
+                DiagnosticCategory::AuditStorage,
+                "append_best_effort_audit",
+                Some(&tool_name),
+                Some(audit_id),
+            );
             Ok(())
         }
     }
@@ -212,6 +255,33 @@ mod tests {
 
             assert!(result.is_ok(), "{capability:?} should remain best effort");
         }
+    }
+
+    #[tokio::test]
+    async fn failure_reference_matches_the_persisted_audit_event() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let recorder = AuditRecorder::new("connector-a", store.clone());
+        let Some(audit_id) = recorder.record_with_reference(
+            "fs_read",
+            Capability::FilesRead,
+            AuditOutcome::Failed,
+            &serde_json::json!({"path": "/selected/file.txt"}),
+            "tool failed",
+        ) else {
+            return Err(anyhow!("failure audit reference was not created"));
+        };
+
+        for _ in 0..100 {
+            if let Some(record) = store.audit_tail(1)?.first() {
+                assert_eq!(record.event.id, audit_id);
+                assert_eq!(record.event.connector_id, "connector-a");
+                assert_eq!(record.event.tool_name, "fs_read");
+                assert_eq!(record.event.outcome, AuditOutcome::Failed);
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(anyhow!("failure audit event was not persisted"))
     }
 
     #[tokio::test]

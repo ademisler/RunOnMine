@@ -42,6 +42,7 @@ use url::Url;
 mod approval_flow;
 mod audit;
 mod connector_removal;
+mod diagnostics;
 mod http;
 mod managed_connectors;
 mod rate_limit;
@@ -126,6 +127,20 @@ impl RequestAccess {
                 subject: subject.clone(),
             },
         }
+    }
+}
+
+const fn diagnostic_category(capability: Capability) -> diagnostics::DiagnosticCategory {
+    use diagnostics::DiagnosticCategory;
+
+    match capability {
+        Capability::SystemRead => DiagnosticCategory::RuntimeTask,
+        Capability::FilesRead | Capability::FilesWrite => DiagnosticCategory::Filesystem,
+        Capability::ShellExec => DiagnosticCategory::Process,
+        Capability::PlatformNative => DiagnosticCategory::PlatformNative,
+        Capability::BrowserRead | Capability::BrowserAct => DiagnosticCategory::Browser,
+        Capability::DesktopControl => DiagnosticCategory::Desktop,
+        Capability::AdminExec => DiagnosticCategory::PrivilegedHelper,
     }
 }
 
@@ -349,13 +364,25 @@ impl RunOnMineServer {
         arguments: &T,
     ) -> Result<(), McpError> {
         let resources = policy_resources(tool_name, arguments, &self.runtime.0.filesystem)
-            .map_err(|error| {
-                tracing::error!(%error, "failed to derive policy resources");
-                McpError::internal_error("Tool resources could not be safely authorized", None)
+            .map_err(|_| {
+                diagnostics::internal_error(
+                    &self.runtime.0.connector_id,
+                    diagnostics::DiagnosticCategory::Authorization,
+                    "derive_policy_resources",
+                    Some(tool_name),
+                    None,
+                    "Tool resources could not be safely authorized",
+                )
             })?;
-        let argument_hash = argument_hash(arguments).map_err(|error| {
-            tracing::error!(%error, "failed to serialize tool arguments for authorization");
-            McpError::internal_error("Tool arguments could not be safely authorized", None)
+        let argument_hash = argument_hash(arguments).map_err(|_| {
+            diagnostics::internal_error(
+                &self.runtime.0.connector_id,
+                diagnostics::DiagnosticCategory::Authorization,
+                "serialize_authorization_arguments",
+                Some(tool_name),
+                None,
+                "Tool arguments could not be safely authorized",
+            )
         })?;
         self.authorize_resolved(
             tool_name,
@@ -376,9 +403,15 @@ impl RunOnMineServer {
         arguments: &T,
         resources: OwnedPolicyResources,
     ) -> Result<(), McpError> {
-        let argument_hash = resources.authorization_hash(arguments).map_err(|error| {
-            tracing::error!(%error, "failed to serialize resource-bound authorization identity");
-            McpError::internal_error("Tool arguments could not be safely authorized", None)
+        let argument_hash = resources.authorization_hash(arguments).map_err(|_| {
+            diagnostics::internal_error(
+                &self.runtime.0.connector_id,
+                diagnostics::DiagnosticCategory::Authorization,
+                "serialize_resource_authorization",
+                Some(tool_name),
+                None,
+                "Tool arguments could not be safely authorized",
+            )
         })?;
         self.authorize_resolved(
             tool_name,
@@ -418,6 +451,14 @@ impl RunOnMineServer {
             ));
         }
         let connector = self.runtime.connector().map_err(|_| {
+            diagnostics::log_internal(
+                diagnostics::current_request_id(),
+                &self.runtime.0.connector_id,
+                diagnostics::DiagnosticCategory::ConnectorConfig,
+                "load_connector_for_authorization",
+                Some(tool_name),
+                None,
+            );
             McpError::invalid_request("Connector configuration is unavailable", None)
         })?;
         let access = REQUEST_ACCESS.try_with(Clone::clone).ok();
@@ -447,7 +488,7 @@ impl RunOnMineServer {
                     .mode
             })
             .collect::<Vec<_>>();
-        let grant_allows = self
+        let grant_result = self
             .runtime
             .0
             .store
@@ -457,8 +498,20 @@ impl RunOnMineServer {
                 tool_name.to_owned(),
                 argument_hash.clone(),
             )
-            .await
-            .unwrap_or(false);
+            .await;
+        let grant_allows = if let Ok(value) = grant_result {
+            value
+        } else {
+            diagnostics::log_internal(
+                diagnostics::current_request_id(),
+                &self.runtime.0.connector_id,
+                diagnostics::DiagnosticCategory::Storage,
+                "read_authorization_grant",
+                Some(tool_name),
+                None,
+            );
+            false
+        };
         match pre_approval_decision(modes, grant_allows) {
             PreApprovalDecision::Allow => {
                 self.runtime
@@ -514,16 +567,20 @@ impl RunOnMineServer {
     ) -> Result<BrowserAuthorization, McpError> {
         const MAX_ORIGIN_CHECKS: usize = 3;
         for _ in 0..MAX_ORIGIN_CHECKS {
-            let current_url = self.browser.policy_url().await.map_err(|error| {
-                tracing::error!(%error, tool_name, "failed to read current browser policy URL");
-                self.tool_failed(tool_name, capability, arguments)
-            })?;
-            let authorization_arguments =
-                browser_authorization_arguments(arguments, &current_url).map_err(|error| {
-                    tracing::error!(%error, tool_name, "failed to bind browser origin to arguments");
-                    McpError::internal_error(
-                        "Browser operation could not be safely authorized",
+            let current_url = self
+                .browser
+                .policy_url()
+                .await
+                .map_err(|_| self.tool_failed(tool_name, capability, arguments))?;
+            let authorization_arguments = browser_authorization_arguments(arguments, &current_url)
+                .map_err(|_| {
+                    diagnostics::internal_error(
+                        &self.runtime.0.connector_id,
+                        diagnostics::DiagnosticCategory::Authorization,
+                        "bind_browser_origin",
+                        Some(tool_name),
                         None,
+                        "Browser operation could not be safely authorized",
                     )
                 })?;
             self.authorize_with_resources(
@@ -534,10 +591,10 @@ impl RunOnMineServer {
                 OwnedPolicyResources::browser(current_url.clone()),
             )
             .await?;
-            let confirmed_url = self.browser.policy_url().await.map_err(|error| {
-                tracing::error!(%error, tool_name, "failed to confirm current browser policy URL");
-                self.tool_failed(tool_name, capability, &authorization_arguments)
-            })?;
+            let confirmed_url =
+                self.browser.policy_url().await.map_err(|_| {
+                    self.tool_failed(tool_name, capability, &authorization_arguments)
+                })?;
             if same_browser_policy_origin(&current_url, &confirmed_url) {
                 return Ok(BrowserAuthorization {
                     arguments: authorization_arguments,
@@ -564,9 +621,17 @@ impl RunOnMineServer {
         ))
     }
 
-    fn success<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-        let text = serde_json::to_string(value)
-            .map_err(|_| McpError::internal_error("Could not encode tool output", None))?;
+    fn success<T: Serialize>(&self, value: &T) -> Result<CallToolResult, McpError> {
+        let text = serde_json::to_string(value).map_err(|_| {
+            diagnostics::internal_error(
+                &self.runtime.0.connector_id,
+                diagnostics::DiagnosticCategory::OutputEncoding,
+                "serialize_tool_output",
+                None,
+                None,
+                "Could not encode tool output",
+            )
+        })?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
@@ -576,14 +641,20 @@ impl RunOnMineServer {
         capability: Capability,
         arguments: &impl Serialize,
     ) -> McpError {
-        self.runtime.audit().record(
+        let audit_id = self.runtime.audit().record_with_reference(
             tool_name,
             capability,
             AuditOutcome::Failed,
             arguments,
             "tool failed",
         );
-        McpError::internal_error("Tool failed; inspect the local RunOnMine logs", None)
+        diagnostics::tool_error(
+            &self.runtime.0.connector_id,
+            diagnostic_category(capability),
+            "execute_tool",
+            tool_name,
+            audit_id,
+        )
     }
 
     fn request_access(context: &RequestContext<RoleServer>) -> Option<&RequestAccess> {
@@ -685,7 +756,14 @@ impl RunOnMineServer {
         )
         .await?;
         let connector = self.runtime.connector().map_err(|_| {
-            McpError::internal_error("Connector configuration is unavailable", None)
+            diagnostics::internal_error(
+                &self.runtime.0.connector_id,
+                diagnostics::DiagnosticCategory::ConnectorConfig,
+                "load_connector_for_machine_info",
+                Some("machine_info"),
+                None,
+                "Connector configuration is unavailable",
+            )
         })?;
         let remote_connector = matches!(
             connector.kind,
@@ -702,7 +780,7 @@ impl RunOnMineServer {
         };
         let allowed_roots = (!remote_connector).then(|| self.runtime.0.filesystem.roots());
         let admin_allowlisted_programs = self.admin_allowlisted_programs().await.unwrap_or(0);
-        Self::success(&json!({
+        self.success(&json!({
             "hostname": hostname,
             "os": std::env::consts::OS,
             "architecture": std::env::consts::ARCH,
@@ -746,7 +824,7 @@ impl RunOnMineServer {
         })
         .await;
         match result {
-            Ok(Ok(entries)) => Self::success(&entries),
+            Ok(Ok(entries)) => self.success(&entries),
             Ok(Err(_)) | Err(_) => {
                 Err(self.tool_failed("fs_list", Capability::FilesRead, &arguments))
             }
@@ -780,7 +858,7 @@ impl RunOnMineServer {
         let path = arguments.path.clone();
         let result = tokio::task::spawn_blocking(move || filesystem.read_text(&path, limit)).await;
         match result {
-            Ok(Ok((content, truncated))) => Self::success(&ReadOutput { content, truncated }),
+            Ok(Ok((content, truncated))) => self.success(&ReadOutput { content, truncated }),
             Ok(Err(_)) | Err(_) => {
                 Err(self.tool_failed("fs_read", Capability::FilesRead, &arguments))
             }
@@ -821,7 +899,7 @@ impl RunOnMineServer {
         })
         .await;
         match result {
-            Ok(Ok(matches)) => Self::success(&matches),
+            Ok(Ok(matches)) => self.success(&matches),
             Ok(Err(_)) | Err(_) => {
                 Err(self.tool_failed("fs_search", Capability::FilesRead, &arguments))
             }
@@ -861,7 +939,7 @@ impl RunOnMineServer {
         })
         .await;
         match result {
-            Ok(Ok(path)) => Self::success(&json!({"path": path, "bytes": arguments.content.len()})),
+            Ok(Ok(path)) => self.success(&json!({"path": path, "bytes": arguments.content.len()})),
             Ok(Err(_)) | Err(_) => {
                 Err(self.tool_failed("fs_write", Capability::FilesWrite, &arguments))
             }
@@ -924,7 +1002,7 @@ impl RunOnMineServer {
         })
         .await;
         match result {
-            Ok(Ok(replacements)) => Self::success(&json!({"replacements": replacements})),
+            Ok(Ok(replacements)) => self.success(&json!({"replacements": replacements})),
             Ok(Err(_)) | Err(_) => {
                 Err(self.tool_failed("fs_patch", Capability::FilesWrite, &arguments))
             }
@@ -958,7 +1036,7 @@ impl RunOnMineServer {
         })
         .await;
         match result {
-            Ok(Ok(())) => Self::success(&json!({"moved": true})),
+            Ok(Ok(())) => self.success(&json!({"moved": true})),
             Ok(Err(_)) | Err(_) => {
                 Err(self.tool_failed("fs_move", Capability::FilesWrite, &arguments))
             }
@@ -989,7 +1067,7 @@ impl RunOnMineServer {
         let path = arguments.path.clone();
         let result = tokio::task::spawn_blocking(move || filesystem.move_to_trash(&path)).await;
         match result {
-            Ok(Ok(())) => Self::success(&json!({"trashed": true})),
+            Ok(Ok(())) => self.success(&json!({"trashed": true})),
             Ok(Err(_)) | Err(_) => {
                 Err(self.tool_failed("fs_delete", Capability::FilesWrite, &arguments))
             }
@@ -1014,7 +1092,8 @@ impl RunOnMineServer {
         validate_optional_path(arguments.cwd.as_deref(), "Shell working directory")?;
         let canonical_cwd =
             canonical_shell_working_directory(arguments.cwd.as_deref()).map_err(|error| {
-                tracing::warn!(%error, "rejected invalid shell working directory");
+                let _ignored = error;
+                tracing::warn!("rejected invalid shell working directory");
                 McpError::invalid_params("Shell working directory is unavailable", None)
             })?;
         arguments.cwd = Some(canonical_cwd.clone());
@@ -1052,7 +1131,7 @@ impl RunOnMineServer {
                     &arguments,
                     "user shell command completed (content withheld)",
                 );
-                Self::success(&output)
+                self.success(&output)
             }
             Err(_) => Err(self.tool_failed("shell_exec", Capability::ShellExec, &arguments)),
         }
@@ -1094,7 +1173,16 @@ impl RunOnMineServer {
         let response =
             tokio::time::timeout(timeout + Duration::from_secs(5), client.request(&request))
                 .await
-                .map_err(|_| McpError::internal_error("Privileged helper timed out", None))?
+                .map_err(|_| {
+                    diagnostics::internal_error(
+                        &self.runtime.0.connector_id,
+                        diagnostics::DiagnosticCategory::PrivilegedHelper,
+                        "helper_request_timeout",
+                        Some("admin_exec"),
+                        None,
+                        "Privileged helper timed out",
+                    )
+                })?
                 .map_err(|_| self.tool_failed("admin_exec", Capability::AdminExec, &arguments))?;
         match response.result {
             HelperResult::Completed {
@@ -1106,11 +1194,29 @@ impl RunOnMineServer {
             } => {
                 let stdout = base64::engine::general_purpose::STANDARD
                     .decode(stdout_base64)
-                    .map_err(|_| McpError::internal_error("Invalid helper response", None))?;
+                    .map_err(|_| {
+                        diagnostics::internal_error(
+                            &self.runtime.0.connector_id,
+                            diagnostics::DiagnosticCategory::PrivilegedHelper,
+                            "decode_helper_stdout",
+                            Some("admin_exec"),
+                            None,
+                            "Invalid helper response",
+                        )
+                    })?;
                 let stderr = base64::engine::general_purpose::STANDARD
                     .decode(stderr_base64)
-                    .map_err(|_| McpError::internal_error("Invalid helper response", None))?;
-                Self::success(&json!({
+                    .map_err(|_| {
+                        diagnostics::internal_error(
+                            &self.runtime.0.connector_id,
+                            diagnostics::DiagnosticCategory::PrivilegedHelper,
+                            "decode_helper_stderr",
+                            Some("admin_exec"),
+                            None,
+                            "Invalid helper response",
+                        )
+                    })?;
+                self.success(&json!({
                     "exit_code": exit_code,
                     "stdout": String::from_utf8_lossy(&stdout),
                     "stderr": String::from_utf8_lossy(&stderr),
@@ -1150,7 +1256,7 @@ impl RunOnMineServer {
         .await?;
         let limit = arguments.limit.clamp(1, 1_000);
         match tokio::task::spawn_blocking(move || desktop::list_windows(limit)).await {
-            Ok(Ok(windows)) => Self::success(&windows),
+            Ok(Ok(windows)) => self.success(&windows),
             _ => Err(self.tool_failed(
                 "desktop_list_windows",
                 Capability::DesktopControl,
@@ -1181,7 +1287,7 @@ impl RunOnMineServer {
         .await?;
         let window_id = arguments.window_id;
         match tokio::task::spawn_blocking(move || desktop::focus_window(window_id)).await {
-            Ok(Ok(())) => Self::success(&json!({"focused": true})),
+            Ok(Ok(())) => self.success(&json!({"focused": true})),
             _ => Err(self.tool_failed(
                 "desktop_focus_window",
                 Capability::DesktopControl,
@@ -1254,7 +1360,7 @@ impl RunOnMineServer {
         .await?;
         let (x, y, button) = (arguments.x, arguments.y, arguments.button.clone());
         match tokio::task::spawn_blocking(move || desktop::click(x, y, &button)).await {
-            Ok(Ok(())) => Self::success(&json!({"clicked": true})),
+            Ok(Ok(())) => self.success(&json!({"clicked": true})),
             _ => Err(self.tool_failed("desktop_click", Capability::DesktopControl, &arguments)),
         }
     }
@@ -1282,7 +1388,7 @@ impl RunOnMineServer {
         .await?;
         let text = arguments.text.clone();
         match tokio::task::spawn_blocking(move || desktop::type_text(&text)).await {
-            Ok(Ok(())) => Self::success(&json!({"typed": true})),
+            Ok(Ok(())) => self.success(&json!({"typed": true})),
             _ => Err(self.tool_failed("desktop_type", Capability::DesktopControl, &arguments)),
         }
     }
@@ -1310,7 +1416,7 @@ impl RunOnMineServer {
         .await?;
         let key = arguments.key.clone();
         match tokio::task::spawn_blocking(move || desktop::key_chord(&key)).await {
-            Ok(Ok(())) => Self::success(&json!({"pressed": true})),
+            Ok(Ok(())) => self.success(&json!({"pressed": true})),
             _ => Err(self.tool_failed("desktop_key", Capability::DesktopControl, &arguments)),
         }
     }
@@ -1343,7 +1449,7 @@ impl RunOnMineServer {
         match native::run_applescript(&arguments.script, timeout, self.runtime.0.max_output_bytes)
             .await
         {
-            Ok(output) => Self::success(&output),
+            Ok(output) => self.success(&output),
             Err(_) => {
                 Err(self.tool_failed("macos_applescript", Capability::PlatformNative, &arguments))
             }
@@ -1378,7 +1484,7 @@ impl RunOnMineServer {
         match native::run_powershell(&arguments.script, timeout, self.runtime.0.max_output_bytes)
             .await
         {
-            Ok(output) => Self::success(&output),
+            Ok(output) => self.success(&output),
             Err(_) => {
                 Err(self.tool_failed("windows_powershell", Capability::PlatformNative, &arguments))
             }
@@ -1419,7 +1525,7 @@ impl RunOnMineServer {
             arguments: &arguments.arguments,
         };
         match native::run_dbus_call(&call, timeout, self.runtime.0.max_output_bytes).await {
-            Ok(output) => Self::success(&output),
+            Ok(output) => self.success(&output),
             Err(_) => {
                 Err(self.tool_failed("linux_dbus_call", Capability::PlatformNative, &arguments))
             }
@@ -1448,7 +1554,7 @@ impl RunOnMineServer {
         )
         .await?;
         match self.browser.open(&arguments.url).await {
-            Ok(url) => Self::success(&json!({"url": url})),
+            Ok(url) => self.success(&json!({"url": url})),
             Err(_) => Err(self.tool_failed("browser_open", Capability::BrowserAct, &arguments)),
         }
     }
@@ -1475,7 +1581,7 @@ impl RunOnMineServer {
         )
         .await?;
         match self.browser.navigate(&arguments.url).await {
-            Ok(url) => Self::success(&json!({"url": url})),
+            Ok(url) => self.success(&json!({"url": url})),
             Err(_) => Err(self.tool_failed("browser_navigate", Capability::BrowserAct, &arguments)),
         }
     }
@@ -1501,7 +1607,7 @@ impl RunOnMineServer {
                 &arguments,
             )
             .await?;
-        Self::success(&json!({"url": authorization.current_url.as_str()}))
+        self.success(&json!({"url": authorization.current_url.as_str()}))
     }
 
     #[tool(
@@ -1526,7 +1632,7 @@ impl RunOnMineServer {
             )
             .await?;
         match self.browser.text().await {
-            Ok(text) => Self::success(&json!({
+            Ok(text) => self.success(&json!({
                 "text": text.content,
                 "truncated": text.truncated,
             })),
@@ -1560,7 +1666,7 @@ impl RunOnMineServer {
             )
             .await?;
         match self.browser.snapshot().await {
-            Ok(html) => Self::success(&json!({
+            Ok(html) => self.success(&json!({
                 "html": html.content,
                 "truncated": html.truncated,
             })),
@@ -1595,7 +1701,7 @@ impl RunOnMineServer {
             )
             .await?;
         match self.browser.click(&arguments.selector).await {
-            Ok(()) => Self::success(&json!({"clicked": true})),
+            Ok(()) => self.success(&json!({"clicked": true})),
             Err(_) => Err(self.tool_failed(
                 "browser_click",
                 Capability::BrowserAct,
@@ -1632,7 +1738,7 @@ impl RunOnMineServer {
             .type_text(&arguments.selector, &arguments.text)
             .await
         {
-            Ok(()) => Self::success(&json!({"typed": true})),
+            Ok(()) => self.success(&json!({"typed": true})),
             Err(_) => Err(self.tool_failed(
                 "browser_type",
                 Capability::BrowserAct,
@@ -1664,7 +1770,7 @@ impl RunOnMineServer {
             )
             .await?;
         match self.browser.press(&arguments.key).await {
-            Ok(()) => Self::success(&json!({"pressed": true})),
+            Ok(()) => self.success(&json!({"pressed": true})),
             Err(_) => Err(self.tool_failed(
                 "browser_press",
                 Capability::BrowserAct,
@@ -1741,7 +1847,7 @@ impl RunOnMineServer {
             )
             .await?;
         match self.browser.evaluate(&arguments.expression).await {
-            Ok(value) => Self::success(&value),
+            Ok(value) => self.success(&value),
             Err(_) => Err(self.tool_failed(
                 "browser_evaluate",
                 Capability::BrowserAct,
@@ -1772,7 +1878,7 @@ impl RunOnMineServer {
             )
             .await?;
         match self.browser.close().await {
-            Ok(()) => Self::success(&json!({"closed": true})),
+            Ok(()) => self.success(&json!({"closed": true})),
             Err(_) => Err(self.tool_failed(
                 "browser_close",
                 Capability::BrowserAct,
@@ -1803,7 +1909,7 @@ impl RunOnMineServer {
             )
             .await?;
         match self.browser.info().await {
-            Ok(info) => Self::success(&info),
+            Ok(info) => self.success(&info),
             Err(_) => Err(self.tool_failed(
                 "browser_profile_info",
                 Capability::BrowserRead,
@@ -1824,13 +1930,16 @@ impl ServerHandler for RunOnMineServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if !self.request_allows_tool(&request.name, &context)
-            || (request.name == "admin_exec" && !self.admin_available().await)
-        {
-            return Err(McpError::invalid_params("tool not found", None));
-        }
-        let call = ToolCallContext::new(self, request, context);
-        self.tool_router.call(call).await
+        diagnostics::scope_request(async {
+            if !self.request_allows_tool(&request.name, &context)
+                || (request.name == "admin_exec" && !self.admin_available().await)
+            {
+                return Err(McpError::invalid_params("tool not found", None));
+            }
+            let call = ToolCallContext::new(self, request, context);
+            self.tool_router.call(call).await
+        })
+        .await
     }
 
     async fn list_tools(

@@ -64,7 +64,7 @@ Status markers:
 - [ ] **P2-05 — Zeroize desktop credential inputs.** Use secret wrappers and explicit clearing.
 - [x] **P2-06 — Add StateStore backpressure.** The serialized SQLite worker uses a bounded 128-job queue, one-second enqueue timeout, overload metrics, and no ambiguous post-acceptance result timeout.
 - [x] **P2-07 — Replace approval polling with notifications.** Approval state commits publish an owner-only cross-process filesystem pulse; MCP waiters re-check SQLite immediately on native events and retain a five-second database poll only as recovery for unavailable or missed watcher events.
-- [ ] **P2-08 — Preserve sanitized internal error diagnostics.** Keep generic remote errors while logging request/connector/audit references and categories.
+- [x] **P2-08 — Preserve sanitized internal error diagnostics.** MCP calls carry request UUIDs; internal failures emit opaque incident references and structured local logs with connector, static category/operation, and audit UUID when available. OAuth store failures use request/connector/category correlation while protocol responses remain standard and generic; raw causes and arguments are not logged.
 - [ ] **P2-09 — Replace silent `.ok()` fallbacks with typed degraded states.** Distinguish missing, disabled, corrupt, unavailable and permission-denied conditions.
 - [x] **P2-10 — Include canonical shell working directory in authorization identity.** Grants and policy decisions bind the command plus the canonical effective `cwd`.
 - [x] **P2-11 — Enforce one combined process-output limit.** stdout and stderr share one total response/memory budget while both pipes continue draining.

@@ -3,8 +3,9 @@ use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Form, Query, State};
+use axum::extract::{DefaultBodyLimit, Form, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{Next, from_fn};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -12,6 +13,7 @@ use html_escape::{encode_double_quoted_attribute, encode_text};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
+use crate::diagnostics;
 use crate::model::{ConsentChallenge, ConsentSubmission};
 use crate::{
     ConsentDecision, DynamicClientRequest, GitHubCallback, OAuthError, OAuthService,
@@ -40,8 +42,13 @@ pub fn oauth_router(service: Arc<OAuthService>) -> Router {
         .route("/oauth/consent", post(consent))
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
+        .layer(from_fn(oauth_request_diagnostics))
         .layer(DefaultBodyLimit::max(16 * 1_024))
         .with_state(service)
+}
+
+async fn oauth_request_diagnostics(request: Request, next: Next) -> Response {
+    diagnostics::scope_request(next.run(request)).await
 }
 
 async fn authorization_server_metadata(

@@ -12,6 +12,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::audit::AuditRecorder;
+use crate::diagnostics::{self, DiagnosticCategory};
 use crate::validation::{approval_preview, capability_name};
 
 const APPROVAL_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -153,8 +154,16 @@ where
     A: ApprovalAudit,
     T: Serialize,
 {
-    let chrono_timeout = chrono::Duration::from_std(timeout)
-        .map_err(|_| McpError::internal_error("Invalid local approval timeout", None))?;
+    let chrono_timeout = chrono::Duration::from_std(timeout).map_err(|_| {
+        diagnostics::internal_error(
+            connector_id,
+            DiagnosticCategory::Approval,
+            "convert_approval_timeout",
+            Some(tool_name),
+            None,
+            "Invalid local approval timeout",
+        )
+    })?;
     let approval = ApprovalRequest::new(
         connector_id,
         principal.clone(),
@@ -163,10 +172,16 @@ where
         argument_hash,
         Utc::now() + chrono_timeout,
     );
-    repository
-        .insert(approval.clone())
-        .await
-        .map_err(|_| McpError::internal_error("Could not create a local approval request", None))?;
+    repository.insert(approval.clone()).await.map_err(|_| {
+        diagnostics::internal_error(
+            connector_id,
+            DiagnosticCategory::Storage,
+            "insert_approval_request",
+            Some(tool_name),
+            None,
+            "Could not create a local approval request",
+        )
+    })?;
 
     if let Err(error) = audit
         .record_required(
@@ -178,7 +193,16 @@ where
         )
         .await
     {
-        let _ignored = repository.deny(approval.id).await;
+        if repository.deny(approval.id).await.is_err() {
+            diagnostics::log_internal(
+                diagnostics::current_request_id(),
+                connector_id,
+                DiagnosticCategory::Storage,
+                "deny_approval_after_audit_failure",
+                Some(tool_name),
+                None,
+            );
+        }
         return Err(error);
     }
 
@@ -227,7 +251,16 @@ where
         let status = repository
             .status(approval.id)
             .await
-            .map_err(|_| McpError::internal_error("Could not read local approval", None))?
+            .map_err(|_| {
+                diagnostics::internal_error(
+                    context.connector_id,
+                    DiagnosticCategory::Storage,
+                    "read_approval_status",
+                    Some(context.tool_name),
+                    None,
+                    "Could not read local approval",
+                )
+            })?
             .map_or(ApprovalStatus::Expired, |request| request.status);
         if complete_existing_status(audit, status, context).await? {
             return Ok(());
@@ -242,6 +275,14 @@ where
             tokio::select! {
                 result = notifications.changed() => {
                     if result.is_err() {
+                        diagnostics::log_internal(
+                            diagnostics::current_request_id(),
+                            context.connector_id,
+                            DiagnosticCategory::Approval,
+                            "approval_notification_channel_closed",
+                            Some(context.tool_name),
+                            None,
+                        );
                         notification_channel_active = false;
                     }
                 }
@@ -271,17 +312,29 @@ where
         context.argument_hash,
         "local approval timed out",
     );
+    let audit_id = event.id;
     let completion = repository
         .complete_timeout(approval_id, event)
         .await
         .map_err(|_| {
-            McpError::internal_error(
+            diagnostics::internal_error(
+                context.connector_id,
+                DiagnosticCategory::Storage,
+                "expire_and_audit_approval",
+                Some(context.tool_name),
+                Some(audit_id),
                 "Could not atomically expire and audit the local approval",
-                None,
             )
         })?
         .ok_or_else(|| {
-            McpError::internal_error("Local approval disappeared before timeout", None)
+            diagnostics::internal_error(
+                context.connector_id,
+                DiagnosticCategory::Approval,
+                "missing_approval_at_timeout",
+                Some(context.tool_name),
+                Some(audit_id),
+                "Local approval disappeared before timeout",
+            )
         })?;
     match completion {
         ApprovalTimeoutResult::ExpiredNow
@@ -292,9 +345,13 @@ where
             if complete_existing_status(audit, status, context).await? {
                 return Ok(());
             }
-            Err(McpError::internal_error(
+            Err(diagnostics::internal_error(
+                context.connector_id,
+                DiagnosticCategory::Approval,
+                "approval_pending_after_timeout",
+                Some(context.tool_name),
+                Some(audit_id),
                 "Timed-out local approval remained pending",
-                None,
             ))
         }
     }

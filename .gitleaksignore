@@ -1,2 +1,5 @@
 # Intentional fake credential used to verify approval-preview redaction.
 20a2408a67e9a80ca924c410b717438e9c69b39a:crates/runonmine-mcp/src/lib.rs:curl-auth-header:2973
+# Synthetic non-secret UUID used to test exact Chromium ownership-token matching.
+530ae3093ef6a820442c4d64c66671349e9ff0a0:crates/runonmine-browser/src/orphan_reaper.rs:generic-api-key:659
+530ae3093ef6a820442c4d64c66671349e9ff0a0:crates/runonmine-browser/src/orphan_reaper.rs:generic-api-key:664

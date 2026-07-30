@@ -10,6 +10,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::crypto::validate_pkce_challenge;
+use crate::diagnostics;
 use crate::model::{
     AuthorizationCodeGrant, ConsentChallenge, PendingAuthorization, PendingConsent,
     RegisteredClient, RegistrationLimits, RegistrationOutcome, TokenGrant, TokenPairDraft,
@@ -163,7 +164,7 @@ impl OAuthService {
         match self
             .store
             .register_client_limited(&client, &limits)
-            .map_err(map_store_server_error)?
+            .map_err(|error| self.store_server_error("register_client", &error))?
         {
             RegistrationOutcome::Registered => Ok(response),
             RegistrationOutcome::RateLimited | RegistrationOutcome::CapacityReached => {
@@ -290,7 +291,7 @@ impl OAuthService {
         let client = self
             .store
             .client(&request.client_id)
-            .map_err(map_store_server_error)?
+            .map_err(|error| self.store_server_error("load_authorization_client", &error))?
             .ok_or_else(OAuthError::invalid_client)?;
         if !client.redirect_uris.contains(&request.redirect_uri) {
             return Err(OAuthError::invalid_request());
@@ -303,7 +304,7 @@ impl OAuthService {
         if !self
             .store
             .touch_client(&request.client_id, now, now + ACTIVE_CLIENT_TTL)
-            .map_err(map_store_server_error)?
+            .map_err(|error| self.store_server_error("touch_authorization_client", &error))?
         {
             return Err(OAuthError::invalid_client());
         }
@@ -320,7 +321,7 @@ impl OAuthService {
                 code_challenge: request.code_challenge,
                 expires_at: Utc::now() + AUTHORIZATION_TRANSACTION_TTL,
             })
-            .map_err(map_store_server_error)?;
+            .map_err(|error| self.store_server_error("store_authorization", &error))?;
 
         let mut redirect = Url::parse("https://github.com/login/oauth/authorize")
             .map_err(|_| OAuthError::configuration())?;
@@ -351,7 +352,7 @@ impl OAuthService {
             )
             .map_err(|error| match error {
                 StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
-                _ => OAuthError::server(),
+                unexpected => self.store_server_error("take_authorization", &unexpected),
             })?;
         let identity = self
             .github
@@ -363,7 +364,7 @@ impl OAuthService {
         let client = self
             .store
             .client(&pending.client_id)
-            .map_err(map_store_server_error)?
+            .map_err(|error| self.store_server_error("load_callback_client", &error))?
             .ok_or_else(OAuthError::invalid_client)?;
         let csrf = generate_secret()?;
         let id = Uuid::new_v4();
@@ -384,7 +385,7 @@ impl OAuthService {
                 subject: format!("github:{}", identity.id),
                 expires_at: Utc::now() + CONSENT_TTL,
             })
-            .map_err(map_store_server_error)?;
+            .map_err(|error| self.store_server_error("store_consent", &error))?;
         Ok(ConsentChallenge {
             id,
             csrf,
@@ -415,7 +416,7 @@ impl OAuthService {
             )
             .map_err(|error| match error {
                 StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
-                _ => OAuthError::server(),
+                unexpected => self.store_server_error("take_consent", &unexpected),
             })?;
         if decision == ConsentDecision::Deny {
             return Ok(ConsentResult {
@@ -440,7 +441,7 @@ impl OAuthService {
                 subject: consent.subject,
                 expires_at: Utc::now() + AUTHORIZATION_CODE_TTL,
             })
-            .map_err(map_store_server_error)?;
+            .map_err(|error| self.store_server_error("store_authorization_code", &error))?;
         let mut redirect = consent.redirect_uri;
         redirect
             .query_pairs_mut()
@@ -512,7 +513,7 @@ impl OAuthService {
             }
             _ => return Err(OAuthError::unsupported_grant()),
         }
-        .map_err(|error| map_store_grant_error(&error))?;
+        .map_err(|error| self.store_grant_error("issue_token", error))?;
         Ok(token_response(access, refresh, grant))
     }
 
@@ -525,10 +526,10 @@ impl OAuthService {
         // revocation.
         self.store
             .revoke_token(&self.hasher.hash(HashPurpose::AccessToken, &request.token))
-            .map_err(map_store_server_error)?;
+            .map_err(|error| self.store_server_error("revoke_access_token", &error))?;
         self.store
             .revoke_token(&self.hasher.hash(HashPurpose::RefreshToken, &request.token))
-            .map_err(map_store_server_error)
+            .map_err(|error| self.store_server_error("revoke_refresh_token", &error))
     }
 
     pub fn authenticate_access(
@@ -558,10 +559,18 @@ impl OAuthService {
                 &self.hasher.hash(HashPurpose::AccessToken, raw_token),
                 Utc::now(),
             )
-            .map_err(map_store_server_error)?
+            .map_err(|error| self.store_server_error("authenticate_access_token", &error))?
             .ok_or_else(OAuthError::invalid_grant)?;
         grant.scopes = grant.scopes.constrained_by(local_policy);
         Ok(grant)
+    }
+
+    fn store_server_error(&self, operation: &'static str, error: &StoreError) -> OAuthError {
+        map_store_server_error_for(&self.config.connector_id, operation, error)
+    }
+
+    fn store_grant_error(&self, operation: &'static str, error: StoreError) -> OAuthError {
+        map_store_grant_error_for(&self.config.connector_id, operation, error)
     }
 }
 
@@ -674,17 +683,31 @@ fn authorization_error_redirect(mut redirect: Url, error: &str, state: &str, iss
     redirect
 }
 
-fn map_store_server_error(_error: StoreError) -> OAuthError {
+fn map_store_server_error_for(
+    connector_id: &str,
+    operation: &'static str,
+    error: &StoreError,
+) -> OAuthError {
+    diagnostics::log_store_error(connector_id, operation, error);
     OAuthError::server()
 }
 
-fn map_store_grant_error(error: &StoreError) -> OAuthError {
+fn map_store_grant_error_for(
+    connector_id: &str,
+    operation: &'static str,
+    error: StoreError,
+) -> OAuthError {
     match error {
         StoreError::InvalidGrant | StoreError::NotFound | StoreError::RefreshReuse => {
             OAuthError::invalid_grant()
         }
-        _ => OAuthError::server(),
+        unexpected => map_store_server_error_for(connector_id, operation, &unexpected),
     }
+}
+
+#[cfg(test)]
+fn map_store_server_error(error: &StoreError) -> OAuthError {
+    map_store_server_error_for("test-connector", "test_store_operation", error)
 }
 
 #[cfg(test)]
@@ -735,7 +758,8 @@ mod tests {
     }
 
     fn service() -> Result<OAuthService, OAuthError> {
-        let store = SqliteOAuthStore::in_memory().map_err(map_store_server_error)?;
+        let store =
+            SqliteOAuthStore::in_memory().map_err(|error| map_store_server_error(&error))?;
         service_with_store(Arc::new(store))
     }
 
@@ -848,7 +872,7 @@ mod tests {
         let stored = service
             .store
             .client(&client.client_id)
-            .map_err(map_store_server_error)?
+            .map_err(|error| map_store_server_error(&error))?
             .ok_or_else(OAuthError::server)?;
         let start = service.begin_authorization(AuthorizationRequest {
             response_type: "code".to_owned(),
@@ -900,7 +924,7 @@ mod tests {
         let stored = service
             .store
             .client(&response.client_id)
-            .map_err(map_store_server_error)?
+            .map_err(|error| map_store_server_error(&error))?
             .ok_or_else(OAuthError::server)?;
         assert_eq!(stored.scopes.to_space_delimited(), "machine:read");
         Ok(())
@@ -1057,14 +1081,14 @@ mod tests {
         let database = directory.path().join("state").join("state.db");
         {
             let store = SqliteOAuthStore::open_scoped(&database, "test-connector")
-                .map_err(map_store_server_error)?;
+                .map_err(|error| map_store_server_error(&error))?;
             let service = service_with_store(Arc::new(store))?;
             for _ in 0..REGISTRATIONS_PER_SOURCE_WINDOW {
                 register(&service)?;
             }
         }
         let store = SqliteOAuthStore::open_scoped(&database, "test-connector")
-            .map_err(map_store_server_error)?;
+            .map_err(|error| map_store_server_error(&error))?;
         let restarted = service_with_store(Arc::new(store))?;
         assert!(matches!(
             register(&restarted),
@@ -1174,6 +1198,18 @@ mod tests {
                 .is_ok()
         );
         Ok(())
+    }
+
+    #[test]
+    fn internal_store_failure_keeps_the_public_oauth_error_generic() {
+        let error = map_store_server_error_for(
+            "connector-a",
+            "load_client",
+            &StoreError::Corrupt("sensitive internal detail"),
+        );
+        assert_eq!(error.code, crate::OAuthErrorCode::ServerError);
+        assert_eq!(error.description(), "The authorization service failed.");
+        assert!(!error.to_string().contains("sensitive internal detail"));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! continues to listen only on loopback.
 
 mod crypto;
+mod diagnostics;
 mod error;
 mod github;
 mod http;

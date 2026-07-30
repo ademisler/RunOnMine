@@ -23,8 +23,8 @@ use runonmine_core::{
 };
 use runonmine_oauth::{
     GitHubApiOwnerVerifier, GitHubIdentity, GitHubIdentityObservationError, GitHubIdentityObserver,
-    OAuthService, OAuthServiceConfig, ObservedGitHubOwnerVerifier, ScopeSet, SqliteOAuthStore,
-    TokenHasher, oauth_router,
+    OAuthErrorCode, OAuthService, OAuthServiceConfig, ObservedGitHubOwnerVerifier, ScopeSet,
+    SqliteOAuthStore, TokenHasher, oauth_router,
 };
 use secrecy::ExposeSecret;
 use subtle::ConstantTimeEq;
@@ -36,6 +36,7 @@ use url::Url;
 use super::{
     IdleSessionManager, REQUEST_ACCESS, REQUEST_RUNTIME, RequestAccess, RequestPrincipal,
     RunOnMineServer, Runtime, TOOL_CAPABILITIES,
+    diagnostics::{self, DiagnosticCategory},
     managed_connectors::{
         ConnectorRuntimePhase, ConnectorRuntimeRegistry, ConnectorRuntimeStatus,
         ConnectorStartupFailure, ConnectorStartupStage, start_external_connectors,
@@ -129,12 +130,14 @@ impl GitHubIdentityObserver for OAuthOwnerLoginObserver {
                 Ok(())
             }
             Ok(false) => Ok(()),
-            Err(error) => {
-                tracing::error!(
-                    connector_id = %self.connector_id,
-                    owner_id = identity.id,
-                    error_category = %error.root_cause(),
-                    "failed to reconcile OAuth owner display login"
+            Err(_) => {
+                diagnostics::log_internal(
+                    diagnostics::current_request_id(),
+                    &self.connector_id,
+                    DiagnosticCategory::ConnectorConfig,
+                    "reconcile_oauth_owner_display_login",
+                    None,
+                    None,
                 );
                 Err(GitHubIdentityObservationError::new())
             }
@@ -555,6 +558,14 @@ fn validate_256_bit_url_secret(value: &str, label: &str) -> Result<()> {
 
 async fn http_connector_auth(
     State(state): State<Arc<HttpConnectorState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    diagnostics::scope_request(http_connector_auth_inner(state, request, next)).await
+}
+
+async fn http_connector_auth_inner(
+    state: Arc<HttpConnectorState>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -609,95 +620,158 @@ fn select_http_connector(
 ) -> Result<(Runtime, RequestAccess), Response> {
     let path = request.uri().path();
     if path != "/mcp" {
-        let Some(supplied) = path
-            .strip_prefix('/')
-            .and_then(|value| value.strip_suffix("/mcp"))
-            .filter(|value| !value.is_empty() && !value.contains('/'))
-        else {
-            return Err(StatusCode::NOT_FOUND.into_response());
-        };
-        let Some(quick) = &state.quick else {
-            return Err(StatusCode::NOT_FOUND.into_response());
-        };
-        let expected_secret = default_secret_store(&quick.paths)
-            .and_then(|store| {
-                store.get(&format!(
-                    "connector.{}.path_secret",
-                    quick.runtime.0.connector_id
-                ))
-            })
-            .ok()
-            .flatten();
-        let Some(expected_secret) = expected_secret else {
-            return Err(StatusCode::NOT_FOUND.into_response());
-        };
-        let expected = expected_secret.expose_secret().as_bytes();
-        let matches =
-            supplied.len() == expected.len() && bool::from(supplied.as_bytes().ct_eq(expected));
-        if !matches {
-            return Err(StatusCode::NOT_FOUND.into_response());
-        }
-        return Ok((
-            quick.runtime.clone(),
-            RequestAccess {
-                connector_id: quick.runtime.0.connector_id.clone(),
-                principal: RequestPrincipal::QuickTunnel,
-            },
-        ));
+        return select_quick_connector(state, path);
     }
-
     let authority = request_authority(request)?;
+    if let Some(oauth) = &state.oauth
+        && matches_public_https_authority(&authority, &oauth.public_host)
+    {
+        return select_oauth_connector(oauth, request);
+    }
     let host = authority
         .host()
         .trim_matches(['[', ']'])
         .to_ascii_lowercase();
-    if let Some(oauth) = &state.oauth
-        && matches_public_https_authority(&authority, &oauth.public_host)
-    {
-        let raw_token = bearer_token(request, &oauth.resource_metadata)?;
-        let connector = oauth
-            .runtime
-            .connector()
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
-        let policy_scopes = oauth_policy_scopes(&connector);
-        let grant = oauth
-            .service
-            .authenticate_access_token(raw_token, &policy_scopes)
-            .map_err(|_| unauthorized(&oauth.resource_metadata))?;
-        return Ok((
-            oauth.runtime.clone(),
-            RequestAccess {
-                connector_id: oauth.runtime.0.connector_id.clone(),
-                principal: RequestPrincipal::OAuth {
-                    client_id: grant.client_id,
-                    subject: grant.subject,
-                    scopes: grant.scopes,
-                },
-            },
-        ));
-    }
     if is_loopback_host(&host)
         && authority
             .port_u16()
             .is_none_or(|port| port == state.agent_port)
         && let Some(local) = &state.local
     {
-        let supplied = local_bearer_token(request)?;
-        let expected = local.token.expose_secret().as_bytes();
-        let matches =
-            supplied.len() == expected.len() && bool::from(supplied.as_bytes().ct_eq(expected));
-        if !matches {
-            return Err(local_unauthorized());
-        }
-        return Ok((
-            local.runtime.clone(),
-            RequestAccess {
-                connector_id: local.runtime.0.connector_id.clone(),
-                principal: RequestPrincipal::LocalHttp,
-            },
-        ));
+        return select_local_connector(local, request);
     }
     Err(StatusCode::NOT_FOUND.into_response())
+}
+
+#[allow(clippy::result_large_err)]
+fn select_quick_connector(
+    state: &HttpConnectorState,
+    path: &str,
+) -> Result<(Runtime, RequestAccess), Response> {
+    let Some(supplied) = path
+        .strip_prefix('/')
+        .and_then(|value| value.strip_suffix("/mcp"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
+    let Some(quick) = &state.quick else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
+    let Some(expected_secret) = quick_path_secret(quick) else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
+    let expected = expected_secret.expose_secret().as_bytes();
+    let matches =
+        supplied.len() == expected.len() && bool::from(supplied.as_bytes().ct_eq(expected));
+    if !matches {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+    Ok((
+        quick.runtime.clone(),
+        RequestAccess {
+            connector_id: quick.runtime.0.connector_id.clone(),
+            principal: RequestPrincipal::QuickTunnel,
+        },
+    ))
+}
+
+fn quick_path_secret(quick: &QuickHttpConnector) -> Option<secrecy::SecretString> {
+    let secret_key = format!("connector.{}.path_secret", quick.runtime.0.connector_id);
+    let Ok(store) = default_secret_store(&quick.paths) else {
+        diagnostics::log_internal(
+            diagnostics::current_request_id(),
+            &quick.runtime.0.connector_id,
+            DiagnosticCategory::Storage,
+            "open_quick_secret_store",
+            None,
+            None,
+        );
+        return None;
+    };
+    let Ok(secret) = store.get(&secret_key) else {
+        diagnostics::log_internal(
+            diagnostics::current_request_id(),
+            &quick.runtime.0.connector_id,
+            DiagnosticCategory::Storage,
+            "read_quick_path_secret",
+            None,
+            None,
+        );
+        return None;
+    };
+    secret
+}
+
+#[allow(clippy::result_large_err)]
+fn select_oauth_connector(
+    oauth: &OAuthHttpConnector,
+    request: &Request,
+) -> Result<(Runtime, RequestAccess), Response> {
+    let raw_token = bearer_token(request, &oauth.resource_metadata)?;
+    let connector = oauth.runtime.connector().map_err(|_| {
+        diagnostics::log_internal(
+            diagnostics::current_request_id(),
+            &oauth.runtime.0.connector_id,
+            DiagnosticCategory::ConnectorConfig,
+            "load_oauth_connector_policy",
+            None,
+            None,
+        );
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    })?;
+    let policy_scopes = oauth_policy_scopes(&connector);
+    let grant = oauth
+        .service
+        .authenticate_access_token(raw_token, &policy_scopes)
+        .map_err(|error| {
+            if matches!(
+                error.code,
+                OAuthErrorCode::ServerError | OAuthErrorCode::TemporarilyUnavailable
+            ) {
+                diagnostics::log_internal(
+                    diagnostics::current_request_id(),
+                    &oauth.runtime.0.connector_id,
+                    DiagnosticCategory::Authorization,
+                    "authenticate_oauth_access_token",
+                    None,
+                    None,
+                );
+            }
+            unauthorized(&oauth.resource_metadata)
+        })?;
+    Ok((
+        oauth.runtime.clone(),
+        RequestAccess {
+            connector_id: oauth.runtime.0.connector_id.clone(),
+            principal: RequestPrincipal::OAuth {
+                client_id: grant.client_id,
+                subject: grant.subject,
+                scopes: grant.scopes,
+            },
+        },
+    ))
+}
+
+#[allow(clippy::result_large_err)]
+fn select_local_connector(
+    local: &LocalHttpConnector,
+    request: &Request,
+) -> Result<(Runtime, RequestAccess), Response> {
+    let supplied = local_bearer_token(request)?;
+    let expected = local.token.expose_secret().as_bytes();
+    let matches =
+        supplied.len() == expected.len() && bool::from(supplied.as_bytes().ct_eq(expected));
+    if !matches {
+        return Err(local_unauthorized());
+    }
+    Ok((
+        local.runtime.clone(),
+        RequestAccess {
+            connector_id: local.runtime.0.connector_id.clone(),
+            principal: RequestPrincipal::LocalHttp,
+        },
+    ))
 }
 
 #[allow(clippy::result_large_err)]
