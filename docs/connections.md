@@ -128,6 +128,24 @@ targeting `runonmine mcp stdio --connector <id>`, and stores the runtime API key
 in the operating-system credential store. `runonmine doctor` checks binary,
 profile, and health status without printing the key.
 
+Creation follows a guarded prepare/validate/commit/activate transaction. The full
+candidate connector is validated before downloading or creating connector
+artifacts. A missing managed tunnel client is downloaded, digest-verified and
+probed in an owner-private staging directory; profile `init`, runtime-key
+`doctor`, and health-file preparation also use private staging paths. Only after
+those checks succeed are configuration and the credential committed under the
+configuration lock. The binary/receipt and connector data/state directories are
+then activated from the same filesystems. A handled secret write, activation or
+post-activation integrity failure restores the prior configuration and secret
+values and removes only artifacts proven to belong to that transaction.
+
+An existing managed binary is reused only when both its private receipt and
+SHA-256 identity verify and its version probe succeeds. A symlink, incomplete
+binary/receipt pair, or integrity-invalid existing installation is left untouched
+and fails closed with a repair/removal error; setup never deletes or replaces it
+before the connector commit. Explicit absolute user-supplied binaries are
+verified and probed but never modified.
+
 Availability in ChatGPT depends on the user's current plan, workspace policy,
 and Developer Mode access. RunOnMine does not claim or bypass those permissions.
 

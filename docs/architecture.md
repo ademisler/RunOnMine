@@ -116,6 +116,24 @@ connector-scoped OAuth state and artifact directories. HTTP and stdio startup
 resume pending records before building any connector runtime; failed phases stay
 journaled for a later retry.
 
+## Transactional OpenAI connector creation
+
+OpenAI connector creation separates pure validation, private preparation,
+configuration/credential commit and artifact activation. Candidate configuration
+and connector-ID availability are checked first. Managed tunnel-client downloads,
+profile generation, `init`, `doctor` and health-file preparation occur only in
+owner-private staging locations on the destination filesystems. The configuration
+sidecar lock remains held while the validated connector and credential are saved
+and transaction-owned binary/receipt plus profile/state directories are
+activated.
+
+Activation uses no-overwrite same-filesystem links or renames and transaction
+markers before exposing final paths. A handled activation error restores the
+previous configuration snapshot and secret values before unlocking, then removes
+only files whose digest/receipt or transaction marker proves ownership. Existing
+managed binary/receipt pairs are never repaired implicitly: incomplete, symlinked
+or integrity-invalid pairs fail closed without pre-commit replacement.
+
 ## Network ownership
 
 The MCP listener is fixed to `127.0.0.1:47821`; configuration validation rejects

@@ -2,6 +2,7 @@ use super::*;
 
 mod connector_transactions;
 mod connectors;
+mod openai_connector_transaction;
 #[cfg(test)]
 use connector_transactions::commit_new_connector;
 use connector_transactions::{local_http_secret_name, update_config_with_secrets};

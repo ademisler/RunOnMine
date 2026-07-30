@@ -312,6 +312,46 @@ fn rollback_before_unlock<T, S>(
     Err(error)
 }
 
+fn restore_config_snapshot(path: &Path, original: Option<&AppConfig>) -> Result<()> {
+    match original {
+        Some(config) => config.save_unlocked(path),
+        None => match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!("refusing to remove an unsafe configuration rollback target")
+            }
+            Ok(_) => {
+                fs::remove_file(path).context("failed to remove newly-created configuration")?;
+                #[cfg(unix)]
+                if let Some(parent) = path.parent() {
+                    File::open(parent)?.sync_all()?;
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("failed to inspect configuration rollback target"),
+        },
+    }
+}
+
+fn combine_activation_rollback_errors(
+    activation_error: anyhow::Error,
+    restore_result: Result<()>,
+    rollback_result: Result<()>,
+) -> anyhow::Error {
+    let mut details = Vec::new();
+    if let Err(error) = restore_result {
+        details.push(format!("configuration restore failed: {error:#}"));
+    }
+    if let Err(error) = rollback_result {
+        details.push(format!("external state rollback failed: {error:#}"));
+    }
+    if details.is_empty() {
+        activation_error
+    } else {
+        activation_error.context(details.join("; "))
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)
@@ -376,6 +416,43 @@ impl AppConfig {
         };
         if let Err(error) = config.save_unlocked(path) {
             return rollback_before_unlock(state, rollback, error);
+        }
+        Ok(output)
+    }
+
+    /// Saves a validated configuration mutation, then runs an activation step
+    /// while the configuration lock is still held. If activation fails, the
+    /// previous configuration snapshot and caller-owned external state are
+    /// restored before another process may acquire the lock.
+    pub fn update_with_activation<T, S>(
+        path: &Path,
+        state: &mut S,
+        update: impl FnOnce(&mut Self, &mut S) -> Result<T>,
+        activate: impl FnOnce(&T, &mut S) -> Result<()>,
+        rollback: impl FnOnce(&mut S) -> Result<()>,
+    ) -> Result<T> {
+        let _lock = ConfigFileLock::acquire(path)?;
+        let original = if path.exists() {
+            Some(Self::load(path)?)
+        } else {
+            None
+        };
+        let mut config = original.clone().unwrap_or_default();
+        let output = match update(&mut config, state) {
+            Ok(output) => output,
+            Err(error) => return rollback_before_unlock(state, rollback, error),
+        };
+        if let Err(error) = config.save_unlocked(path) {
+            return rollback_before_unlock(state, rollback, error);
+        }
+        if let Err(activation_error) = activate(&output, state) {
+            let restore_result = restore_config_snapshot(path, original.as_ref());
+            let rollback_result = rollback(state);
+            return Err(combine_activation_rollback_errors(
+                activation_error,
+                restore_result,
+                rollback_result,
+            ));
         }
         Ok(output)
     }
@@ -947,6 +1024,147 @@ mod tests {
         let loaded = AppConfig::load(&path)?;
         assert_eq!(loaded.port, AppConfig::default().port);
         assert_eq!(loaded.default_preset, PolicyPreset::Developer);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_activation_restores_config_and_external_state_before_unlock() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        let original = AppConfig::default();
+        original.save(&path)?;
+        let mut state = Vec::<&'static str>::new();
+        let result: Result<()> = AppConfig::update_with_activation(
+            &path,
+            &mut state,
+            |config, state| {
+                config.default_preset = PolicyPreset::Developer;
+                state.push("updated");
+                Ok(())
+            },
+            |(), state| {
+                state.push("activation_failed");
+                bail!("injected activation failure")
+            },
+            |state| {
+                state.push("rolled_back");
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            AppConfig::load(&path)?.default_preset,
+            original.default_preset
+        );
+        assert_eq!(state, ["updated", "activation_failed", "rolled_back"]);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_activation_removes_a_newly_created_config() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        let mut rolled_back = false;
+        let result: Result<()> = AppConfig::update_with_activation(
+            &path,
+            &mut rolled_back,
+            |config, _state| {
+                config.default_preset = PolicyPreset::Developer;
+                Ok(())
+            },
+            |(), _state| bail!("injected activation failure"),
+            |state| {
+                *state = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(rolled_back);
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn competing_update_waits_for_activation_rollback() -> Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        AppConfig::default().save(&path)?;
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let failing_path = path.clone();
+        let failing = std::thread::spawn(move || -> Result<()> {
+            let mut state = (started_tx, release_rx);
+            let result: Result<()> = AppConfig::update_with_activation(
+                &failing_path,
+                &mut state,
+                |config, _state| {
+                    config.default_preset = PolicyPreset::Developer;
+                    Ok(())
+                },
+                |(), (started, release)| {
+                    started.send(())?;
+                    release.recv()?;
+                    bail!("injected activation failure")
+                },
+                |_state| Ok(()),
+            );
+            assert!(result.is_err());
+            Ok(())
+        });
+        started_rx.recv()?;
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let competing_path = path.clone();
+        let competing = std::thread::spawn(move || -> Result<()> {
+            AppConfig::update(&competing_path, |config| {
+                config.port = config.port.saturating_add(1);
+                Ok(())
+            })?;
+            done_tx.send(())?;
+            Ok(())
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        release_tx.send(())?;
+        done_rx.recv_timeout(Duration::from_secs(5))?;
+        failing
+            .join()
+            .map_err(|_| anyhow::anyhow!("activation transaction thread panicked"))??;
+        competing
+            .join()
+            .map_err(|_| anyhow::anyhow!("competing config thread panicked"))??;
+        let loaded = AppConfig::load(&path)?;
+        assert_eq!(loaded.default_preset, AppConfig::default().default_preset);
+        assert_eq!(loaded.port, AppConfig::default().port + 1);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_activation_keeps_the_committed_configuration() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        AppConfig::default().save(&path)?;
+        let mut activated = false;
+        AppConfig::update_with_activation(
+            &path,
+            &mut activated,
+            |config, _state| {
+                config.default_preset = PolicyPreset::Developer;
+                Ok(())
+            },
+            |(), state| {
+                *state = true;
+                Ok(())
+            },
+            |_state| Ok(()),
+        )?;
+        assert!(activated);
+        assert_eq!(
+            AppConfig::load(&path)?.default_preset,
+            PolicyPreset::Developer
+        );
         Ok(())
     }
 

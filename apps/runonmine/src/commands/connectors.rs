@@ -2,6 +2,10 @@ use super::connector_transactions::{
     commit_new_connector, disable_local_http_transactionally, enable_local_http_transactionally,
     ensure_connector_credentials, local_http_secret_name, update_config_with_secrets,
 };
+use super::openai_connector_transaction::{
+    OpenAiBinaryStaging, OpenAiConnectorStaging, commit_prepared_openai_connector,
+    validate_new_openai_connector,
+};
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use std::io::Read as _;
@@ -387,27 +391,45 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
         }
         ConnectCommand::Openai(args) => {
             validate_profile_name(&args.profile)?;
-            let binary = ensure_binary(
-                &paths,
-                BinaryKind::OpenAiTunnelClient,
-                ReleaseProvider::OpenAiTunnelClient,
-                args.tunnel_client.as_deref(),
-            )
-            .await?;
             let tunnel_id = value_or_prompt(args.tunnel_id, "OpenAI tunnel ID: ")?;
             let api_key = read_secret(args.api_key_stdin, "OpenAI runtime API key: ")?;
             if api_key.trim().is_empty() {
                 bail!("runtime API key must not be empty");
             }
             let id = Uuid::new_v4().to_string();
-            let profile_directory = paths
-                .data_dir
-                .join("connectors")
-                .join(&id)
-                .join("openai-profiles");
-            ensure_private_directory(&profile_directory)?;
-            let health_directory = paths.state_dir.join("connectors").join(&id);
-            ensure_private_directory(&health_directory)?;
+            let configured_binary_path =
+                OpenAiBinaryStaging::configured_path(&paths, args.tunnel_client.as_deref())?;
+            let connector = validate_new_openai_connector(
+                &paths,
+                &config_path,
+                ConnectorConfig {
+                    id: id.clone(),
+                    name: "OpenAI Secure MCP Tunnel".to_owned(),
+                    kind: ConnectorKind::OpenAiTunnel,
+                    enabled: true,
+                    policy_preset: PolicyPreset::Safe,
+                    pack_overrides: BTreeMap::default(),
+                    tool_overrides: BTreeMap::default(),
+                    policy_rules: Vec::new(),
+                    public_base_url: None,
+                    cloudflare_quick: None,
+                    cloudflare_named: None,
+                    oauth_owner: None,
+                    openai_tunnel: Some(OpenAiTunnelSettings {
+                        tunnel_id: tunnel_id.clone(),
+                        profile: args.profile.clone(),
+                        tunnel_client_path: Some(configured_binary_path.clone()),
+                        health_port: 47_823,
+                    }),
+                },
+            )?;
+            let binary =
+                OpenAiBinaryStaging::prepare(&paths, args.tunnel_client.as_deref()).await?;
+            if binary.configured_binary_path() != configured_binary_path {
+                bail!("prepared OpenAI tunnel-client path changed during setup");
+            }
+            let staging = OpenAiConnectorStaging::prepare(&paths, &id)?;
+            let profile_directory = staging.profile_directory();
             let profile = OpenAiTunnelProfile::builder(
                 &args.profile,
                 &tunnel_id,
@@ -415,10 +437,10 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             )
             .profile_directory(profile_directory.clone())
             .health_address("127.0.0.1:47823".parse()?)
-            .health_url_file(health_directory.join("tunnel-health.url"))
+            .health_url_file(staging.health_directory().join("tunnel-health.url"))
             .build()?;
             let initialized = run_once(
-                profile.init_command(&binary)?,
+                profile.init_command(binary.binary())?,
                 std::time::Duration::from_secs(30),
                 128 * 1_024,
             )
@@ -428,7 +450,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             }
             restrict_private_file(&profile_directory.join(format!("{}.yaml", args.profile)))?;
             let doctor = run_once(
-                profile.doctor_command(&binary, SecretValue::new(api_key.clone())?)?,
+                profile.doctor_command(binary.binary(), SecretValue::new(api_key.clone())?)?,
                 std::time::Duration::from_secs(30),
                 256 * 1_024,
             )
@@ -436,27 +458,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             if !doctor.success {
                 bail!("tunnel-client doctor failed; verify tunnel permissions and the runtime key");
             }
-            let connector = ConnectorConfig {
-                id: id.clone(),
-                name: "OpenAI Secure MCP Tunnel".to_owned(),
-                kind: ConnectorKind::OpenAiTunnel,
-                enabled: true,
-                policy_preset: PolicyPreset::Safe,
-                pack_overrides: BTreeMap::default(),
-                tool_overrides: BTreeMap::default(),
-                policy_rules: Vec::new(),
-                public_base_url: None,
-                cloudflare_quick: None,
-                cloudflare_named: None,
-                oauth_owner: None,
-                openai_tunnel: Some(OpenAiTunnelSettings {
-                    tunnel_id,
-                    profile: args.profile,
-                    tunnel_client_path: Some(binary.path),
-                    health_port: 47_823,
-                }),
-            };
-            commit_new_connector(
+            commit_prepared_openai_connector(
                 connector,
                 &paths,
                 &config_path,
@@ -465,6 +467,8 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     format!("connector.{id}.runtime_api_key"),
                     SecretString::from(api_key),
                 )],
+                binary,
+                staging,
             )?;
             println!("Created OpenAI Secure MCP Tunnel connector {id}.");
         }
