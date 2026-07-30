@@ -104,6 +104,37 @@ Flag values use the same schemas. A flag may be supplied as `--flag value` or
 `--flag=value`, but its normalized name, value type, and repeatability must match
 the profile exactly.
 
+## Executable identity and spawn races
+
+Executable installation and every execution request use an open file handle,
+not a path-only `canonicalize`/hash decision. The final component is opened
+without following symlinks where the platform supports that flag. RunOnMine
+records the canonical identity and SHA-256 from the opened file, checks that the
+handle identity remains stable while hashing, and hashes the same open handle
+again immediately before process creation.
+
+Platform behavior differs:
+
+- **Linux:** the verified descriptor has `FD_CLOEXEC` removed only for the
+  imminent child and the process is launched through `/proc/self/fd/<fd>`.
+  Replacing the original pathname therefore cannot change the inode that is
+  executed. The read-only descriptor remains inherited so verified scripts with
+  a shebang also continue to resolve their descriptor path.
+- **Windows:** the executable is opened with `FILE_FLAG_OPEN_REPARSE_POINT` and
+  only `FILE_SHARE_READ`. The retained handle blocks write/delete/replace opens
+  while process creation is in progress. Volume serial, file index, size,
+  last-write identity, reparse attributes and SHA-256 are checked again before
+  `CreateProcess` is reached.
+- **macOS and other supported Unix platforms:** RunOnMine retains the verified
+  descriptor, compares device/inode identity, reopens the canonical pathname,
+  and compares identity plus SHA-256 immediately before spawn. This sharply
+  narrows the path replacement window but does not claim the same handle-exec
+  guarantee as Linux.
+
+An in-place write to the already opened inode changes its digest and is rejected
+before spawn. A privileged actor that can alter kernel behavior or modify the
+file after the final platform check remains outside the helper's threat model.
+
 ## Policy upgrade
 
 The installed helper policy format is version `2`. Version `1` policies allowed

@@ -3,8 +3,10 @@
 #![allow(unsafe_code)] // Audited Win32 FFI is confined to this module.
 
 use std::ffi::{OsStr, c_void};
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt as _;
+use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -28,8 +30,10 @@ use windows_sys::Win32::Security::{
     TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_WRITE_DATA,
-    GetFileAttributesW, INVALID_FILE_ATTRIBUTES, SECURITY_IDENTIFICATION, WRITE_DAC, WRITE_OWNER,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DELETE_CHILD, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_WRITE_DATA,
+    GetFileAttributesW, GetFileInformationByHandle, INVALID_FILE_ATTRIBUTES,
+    SECURITY_IDENTIFICATION, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, ImpersonateNamedPipeClient};
 use windows_sys::Win32::System::Threading::{
@@ -50,6 +54,49 @@ const TRUSTED_INSTALLER_SID: &str =
     "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 const LOW_PRIVILEGE_SIDS: &[&str] = &["S-1-1-0", "S-1-5-11", "S-1-5-32-545"];
 const MAX_CONCURRENT_CLIENTS: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FileIdentity {
+    attributes: u32,
+    volume_serial: u32,
+    file_index: u64,
+    file_size: u64,
+    last_write: u64,
+}
+
+pub(super) fn open_privileged_program(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .with_context(|| format!("failed to lock admin executable {}", path.display()))?;
+    let identity = file_identity(&file)?;
+    if identity.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("admin executable handle resolved to a reparse point");
+    }
+    Ok(file)
+}
+
+pub(super) fn file_identity(file: &File) -> Result<FileIdentity> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let handle = file.as_raw_handle().cast::<c_void>();
+    // SAFETY: handle is retained by File for this complete synchronous query and
+    // information points to initialized writable storage of the documented type.
+    if unsafe { GetFileInformationByHandle(handle, &raw mut information) } == 0 {
+        return Err(io::Error::last_os_error())
+            .context("failed to inspect a locked admin executable");
+    }
+    Ok(FileIdentity {
+        attributes: information.dwFileAttributes,
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: u64::from(information.nFileIndexHigh) << 32
+            | u64::from(information.nFileIndexLow),
+        file_size: u64::from(information.nFileSizeHigh) << 32 | u64::from(information.nFileSizeLow),
+        last_write: u64::from(information.ftLastWriteTime.dwHighDateTime) << 32
+            | u64::from(information.ftLastWriteTime.dwLowDateTime),
+    })
+}
 
 pub(super) async fn client_request(
     owner: &OwnerIdentity,

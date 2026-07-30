@@ -68,3 +68,8 @@ The optional root helper uses `SO_PEERCRED`, restricts its Unix socket to the
 installing user, and is not installed by either service command.
 
 Arguments are additionally restricted by the installed executable-specific command profile; an executable added with `--allow-program` alone accepts no arguments.
+
+Privileged helper execution is inode-pinned. The root-owned executable is opened
+with `O_NOFOLLOW`, verified and hashed through that handle, rehashed immediately
+before spawn, and executed through `/proc/self/fd/<fd>`. A pathname replacement
+after authorization cannot redirect the child to a different inode.

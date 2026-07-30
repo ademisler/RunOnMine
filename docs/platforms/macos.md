@@ -27,3 +27,8 @@ The existing `com.idemasler.macmcp.*` services, port `45799`, and MacMCP config,
 logs, and data are outside RunOnMine's ownership and must not be modified.
 
 Arguments are additionally restricted by the installed executable-specific command profile; an executable added with `--allow-program` alone accepts no arguments.
+
+The privileged helper retains the verified executable descriptor and compares
+its device/inode identity and SHA-256 with a freshly opened canonical path
+immediately before spawn. This narrows the replacement window; unlike Linux,
+the current macOS implementation does not claim descriptor-path execution.

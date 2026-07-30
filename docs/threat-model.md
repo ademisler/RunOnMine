@@ -53,6 +53,7 @@ compromised.
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
 | An alternate executable path spelling avoids a canonical admin policy rule | MCP authorization and helper allowlist installation share the same root/SYSTEM-owned, non-symlink canonical program identity |
 | A hash-pinned helper executable is abused through dangerous subcommands, flags, response files, or path arguments | executable-specific command schemas; exact subcommand and positional sequence; allowlisted typed flag values; deny-first forbidden flags; response-file rejection; canonical existing/create path roots; argument-free compatibility entries |
+| An allowlisted helper executable is replaced between verification and process creation | opened-file identity and SHA-256 verification; `O_NOFOLLOW`; Linux execution through the verified `/proc/self/fd` inode; Windows read-sharing-only handle and volume/file-index checks; immediate handle/path identity and digest revalidation on other platforms |
 | Browser automation reaches an unrelated daily profile or internal network through a popup, worker, background target, WebSocket, mixed DNS answer, or DNS rebinding | isolated profile by default; process-wide loopback proxy with no implicit bypass; QUIC and non-proxied WebRTC UDP disabled; every connection re-resolves and rejects any mixed/private answer before exact-IP connect; CDP URL checks remain defense in depth; protected external CDP fails closed |
 | Audit rows are edited or reordered | BLAKE3 hash chain, retained chain anchor, startup and doctor verification |
 | A stale refresh token is replayed | one-time rotation and family-wide revocation on reuse |
@@ -91,3 +92,11 @@ with user-accessible files and UI outside RunOnMine's control.
 Quick Tunnel with no user identity is a temporary development mode, not a substitute for OAuth. Its secret path is a bearer credential and is rotated by the emergency lock. Browser destination validation occurs before navigation, after the final navigation result, during CDP Fetch interception, and at the browser-process-wide proxy for every HTTP(S) or WebSocket connection. The proxy is not a defense against a compromised Chromium process or another malicious process already running as the same user.
 Unsigned beta packages provide checksums and SBOMs but no publisher identity,
 notarization, or code-signing guarantee.
+
+The helper's executable check and process creation are tied to one retained
+file handle. Linux executes the verified inode through `/proc/self/fd`, while
+Windows keeps a handle whose sharing mode prevents write, delete, or replacement
+until the process has been created. macOS and other Unix builds revalidate the
+retained handle against a freshly opened canonical path and digest immediately
+before spawn; this is risk reduction rather than a kernel-level immutable-exec
+guarantee. Root/SYSTEM or kernel compromise remains out of scope.

@@ -2,11 +2,12 @@
 //!
 //! The helper is deliberately not a shell. It accepts an absolute executable
 //! only when that exact, root-controlled file was allowlisted at installation
-//! time and its SHA-256 digest still matches. The transport additionally
+//! time, its SHA-256 digest still matches, and execution remains tied to a
+//! retained verified file handle through process creation. The transport additionally
 //! authenticates the operating-system identity of every peer.
 
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,13 +17,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use command_group::AsyncCommandGroup as _;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
 
 mod arguments;
+mod executable;
 mod service;
 
 #[cfg(unix)]
@@ -74,17 +74,7 @@ impl OwnerIdentity {
 /// Policy evaluation and helper allowlist installation use this same function so
 /// alternate path spellings cannot bypass an executable resource rule.
 pub fn canonical_program_identity(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute() {
-        bail!("an admin executable must be an absolute path");
-    }
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect admin executable {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("admin executable must be a regular, non-symlink file");
-    }
-    validate_privileged_program_ownership(path, &metadata)?;
-    path.canonicalize()
-        .with_context(|| format!("failed to resolve admin executable {}", path.display()))
+    executable::inspect_path(path).map(|(canonical_path, _sha256)| canonical_path)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,8 +126,7 @@ impl AllowedProgram {
 
     pub fn inspect_rule(rule: AdminProgramRule) -> Result<Self> {
         let rule = rule.normalize()?;
-        let canonical_path = canonical_program_identity(&rule.program)?;
-        let sha256 = sha256_file(&canonical_path)?;
+        let (canonical_path, sha256) = executable::inspect_path(&rule.program)?;
         Ok(Self {
             canonical_path,
             sha256,
@@ -145,39 +134,21 @@ impl AllowedProgram {
         })
     }
 
-    fn matches_program(&self, requested: &Path) -> Result<bool> {
-        if !requested.is_absolute() {
-            return Ok(false);
-        }
-        let Ok(metadata) = fs::symlink_metadata(requested) else {
-            return Ok(false);
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Ok(false);
-        }
-        validate_privileged_program_ownership(requested, &metadata)?;
-        let Ok(canonical) = requested.canonicalize() else {
-            return Ok(false);
-        };
-        if canonical != self.canonical_path {
-            return Ok(false);
-        }
-        let actual_hash = sha256_file(&canonical)?;
-        Ok(bool::from(
-            actual_hash.as_bytes().ct_eq(self.sha256.as_bytes()),
-        ))
-    }
-
-    fn permits(&self, execution: &AdminExecution) -> Result<bool> {
-        if !self.matches_program(&execution.program)? {
-            return Ok(false);
-        }
+    fn prepare(
+        &self,
+        execution: &AdminExecution,
+    ) -> Result<Option<executable::PreparedExecutable>> {
+        let mut arguments_allowed = false;
         for command in &self.commands {
             if command.permits(&execution.args)? {
-                return Ok(true);
+                arguments_allowed = true;
+                break;
             }
         }
-        Ok(false)
+        if !arguments_allowed {
+            return Ok(None);
+        }
+        executable::PreparedExecutable::open(self, &execution.program)
     }
 
     fn validate(&self) -> Result<()> {
@@ -270,14 +241,21 @@ impl AdminPolicy {
         Ok(policy)
     }
 
-    pub fn permits(&self, execution: &AdminExecution) -> Result<bool> {
+    fn prepare_execution(
+        &self,
+        execution: &AdminExecution,
+    ) -> Result<Option<executable::PreparedExecutable>> {
         execution.validate()?;
         for allowed in &self.allowed_programs {
-            if allowed.permits(execution)? {
-                return Ok(true);
+            if let Some(prepared) = allowed.prepare(execution)? {
+                return Ok(Some(prepared));
             }
         }
-        Ok(false)
+        Ok(None)
+    }
+
+    pub fn permits(&self, execution: &AdminExecution) -> Result<bool> {
+        Ok(self.prepare_execution(execution)?.is_some())
     }
 }
 
@@ -569,9 +547,9 @@ async fn handle_authenticated_request(
             HelperResponse::healthy(request_id, policy.allowed_programs.len())
         }
         AdminOperation::Execute(execution) => {
-            match policy.permits(&execution) {
-                Ok(true) => {}
-                Ok(false) => {
+            let prepared = match policy.prepare_execution(&execution) {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => {
                     return HelperResponse::rejected(
                         request_id,
                         "the privileged invocation is not permitted by the installed admin policy",
@@ -583,8 +561,8 @@ async fn handle_authenticated_request(
                         "the installed admin allowlist could not be verified",
                     );
                 }
-            }
-            match execute_program(&execution).await {
+            };
+            match execute_program(&execution, prepared).await {
                 Ok(output) => HelperResponse {
                     version: PROTOCOL_VERSION,
                     request_id,
@@ -611,9 +589,20 @@ struct ExecutionOutput {
     timed_out: bool,
 }
 
-async fn execute_program(execution: &AdminExecution) -> Result<ExecutionOutput> {
+static ADMIN_SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+async fn execute_program(
+    execution: &AdminExecution,
+    prepared: executable::PreparedExecutable,
+) -> Result<ExecutionOutput> {
     execution.validate()?;
-    let mut command = Command::new(&execution.program);
+    let mut command = Command::new(prepared.command_path());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        command.as_std_mut().arg0(prepared.canonical_path());
+    }
     command
         .args(&execution.args)
         .current_dir(platform_root_directory())
@@ -627,9 +616,19 @@ async fn execute_program(execution: &AdminExecution) -> Result<ExecutionOutput> 
     #[cfg(windows)]
     command.env("SystemRoot", windows::system_root());
 
-    let mut child = command
-        .group_spawn()
-        .context("failed to start an admin process")?;
+    let mut child = {
+        let _spawn_guard = ADMIN_SPAWN_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("privileged process spawn lock was poisoned"))?;
+        prepared.revalidate_before_spawn()?;
+        #[cfg(target_os = "linux")]
+        prepared.make_inheritable_for_spawn()?;
+        let child = command
+            .group_spawn()
+            .context("failed to start an admin process")?;
+        drop(prepared);
+        child
+    };
     let stdout = child
         .inner()
         .stdout
@@ -695,22 +694,6 @@ fn safe_admin_path() -> String {
         .join("System32")
         .to_string_lossy()
         .into_owned()
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).context("failed to open an admin executable")?;
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .context("failed to hash an admin executable")?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn reject_symlink(path: &Path, description: &str) -> Result<()> {
@@ -888,6 +871,29 @@ mod tests {
             HelperRequest::execute(program, vec!["-u".to_owned()], Duration::from_secs(1))?;
         let response = handle_authenticated_request(&policy, request).await;
         assert!(matches!(response.result, HelperResult::Rejected { .. }));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn prepared_linux_execution_spawns_the_verified_descriptor() -> Result<()> {
+        let program = PathBuf::from("/usr/bin/id");
+        let policy = AdminPolicy::build(
+            OwnerIdentity::UnixUid { uid: 1000 },
+            &[AdminProgramRule::no_arguments(program.clone())],
+        )?;
+        let execution = AdminExecution {
+            program,
+            args: Vec::new(),
+            timeout_ms: 5_000,
+        };
+        let prepared = policy
+            .prepare_execution(&execution)?
+            .context("test execution was not prepared")?;
+        let output = execute_program(&execution, prepared).await?;
+        assert_eq!(output.exit_code, Some(0));
+        assert!(!output.stdout.is_empty());
+        assert!(!output.timed_out);
         Ok(())
     }
 

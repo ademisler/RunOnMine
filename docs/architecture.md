@@ -116,3 +116,13 @@ listener or modify firewall rules.
 Cloudflare Quick Tunnel uses `/<secret>/mcp`. Named Tunnel uses `/mcp` plus the
 embedded OAuth endpoints. OpenAI Secure MCP Tunnel launches the official
 external client against `runonmine mcp stdio --connector <id>`.
+
+## Privileged executable preparation
+
+Privileged execution is prepared as a capability-like open executable object.
+Argument schemas are evaluated first; the selected root/SYSTEM-owned file is
+then opened without following the final symlink, identified and hashed from the
+handle, retained through process creation, and revalidated immediately before
+spawn. Linux launches the descriptor path itself; Windows holds a non-write/non-
+delete-sharing handle; other platforms compare the retained handle with the
+current canonical path at the last possible point.
