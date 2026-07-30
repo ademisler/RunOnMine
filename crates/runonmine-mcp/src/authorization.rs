@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::{PolicyMode, ResourceContext};
 use serde::Serialize;
 use url::Url;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum OwnedPolicyResource {
     None,
     Filesystem(PathBuf),
@@ -27,13 +27,68 @@ impl OwnedPolicyResource {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct OwnedPolicyResources(Vec<OwnedPolicyResource>);
 
 impl OwnedPolicyResources {
+    pub(super) fn browser(url: Url) -> Self {
+        Self(vec![OwnedPolicyResource::Browser(url)])
+    }
+
     pub(super) fn contexts(&self) -> impl Iterator<Item = ResourceContext<'_>> + '_ {
         self.0.iter().map(OwnedPolicyResource::as_context)
     }
+
+    pub(super) fn authorization_hash(&self, arguments: &impl Serialize) -> Result<String> {
+        let identities = self
+            .0
+            .iter()
+            .map(policy_resource_identity)
+            .collect::<Vec<_>>();
+        let bytes = serde_json::to_vec(&(arguments, identities))
+            .context("authorization identity serialization failed")?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"runonmine.authorization-with-resources.v1\0");
+        hasher.update(&bytes);
+        Ok(hasher.finalize().to_hex().to_string())
+    }
+}
+
+fn policy_resource_identity(resource: &OwnedPolicyResource) -> String {
+    match resource {
+        OwnedPolicyResource::None => "none".to_owned(),
+        OwnedPolicyResource::Filesystem(path) => format!("filesystem:{}", path.to_string_lossy()),
+        OwnedPolicyResource::Browser(url) => format!("browser:{}", browser_policy_origin(url)),
+        OwnedPolicyResource::Executable(path) => format!("executable:{}", path.to_string_lossy()),
+        OwnedPolicyResource::Command(command) => format!("command:{command}"),
+    }
+}
+
+pub(super) fn browser_policy_origin(url: &Url) -> String {
+    if matches!(url.scheme(), "http" | "https") {
+        url.origin().ascii_serialization()
+    } else {
+        url.as_str().to_owned()
+    }
+}
+
+pub(super) fn same_browser_policy_origin(left: &Url, right: &Url) -> bool {
+    browser_policy_origin(left) == browser_policy_origin(right)
+}
+
+pub(super) fn browser_authorization_arguments(
+    arguments: &impl Serialize,
+    current_url: &Url,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(arguments)?;
+    let object = value
+        .as_object_mut()
+        .context("browser tool arguments must serialize as an object")?;
+    object.insert(
+        "current_origin".to_owned(),
+        serde_json::Value::String(browser_policy_origin(current_url)),
+    );
+    Ok(value)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +234,79 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(paths, vec![root.path().join("private/file.txt")]);
+        Ok(())
+    }
+
+    #[test]
+    fn current_browser_resources_are_origin_bound_and_never_none() -> Result<()> {
+        let first = Url::parse("https://example.com/path?query=one")?;
+        let same_origin = Url::parse("https://example.com/other")?;
+        let other_origin = Url::parse("https://other.example/path")?;
+        let arguments = json!({"selector": "#submit"});
+
+        let first_resources = OwnedPolicyResources::browser(first.clone());
+        assert!(matches!(
+            first_resources.contexts().next(),
+            Some(ResourceContext::Browser(url)) if url == &first
+        ));
+        let first_arguments = browser_authorization_arguments(&arguments, &first)?;
+        let same_arguments = browser_authorization_arguments(&arguments, &same_origin)?;
+        let other_arguments = browser_authorization_arguments(&arguments, &other_origin)?;
+        let first_hash = first_resources.authorization_hash(&first_arguments)?;
+        let same_hash =
+            OwnedPolicyResources::browser(same_origin).authorization_hash(&same_arguments)?;
+        let other_hash =
+            OwnedPolicyResources::browser(other_origin).authorization_hash(&other_arguments)?;
+
+        assert_eq!(first_arguments["current_origin"], "https://example.com");
+        assert_eq!(first_hash, same_hash);
+        assert_ne!(first_hash, other_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn opaque_browser_pages_use_their_exact_policy_identity() -> Result<()> {
+        let blank = Url::parse("about:blank")?;
+        let data = Url::parse("data:text/plain,hello")?;
+        assert_eq!(browser_policy_origin(&blank), "about:blank");
+        assert!(!same_browser_policy_origin(&blank, &data));
+        Ok(())
+    }
+
+    #[test]
+    fn browser_origin_deny_is_evaluated_for_current_page_actions() -> Result<()> {
+        use runonmine_core::{
+            Capability, ConnectorConfig, PolicyContext, PolicyEngine, PolicyMode, PolicyRule,
+            PrincipalContext, PrincipalMatcher, ResourceMatcher,
+        };
+
+        let origin = Url::parse("https://denied.example/")?;
+        let page = Url::parse("https://denied.example/account")?;
+        let mut connector = ConnectorConfig::local_default();
+        connector.policy_rules.push(PolicyRule {
+            mode: PolicyMode::Deny,
+            principal: PrincipalMatcher::Any,
+            resource: ResourceMatcher::BrowserOrigin { origin },
+            tool: Some("browser_click".to_owned()),
+            capability: Some(Capability::BrowserAct),
+        });
+        let resources = OwnedPolicyResources::browser(page);
+        let decisions = resources
+            .contexts()
+            .map(|resource| {
+                PolicyEngine.evaluate_context(
+                    &connector,
+                    "browser_click",
+                    Capability::BrowserAct,
+                    &PolicyContext {
+                        principal: PrincipalContext::Local,
+                        resource,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].mode, PolicyMode::Deny);
         Ok(())
     }
 }

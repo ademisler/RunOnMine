@@ -53,6 +53,11 @@ rows carry a domain-separated fingerprint for local stdio, local HTTP, Quick
 Tunnel, or an exact OAuth client/subject pair. State-schema migration does not
 preserve grants that predate that identity boundary.
 
+Current-page browser operations add the normalized active origin to both policy
+context and the exact-action authorization identity. An inactive session uses
+`about:blank` without starting Chromium. The origin is read again after any local
+approval wait; a changed origin is re-authorized before the operation continues.
+
 The loopback HTTP server supports at most 32 simultaneous MCP sessions, expires
 sessions after 30 idle minutes, and permits 120 calls per connector per minute
 by default. The server validates the connector bound to each session and

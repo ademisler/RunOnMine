@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Bind every current-page browser operation to the active normalized origin, include that origin in exact-action grants and approval previews, and re-authorize when the page changes origin during an approval wait.
 - Stop printing local HTTP bearer tokens; add an explicit absolute, no-overwrite, current-user-only JSON export channel for enable, rotate, and status, and remove the legacy `--show-token` path.
 - Reconcile the Linux per-user systemd sandbox with canonical selected roots, include them as explicit write exceptions, and restart an active service after root changes.
 - Bind pending approvals plus temporary and persistent exact-action grants to a transport-aware requester principal fingerprint, isolate OAuth clients and subjects, show requester identity locally, and remove pre-principal grants fail-closed during state migration.

@@ -81,7 +81,12 @@ pub(super) fn approval_preview(tool_name: &str, arguments: &impl Serialize) -> S
             string("text").chars().count(),
             redact_preview_text(string("text"))
         ),
-        "desktop_key" | "browser_press" => format!("Key: {}", string("key")),
+        "desktop_key" => format!("Key: {}", string("key")),
+        "browser_press" => format!(
+            "Origin: {}\nKey: {}",
+            string("current_origin"),
+            string("key")
+        ),
         "macos_applescript" | "windows_powershell" => format!(
             "Script ({} characters):\n{}",
             string("script").chars().count(),
@@ -95,15 +100,27 @@ pub(super) fn approval_preview(tool_name: &str, arguments: &impl Serialize) -> S
             string("object_path")
         ),
         "browser_open" | "browser_navigate" => format!("URL: {}", string("url")),
-        "browser_click" => format!("Selector: {}", string("selector")),
+        "browser_get_url"
+        | "browser_get_text"
+        | "browser_snapshot"
+        | "browser_screenshot"
+        | "browser_close"
+        | "browser_profile_info" => format!("Origin: {}", string("current_origin")),
+        "browser_click" => format!(
+            "Origin: {}\nSelector: {}",
+            string("current_origin"),
+            string("selector")
+        ),
         "browser_type" => format!(
-            "Selector: {}\nType {} characters\nText: {}",
+            "Origin: {}\nSelector: {}\nType {} characters\nText: {}",
+            string("current_origin"),
             string("selector"),
             string("text").chars().count(),
             redact_preview_text(string("text"))
         ),
         "browser_evaluate" => format!(
-            "JavaScript ({} characters):\n{}",
+            "Origin: {}\nJavaScript ({} characters):\n{}",
+            string("current_origin"),
             string("expression").chars().count(),
             redact_preview_text(string("expression"))
         ),

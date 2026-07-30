@@ -161,6 +161,21 @@ impl BrowserSession {
         Ok(current)
     }
 
+    /// Return the page identity used for policy evaluation without launching a
+    /// browser when the session is inactive. New sessions begin at about:blank.
+    pub async fn policy_url(&self) -> Result<Url> {
+        let slot = self.active.lock().await;
+        let value = match slot.as_ref() {
+            Some(active) => active
+                .page
+                .url()
+                .await?
+                .unwrap_or_else(|| "about:blank".to_owned()),
+            None => "about:blank".to_owned(),
+        };
+        Url::parse(&value).context("current browser page has an invalid URL")
+    }
+
     pub async fn current_url(&self) -> Result<Option<String>> {
         let mut slot = self.ensure_active().await?;
         let active = slot.as_mut().context("browser session is unavailable")?;
@@ -664,6 +679,21 @@ mod tests {
         assert!(
             BrowserProfile::external(Url::parse("http://localhost:9222/devtools/browser")?).is_ok()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inactive_policy_url_is_about_blank_without_creating_a_profile() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let profile = temporary.path().join("profile");
+        let session = BrowserSession::new(
+            BrowserProfile::isolated_ephemeral(profile.clone()),
+            true,
+            false,
+            1_024,
+        );
+        assert_eq!(session.policy_url().await?.as_str(), "about:blank");
+        assert!(!profile.exists());
         Ok(())
     }
 

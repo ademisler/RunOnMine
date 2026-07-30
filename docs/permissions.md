@@ -15,6 +15,14 @@ specificity, `deny` wins over `ask`, which wins over `allow`. Rules are stored
 in the connector's `policy_rules` configuration and are validated when the
 configuration is loaded.
 
+Browser-origin rules apply to both navigation targets and the actual current page.
+Before URL/text/snapshot reads, click/type/key actions, screenshots, JavaScript
+evaluation, close, and profile inspection, RunOnMine reads the active page URL
+without launching a new browser and authorizes its normalized origin. The origin
+is part of the exact-action grant hash and appears in the local approval preview.
+If the page changes origin while approval is pending, the new origin is evaluated
+again; repeated changes fail closed.
+
 A final safety ceiling is then applied to internet-facing Cloudflare and OpenAI
 connectors. File writes, user shell, browser actions, desktop control, and
 platform-native scripting can never resolve above `ask`; administrator execution

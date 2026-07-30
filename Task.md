@@ -29,7 +29,7 @@ Status markers:
 
 ## P1 — High-priority security and lifecycle
 
-- [ ] **P1-01 — Apply browser-origin policy to every page operation.** Current page origin must authorize read, click, type, press, evaluate, screenshot, snapshot, URL and close operations; redirects and target changes must not become `ResourceContext::None`.
+- [x] **P1-01 — Apply browser-origin policy to every page operation.** Current page origin must authorize read, click, type, press, evaluate, screenshot, snapshot, URL and close operations; redirects and target changes must not become `ResourceContext::None`.
 - [ ] **P1-02 — Canonicalize privileged executable resources before policy evaluation.** Use the same executable identity as the helper.
 - [ ] **P1-03 — Harden OAuth Dynamic Client Registration against persistent denial of service.** Validate before consuming rate-limit capacity; add source-aware limits, registration authorization/approval, client expiry/pruning and quota recovery.
 - [ ] **P1-04 — Use least-privilege OAuth defaults.** Missing `scope` must not grant every supported scope.

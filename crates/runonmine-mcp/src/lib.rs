@@ -34,7 +34,8 @@ use runonmine_platform::helper::{
 };
 use runonmine_platform::native::{self, DbusCall};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
+use url::Url;
 
 mod approval_flow;
 mod audit;
@@ -214,6 +215,12 @@ pub struct RunOnMineServer {
     _session_permit: Arc<SessionPermit>,
 }
 
+#[derive(Debug)]
+struct BrowserAuthorization {
+    arguments: Value,
+    current_url: Url,
+}
+
 impl std::fmt::Debug for RunOnMineServer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -309,13 +316,65 @@ impl RunOnMineServer {
         })
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn authorize<T: Serialize>(
         &self,
         tool_name: &str,
         capability: Capability,
         summary: &str,
         arguments: &T,
+    ) -> Result<(), McpError> {
+        let resources = policy_resources(tool_name, arguments, &self.runtime.0.filesystem)
+            .map_err(|error| {
+                tracing::error!(%error, "failed to derive policy resources");
+                McpError::internal_error("Tool resources could not be safely authorized", None)
+            })?;
+        let argument_hash = argument_hash(arguments).map_err(|error| {
+            tracing::error!(%error, "failed to serialize tool arguments for authorization");
+            McpError::internal_error("Tool arguments could not be safely authorized", None)
+        })?;
+        self.authorize_resolved(
+            tool_name,
+            capability,
+            summary,
+            arguments,
+            resources,
+            argument_hash,
+        )
+        .await
+    }
+
+    async fn authorize_with_resources<T: Serialize>(
+        &self,
+        tool_name: &str,
+        capability: Capability,
+        summary: &str,
+        arguments: &T,
+        resources: OwnedPolicyResources,
+    ) -> Result<(), McpError> {
+        let argument_hash = resources.authorization_hash(arguments).map_err(|error| {
+            tracing::error!(%error, "failed to serialize resource-bound authorization identity");
+            McpError::internal_error("Tool arguments could not be safely authorized", None)
+        })?;
+        self.authorize_resolved(
+            tool_name,
+            capability,
+            summary,
+            arguments,
+            resources,
+            argument_hash,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn authorize_resolved<T: Serialize>(
+        &self,
+        tool_name: &str,
+        capability: Capability,
+        summary: &str,
+        arguments: &T,
+        resources: OwnedPolicyResources,
+        argument_hash: String,
     ) -> Result<(), McpError> {
         let rate_limit_key = REQUEST_ACCESS
             .try_with(RequestAccess::rate_limit_key)
@@ -336,10 +395,6 @@ impl RunOnMineServer {
         let connector = self.runtime.connector().map_err(|_| {
             McpError::invalid_request("Connector configuration is unavailable", None)
         })?;
-        let argument_hash = argument_hash(arguments).map_err(|error| {
-            tracing::error!(%error, "failed to serialize tool arguments for authorization");
-            McpError::internal_error("Tool arguments could not be safely authorized", None)
-        })?;
         let access = REQUEST_ACCESS.try_with(Clone::clone).ok();
         let approval_principal = access.as_ref().map_or(
             ApprovalPrincipal::LocalStdio,
@@ -351,11 +406,6 @@ impl RunOnMineServer {
             }) => PrincipalContext::OAuth { client_id, subject },
             _ => PrincipalContext::Local,
         };
-        let resources = policy_resources(tool_name, arguments, &self.runtime.0.filesystem)
-            .map_err(|error| {
-                tracing::error!(%error, "failed to derive policy resources");
-                McpError::internal_error("Tool resources could not be safely authorized", None)
-            })?;
         let modes = resources
             .contexts()
             .map(|resource| {
@@ -428,6 +478,65 @@ impl RunOnMineServer {
                 arguments,
             )
             .await
+    }
+
+    async fn authorize_current_browser<T: Serialize>(
+        &self,
+        tool_name: &str,
+        capability: Capability,
+        summary: &str,
+        arguments: &T,
+    ) -> Result<BrowserAuthorization, McpError> {
+        const MAX_ORIGIN_CHECKS: usize = 3;
+        for _ in 0..MAX_ORIGIN_CHECKS {
+            let current_url = self.browser.policy_url().await.map_err(|error| {
+                tracing::error!(%error, tool_name, "failed to read current browser policy URL");
+                self.tool_failed(tool_name, capability, arguments)
+            })?;
+            let authorization_arguments =
+                browser_authorization_arguments(arguments, &current_url).map_err(|error| {
+                    tracing::error!(%error, tool_name, "failed to bind browser origin to arguments");
+                    McpError::internal_error(
+                        "Browser operation could not be safely authorized",
+                        None,
+                    )
+                })?;
+            self.authorize_with_resources(
+                tool_name,
+                capability,
+                summary,
+                &authorization_arguments,
+                OwnedPolicyResources::browser(current_url.clone()),
+            )
+            .await?;
+            let confirmed_url = self.browser.policy_url().await.map_err(|error| {
+                tracing::error!(%error, tool_name, "failed to confirm current browser policy URL");
+                self.tool_failed(tool_name, capability, &authorization_arguments)
+            })?;
+            if same_browser_policy_origin(&current_url, &confirmed_url) {
+                return Ok(BrowserAuthorization {
+                    arguments: authorization_arguments,
+                    current_url: confirmed_url,
+                });
+            }
+            tracing::warn!(
+                tool_name,
+                previous_origin = %authorization::browser_policy_origin(&current_url),
+                current_origin = %authorization::browser_policy_origin(&confirmed_url),
+                "browser origin changed during authorization; evaluating the new origin"
+            );
+        }
+        self.runtime.audit().record(
+            tool_name,
+            capability,
+            AuditOutcome::Denied,
+            arguments,
+            "browser origin changed repeatedly during authorization",
+        );
+        Err(McpError::invalid_request(
+            "Browser page changed during authorization; retry the operation",
+            None,
+        ))
     }
 
     fn success<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
@@ -513,7 +622,10 @@ impl RunOnMineServer {
 }
 
 mod authorization;
-use authorization::{PreApprovalDecision, policy_resources, pre_approval_decision};
+use authorization::{
+    OwnedPolicyResources, PreApprovalDecision, browser_authorization_arguments, policy_resources,
+    pre_approval_decision, same_browser_policy_origin,
+};
 
 mod arguments;
 use arguments::{
@@ -1346,17 +1458,15 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<EmptyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.authorize(
-            "browser_get_url",
-            Capability::BrowserRead,
-            "read the browser URL",
-            &arguments,
-        )
-        .await?;
-        match self.browser.current_url().await {
-            Ok(url) => Self::success(&json!({"url": url})),
-            Err(_) => Err(self.tool_failed("browser_get_url", Capability::BrowserRead, &arguments)),
-        }
+        let authorization = self
+            .authorize_current_browser(
+                "browser_get_url",
+                Capability::BrowserRead,
+                "read the browser URL",
+                &arguments,
+            )
+            .await?;
+        Self::success(&json!({"url": authorization.current_url.as_str()}))
     }
 
     #[tool(
@@ -1372,21 +1482,24 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<EmptyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.authorize(
-            "browser_get_text",
-            Capability::BrowserRead,
-            "read browser page text",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_get_text",
+                Capability::BrowserRead,
+                "read browser page text",
+                &arguments,
+            )
+            .await?;
         match self.browser.text().await {
             Ok(text) => Self::success(&json!({
                 "text": text.content,
                 "truncated": text.truncated,
             })),
-            Err(_) => {
-                Err(self.tool_failed("browser_get_text", Capability::BrowserRead, &arguments))
-            }
+            Err(_) => Err(self.tool_failed(
+                "browser_get_text",
+                Capability::BrowserRead,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1403,21 +1516,24 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<EmptyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.authorize(
-            "browser_snapshot",
-            Capability::BrowserRead,
-            "read a browser snapshot",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_snapshot",
+                Capability::BrowserRead,
+                "read a browser snapshot",
+                &arguments,
+            )
+            .await?;
         match self.browser.snapshot().await {
             Ok(html) => Self::success(&json!({
                 "html": html.content,
                 "truncated": html.truncated,
             })),
-            Err(_) => {
-                Err(self.tool_failed("browser_snapshot", Capability::BrowserRead, &arguments))
-            }
+            Err(_) => Err(self.tool_failed(
+                "browser_snapshot",
+                Capability::BrowserRead,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1435,16 +1551,21 @@ impl RunOnMineServer {
         Parameters(arguments): Parameters<SelectorArgs>,
     ) -> Result<CallToolResult, McpError> {
         validate_nonempty_text(&arguments.selector, "Browser selector", MAX_SELECTOR_BYTES)?;
-        self.authorize(
-            "browser_click",
-            Capability::BrowserAct,
-            "click a browser element",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_click",
+                Capability::BrowserAct,
+                "click a browser element",
+                &arguments,
+            )
+            .await?;
         match self.browser.click(&arguments.selector).await {
             Ok(()) => Self::success(&json!({"clicked": true})),
-            Err(_) => Err(self.tool_failed("browser_click", Capability::BrowserAct, &arguments)),
+            Err(_) => Err(self.tool_failed(
+                "browser_click",
+                Capability::BrowserAct,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1463,20 +1584,25 @@ impl RunOnMineServer {
     ) -> Result<CallToolResult, McpError> {
         validate_nonempty_text(&arguments.selector, "Browser selector", MAX_SELECTOR_BYTES)?;
         validate_text(&arguments.text, "Browser text", MAX_TEXT_INPUT_BYTES)?;
-        self.authorize(
-            "browser_type",
-            Capability::BrowserAct,
-            "type into a browser element (text withheld)",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_type",
+                Capability::BrowserAct,
+                "type into a browser element (text withheld)",
+                &arguments,
+            )
+            .await?;
         match self
             .browser
             .type_text(&arguments.selector, &arguments.text)
             .await
         {
             Ok(()) => Self::success(&json!({"typed": true})),
-            Err(_) => Err(self.tool_failed("browser_type", Capability::BrowserAct, &arguments)),
+            Err(_) => Err(self.tool_failed(
+                "browser_type",
+                Capability::BrowserAct,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1494,16 +1620,21 @@ impl RunOnMineServer {
         Parameters(arguments): Parameters<KeyArgs>,
     ) -> Result<CallToolResult, McpError> {
         validate_nonempty_text(&arguments.key, "Browser key", 64)?;
-        self.authorize(
-            "browser_press",
-            Capability::BrowserAct,
-            "press a browser key",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_press",
+                Capability::BrowserAct,
+                "press a browser key",
+                &arguments,
+            )
+            .await?;
         match self.browser.press(&arguments.key).await {
             Ok(()) => Self::success(&json!({"pressed": true})),
-            Err(_) => Err(self.tool_failed("browser_press", Capability::BrowserAct, &arguments)),
+            Err(_) => Err(self.tool_failed(
+                "browser_press",
+                Capability::BrowserAct,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1520,13 +1651,14 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<ScreenshotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.authorize(
-            "browser_screenshot",
-            Capability::BrowserRead,
-            "capture a browser screenshot",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_screenshot",
+                Capability::BrowserRead,
+                "capture a browser screenshot",
+                &arguments,
+            )
+            .await?;
         match self
             .browser
             .screenshot_jpeg(arguments.quality, arguments.full_page)
@@ -1539,9 +1671,11 @@ impl RunOnMineServer {
                     "image/jpeg",
                 )]))
             }
-            Err(_) => {
-                Err(self.tool_failed("browser_screenshot", Capability::BrowserRead, &arguments))
-            }
+            Err(_) => Err(self.tool_failed(
+                "browser_screenshot",
+                Capability::BrowserRead,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1563,16 +1697,21 @@ impl RunOnMineServer {
             "Browser JavaScript",
             MAX_SCRIPT_BYTES,
         )?;
-        self.authorize(
-            "browser_evaluate",
-            Capability::BrowserAct,
-            "evaluate browser JavaScript (content withheld)",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_evaluate",
+                Capability::BrowserAct,
+                "evaluate browser JavaScript (content withheld)",
+                &arguments,
+            )
+            .await?;
         match self.browser.evaluate(&arguments.expression).await {
             Ok(value) => Self::success(&value),
-            Err(_) => Err(self.tool_failed("browser_evaluate", Capability::BrowserAct, &arguments)),
+            Err(_) => Err(self.tool_failed(
+                "browser_evaluate",
+                Capability::BrowserAct,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1589,16 +1728,21 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<EmptyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.authorize(
-            "browser_close",
-            Capability::BrowserAct,
-            "close the browser session",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_close",
+                Capability::BrowserAct,
+                "close the browser session",
+                &arguments,
+            )
+            .await?;
         match self.browser.close().await {
             Ok(()) => Self::success(&json!({"closed": true})),
-            Err(_) => Err(self.tool_failed("browser_close", Capability::BrowserAct, &arguments)),
+            Err(_) => Err(self.tool_failed(
+                "browser_close",
+                Capability::BrowserAct,
+                &authorization.arguments,
+            )),
         }
     }
 
@@ -1615,18 +1759,21 @@ impl RunOnMineServer {
         &self,
         Parameters(arguments): Parameters<EmptyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.authorize(
-            "browser_profile_info",
-            Capability::BrowserRead,
-            "read browser profile information",
-            &arguments,
-        )
-        .await?;
+        let authorization = self
+            .authorize_current_browser(
+                "browser_profile_info",
+                Capability::BrowserRead,
+                "read browser profile information",
+                &arguments,
+            )
+            .await?;
         match self.browser.info().await {
             Ok(info) => Self::success(&info),
-            Err(_) => {
-                Err(self.tool_failed("browser_profile_info", Capability::BrowserRead, &arguments))
-            }
+            Err(_) => Err(self.tool_failed(
+                "browser_profile_info",
+                Capability::BrowserRead,
+                &authorization.arguments,
+            )),
         }
     }
 }
@@ -1835,6 +1982,47 @@ mod tests {
             timeout_seconds: None,
         };
         assert!(validate_dbus_arguments(&arguments).is_ok());
+    }
+
+    #[test]
+    fn every_current_page_browser_handler_uses_origin_authorization() -> Result<()> {
+        let source = include_str!("lib.rs");
+        for tool in [
+            "browser_get_url",
+            "browser_get_text",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_press",
+            "browser_screenshot",
+            "browser_evaluate",
+            "browser_close",
+            "browser_profile_info",
+        ] {
+            let start = source
+                .find(&format!("async fn {tool}("))
+                .ok_or_else(|| anyhow::anyhow!("missing handler {tool}"))?;
+            let remainder = &source[start..];
+            let end = remainder.find("\n    #[tool(").unwrap_or(remainder.len());
+            assert!(
+                remainder[..end].contains("authorize_current_browser"),
+                "{tool} does not bind the current browser origin"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn browser_approval_preview_includes_current_origin() {
+        let preview = approval_preview(
+            "browser_click",
+            &json!({
+                "selector": "#submit",
+                "current_origin": "https://example.com"
+            }),
+        );
+        assert!(preview.contains("Origin: https://example.com"));
+        assert!(preview.contains("Selector: #submit"));
     }
 
     #[test]
