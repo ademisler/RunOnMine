@@ -80,6 +80,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### User experience
 
+- Replace ambiguous diagnostics fallbacks with typed degraded states. MCP machine information, browser profile diagnostics, privileged-helper status, agent restart handshakes, and support-bundle schema v2 now distinguish available, missing, disabled, corrupt, unavailable, and permission-denied conditions where relevant; legacy booleans remain for compatibility, while corrupt prior helper policy snapshots fail closed.
 - Add a bounded, redacted `runonmine support-bundle` ZIP containing structural diagnostics, audit summaries, service state, checksums, and sanitized log tails without raw configuration or credentials.
 - Bound and redact desktop child-process output, make multi-secret credential replacement transactional, and detect incomplete first-run setup from selected roots.
 - Prevent desktop sidebar controls and overview metrics from colliding at the minimum supported window size by reserving a fixed footer region and using a responsive metric grid.

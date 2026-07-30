@@ -79,6 +79,32 @@ AI client
   -> operating-system account boundary
 ```
 
+## Typed degraded states
+
+Operator-facing and machine-readable status paths do not use `None`, `false`, or
+an empty collection as a catch-all for failed inspection. Domain-owned enums
+represent the states that can be acted on safely: `available`, `missing`,
+`disabled`, `corrupt`, `unavailable`, and `permission_denied` where the domain can
+produce them. Existing compatibility booleans remain derived from the typed state
+rather than serving as the source of truth.
+
+Browser executable discovery classifies explicit and platform-candidate failures;
+external CDP reports local launch selection as disabled. Privileged-helper status
+combines installation artifacts, policy parsing, service-manager queries, running
+state, protocol/package health, and allowlist count without falling back to the
+current user after a corrupt installed policy. MCP machine information reports
+helper and hostname state while continuing to suppress hostname collection for
+remote connectors. Agent restart preparation distinguishes absent and corrupt
+old markers from permission or I/O failures; ambiguous access fails before a
+service restart. Helper installation refuses to reinterpret a corrupt previous
+policy snapshot as “no previous owner.”
+
+Support-bundle schema v2 carries typed config, service, browser executable, state
+database, and audit-chain status. Audit verification distinguishes a valid chain,
+a verified corruption result, permission denial, and temporary I/O unavailability.
+The bundle still excludes raw configuration, database content, identifiers, URLs,
+paths, hostnames, and credentials.
+
 Authentication scopes can reduce access but can never override local policy.
 Approval is deliberately absent from the MCP tool surface. Approval and grant
 rows carry a domain-separated fingerprint for local stdio, local HTTP, Quick

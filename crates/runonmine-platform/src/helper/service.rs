@@ -17,7 +17,8 @@ use super::install_transaction::{
     install_transaction,
 };
 use super::{
-    AdminPolicy, AdminProgramRule, HelperClient, HelperRequest, HelperResult, OwnerIdentity,
+    AdminPolicy, AdminProgramRule, HelperAvailability, HelperClient, HelperRequest, HelperResult,
+    OwnerIdentity,
 };
 
 #[cfg(target_os = "macos")]
@@ -35,6 +36,7 @@ pub struct HelperInstallOptions {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct HelperServiceStatus {
+    pub state: HelperAvailability,
     pub installed: bool,
     pub running: bool,
     pub available: bool,
@@ -113,43 +115,85 @@ impl HelperManager {
 
     pub async fn status(&self) -> Result<HelperServiceStatus> {
         let paths = SystemPaths::discover()?;
-        let policy = AdminPolicy::load(&paths.policy).ok();
-        let installed = paths.binary.is_file()
-            && paths.policy.is_file()
-            && paths
-                .service_definition
-                .as_ref()
-                .is_none_or(|definition| definition.is_file())
-            && platform_service_installed()?;
-        let service_output = platform_service_status()?;
-        let running = service_output.status.success();
-        let mut available = false;
-        let mut health_allowlisted_programs = None;
-        let client = policy
+        let (policy, policy_state) = match AdminPolicy::load(&paths.policy) {
+            Ok(policy) => {
+                let allowlisted_programs = policy.allowed_programs.len();
+                (
+                    Some(policy),
+                    HelperAvailability::Available {
+                        allowlisted_programs,
+                    },
+                )
+            }
+            Err(error) => (None, HelperAvailability::from_error(&error)),
+        };
+        let binary_present = paths.binary.is_file();
+        let policy_present = paths.policy.is_file();
+        let service_definition_present = paths
+            .service_definition
             .as_ref()
-            .and_then(|policy| HelperClient::new(policy.owner.clone()).ok())
-            .or_else(|| HelperClient::for_current_user().ok());
-        if let Some(client) = client
-            && let Ok(response) = client.request(&HelperRequest::health()).await
-            && let HelperResult::Healthy {
-                allowlisted_programs,
-                ..
-            } = response.result
-        {
-            available = true;
-            health_allowlisted_programs = Some(allowlisted_programs);
-        }
+            .is_some_and(|definition| definition.is_file());
+        let service_definition_complete = paths
+            .service_definition
+            .as_ref()
+            .is_none_or(|definition| definition.is_file());
+        let (service_installed, installed_query_state) = match platform_service_installed() {
+            Ok(installed) => (installed, None),
+            Err(error) => (false, Some(service_query_error_state(&error))),
+        };
+        let (running, detail, status_query_state) = match platform_service_status() {
+            Ok(output) => (output.status.success(), sanitized_output(&output), None),
+            Err(error) => (
+                false,
+                String::new(),
+                Some(service_query_error_state(&error)),
+            ),
+        };
+        let service_query_state = installed_query_state.or(status_query_state);
+        let installed =
+            binary_present && policy_present && service_definition_complete && service_installed;
+        let any_artifact =
+            binary_present || policy_present || service_definition_present || service_installed;
+        let state = if matches!(policy_state, HelperAvailability::PermissionDenied)
+            || matches!(
+                service_query_state,
+                Some(HelperAvailability::PermissionDenied)
+            ) {
+            HelperAvailability::PermissionDenied
+        } else if service_query_state.is_some() {
+            HelperAvailability::Unavailable
+        } else if !any_artifact {
+            HelperAvailability::Missing
+        } else if !installed {
+            match policy_state {
+                HelperAvailability::Unavailable => HelperAvailability::Unavailable,
+                _ => HelperAvailability::Corrupt,
+            }
+        } else if !running {
+            HelperAvailability::Disabled
+        } else if let Some(policy) = &policy {
+            match HelperClient::new(policy.owner.clone()) {
+                Ok(client) => tokio::time::timeout(Duration::from_secs(2), client.availability())
+                    .await
+                    .unwrap_or(HelperAvailability::Unavailable),
+                Err(error) => HelperAvailability::from_error(&error),
+            }
+        } else {
+            policy_state
+        };
+        let allowlisted_programs = state.allowlisted_programs().unwrap_or_else(|| {
+            policy
+                .as_ref()
+                .map_or(0, |policy| policy.allowed_programs.len())
+        });
         Ok(HelperServiceStatus {
+            available: state.is_available(),
+            state,
             installed,
             running,
-            available,
             owner: policy.as_ref().map(|policy| policy.owner.clone()),
-            allowlisted_programs: health_allowlisted_programs.unwrap_or_else(|| {
-                policy
-                    .as_ref()
-                    .map_or(0, |policy| policy.allowed_programs.len())
-            }),
-            detail: sanitized_output(&service_output),
+            allowlisted_programs,
+            detail,
         })
     }
 }
@@ -853,6 +897,17 @@ fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
     }
 }
 
+fn service_query_error_state(error: &anyhow::Error) -> HelperAvailability {
+    if matches!(
+        HelperAvailability::from_error(error),
+        HelperAvailability::PermissionDenied
+    ) {
+        HelperAvailability::PermissionDenied
+    } else {
+        HelperAvailability::Unavailable
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn platform_service_installed() -> Result<bool> {
     Ok(Command::new("launchctl")
@@ -956,6 +1011,21 @@ fn harden_windows_file_acl(path: &Path, _executable: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_query_errors_distinguish_permission_denied_from_unavailable() {
+        let denied = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let missing_command =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(
+            service_query_error_state(&denied),
+            HelperAvailability::PermissionDenied
+        );
+        assert_eq!(
+            service_query_error_state(&missing_command),
+            HelperAvailability::Unavailable
+        );
+    }
 
     #[test]
     fn helper_health_requires_matching_protocol_and_package_versions() {

@@ -26,6 +26,25 @@ pub struct AgentRuntimeStatus {
     pub started_unix_ms: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AgentRuntimeStatusState {
+    Available { runtime: AgentRuntimeStatus },
+    Missing,
+    Corrupt,
+    Unavailable,
+    PermissionDenied,
+}
+
+impl AgentRuntimeStatusState {
+    fn instance_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Available { runtime } => Some(runtime.instance_id),
+            _ => None,
+        }
+    }
+}
+
 impl AgentRuntimeStatus {
     pub fn current() -> Result<Self> {
         let executable = std::env::current_exe()
@@ -75,7 +94,7 @@ impl AgentRuntimeStatus {
 pub struct AgentRestartExpectation {
     path: PathBuf,
     expected_executable: PathBuf,
-    previous_instance_id: Option<Uuid>,
+    previous_status: AgentRuntimeStatusState,
     not_before_unix_ms: u64,
 }
 
@@ -85,14 +104,21 @@ impl AgentRestartExpectation {
             bail!("agent runtime status path must be absolute");
         }
         let expected_executable = canonical_regular_executable(expected_executable)?;
-        let previous_instance_id = read_agent_runtime_status(&path)
-            .ok()
-            .map(|status| status.instance_id);
+        let previous_status = inspect_agent_runtime_status(&path);
+        match &previous_status {
+            AgentRuntimeStatusState::PermissionDenied => {
+                bail!("permission denied while reading the previous agent runtime status")
+            }
+            AgentRuntimeStatusState::Unavailable => {
+                bail!("the previous agent runtime status is temporarily unavailable")
+            }
+            _ => {}
+        }
         clear_agent_runtime_status(&path)?;
         Ok(Self {
             path,
             expected_executable,
-            previous_instance_id,
+            previous_status,
             not_before_unix_ms: unix_milliseconds(SystemTime::now())?,
         })
     }
@@ -104,7 +130,7 @@ impl AgentRestartExpectation {
                 status.validate_restart(
                     &self.expected_executable,
                     self.not_before_unix_ms,
-                    self.previous_instance_id,
+                    self.previous_status.instance_id(),
                 )?;
                 Ok(status)
             }) {
@@ -125,7 +151,7 @@ impl AgentRestartExpectation {
                 status.validate_restart(
                     &self.expected_executable,
                     self.not_before_unix_ms,
-                    self.previous_instance_id,
+                    self.previous_status.instance_id(),
                 )?;
                 Ok(status)
             }) {
@@ -209,6 +235,30 @@ fn clear_agent_runtime_status_for_instance(path: &Path, instance_id: Uuid) -> Re
         Err(_) if !path.exists() => Ok(()),
         Err(error) => Err(error).context("failed to inspect agent runtime status during cleanup"),
     }
+}
+
+pub fn inspect_agent_runtime_status(path: &Path) -> AgentRuntimeStatusState {
+    match read_agent_runtime_status(path) {
+        Ok(runtime) => AgentRuntimeStatusState::Available { runtime },
+        Err(error) => classify_agent_runtime_error(&error),
+    }
+}
+
+fn classify_agent_runtime_error(error: &anyhow::Error) -> AgentRuntimeStatusState {
+    for cause in error.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::NotFound => AgentRuntimeStatusState::Missing,
+                std::io::ErrorKind::PermissionDenied => AgentRuntimeStatusState::PermissionDenied,
+                std::io::ErrorKind::InvalidData => AgentRuntimeStatusState::Corrupt,
+                _ => AgentRuntimeStatusState::Unavailable,
+            };
+        }
+        if cause.downcast_ref::<serde_json::Error>().is_some() {
+            return AgentRuntimeStatusState::Corrupt;
+        }
+    }
+    AgentRuntimeStatusState::Corrupt
 }
 
 pub fn read_agent_runtime_status(path: &Path) -> Result<AgentRuntimeStatus> {
@@ -397,6 +447,22 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn runtime_status_inspection_distinguishes_missing_and_corrupt() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("runtime.json");
+        assert_eq!(
+            inspect_agent_runtime_status(&path),
+            AgentRuntimeStatusState::Missing
+        );
+        fs::write(&path, b"not json")?;
+        assert_eq!(
+            inspect_agent_runtime_status(&path),
+            AgentRuntimeStatusState::Corrupt
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn wait_requires_a_fresh_matching_marker() -> Result<()> {
         let directory = tempfile::tempdir()?;
@@ -409,7 +475,9 @@ mod tests {
         let expectation = AgentRestartExpectation {
             path: status_path.clone(),
             expected_executable: expected.canonicalize()?,
-            previous_instance_id: Some(stale.instance_id),
+            previous_status: AgentRuntimeStatusState::Available {
+                runtime: stale.clone(),
+            },
             not_before_unix_ms: now,
         };
         let publisher_path = status_path;

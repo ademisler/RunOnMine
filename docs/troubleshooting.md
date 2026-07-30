@@ -60,11 +60,14 @@ runonmine doctor
 runonmine support-bundle --output runonmine-support.zip
 ```
 
-The archive is written without overwriting an existing file and is owner-only on
-Unix. It contains generated structural configuration and service summaries, a
-bounded audit outcome sample without connector IDs, argument hashes, or event
-summaries, a checksum manifest, and up to five recent bounded log tails from
-`.log`, `.txt`, `.jsonl`, or `.ndjson` files.
+The schema-v2 archive is written without overwriting an existing file and is
+owner-only on Unix. It contains generated structural configuration and typed
+service/input states, a bounded audit outcome sample without connector IDs,
+argument hashes, or event summaries, a checksum manifest, and up to five recent
+bounded log tails from `.log`, `.txt`, `.jsonl`, or `.ndjson` files. State values
+separate missing, disabled, corrupt, temporarily unavailable, and
+permission-denied conditions instead of representing all of them as false or
+empty.
 
 RunOnMine does not copy the raw config file, state database, credential store,
 browser profiles, audit arguments, connector identifiers, hostnames, URLs, or

@@ -147,12 +147,107 @@ impl BrowserExecutableSummary {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum BrowserExecutableState {
+    Available {
+        executable: BrowserExecutableSummary,
+    },
+    Missing,
+    Disabled,
+    Corrupt,
+    Unavailable,
+    PermissionDenied,
+}
+
+impl BrowserExecutableState {
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+
+    #[must_use]
+    pub const fn executable(&self) -> Option<&BrowserExecutableSummary> {
+        match self {
+            Self::Available { executable } => Some(executable),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserExecutableFailureKind {
+    Missing,
+    Corrupt,
+    Unavailable,
+    PermissionDenied,
+}
+
+impl BrowserExecutableFailureKind {
+    const fn priority(self) -> u8 {
+        match self {
+            Self::Missing => 1,
+            Self::Unavailable => 2,
+            Self::Corrupt => 3,
+            Self::PermissionDenied => 4,
+        }
+    }
+
+    const fn state(self) -> BrowserExecutableState {
+        match self {
+            Self::Missing => BrowserExecutableState::Missing,
+            Self::Corrupt => BrowserExecutableState::Corrupt,
+            Self::Unavailable => BrowserExecutableState::Unavailable,
+            Self::PermissionDenied => BrowserExecutableState::PermissionDenied,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BrowserExecutableFailure {
+    kind: BrowserExecutableFailureKind,
+    message: String,
+}
+
+impl BrowserExecutableFailure {
+    fn new(kind: BrowserExecutableFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    fn from_io(error: &std::io::Error, path: &Path) -> Self {
+        let kind = match error.kind() {
+            std::io::ErrorKind::NotFound => BrowserExecutableFailureKind::Missing,
+            std::io::ErrorKind::PermissionDenied => BrowserExecutableFailureKind::PermissionDenied,
+            _ => BrowserExecutableFailureKind::Unavailable,
+        };
+        Self::new(
+            kind,
+            format!(
+                "browser executable is unavailable at {}: {error}",
+                path.display()
+            ),
+        )
+    }
+}
+
+impl std::fmt::Display for BrowserExecutableFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BrowserExecutableFailure {}
+
 #[derive(Debug, Serialize)]
 pub struct BrowserSessionInfo {
     pub profile: BrowserProfile,
     pub active: bool,
     pub current_url: Option<String>,
     pub executable_selection: Option<BrowserExecutableSource>,
+    pub executable_state: BrowserExecutableState,
     pub executable_available: Option<bool>,
     pub selected_executable: Option<BrowserExecutableSummary>,
     pub active_executable: Option<BrowserExecutableSummary>,
@@ -715,25 +810,27 @@ impl BrowserSession {
             Some(active) => active.page.url().await?,
             None => None,
         };
-        let (executable_selection, executable_available, selected_executable) = match &self.profile
-        {
-            BrowserProfile::Isolated { .. } => {
-                let source = if self.explicit_executable.is_some() {
-                    BrowserExecutableSource::Explicit
-                } else {
-                    BrowserExecutableSource::AutoDetected
-                };
-                let identity = resolve_browser_executable(self.explicit_executable.as_deref()).ok();
-                (
-                    Some(source),
-                    Some(identity.is_some()),
-                    identity
-                        .as_ref()
-                        .map(BrowserExecutableSummary::from_identity),
-                )
-            }
-            BrowserProfile::ExternalCdp { .. } => (None, None, None),
-        };
+        let (executable_selection, executable_state, executable_available, selected_executable) =
+            match &self.profile {
+                BrowserProfile::Isolated { .. } => {
+                    let source = if self.explicit_executable.is_some() {
+                        BrowserExecutableSource::Explicit
+                    } else {
+                        BrowserExecutableSource::AutoDetected
+                    };
+                    let state = browser_executable_state(self.explicit_executable.as_deref());
+                    let selected = state.executable().cloned();
+                    (
+                        Some(source),
+                        state.clone(),
+                        Some(state.is_available()),
+                        selected,
+                    )
+                }
+                BrowserProfile::ExternalCdp { .. } => {
+                    (None, BrowserExecutableState::Disabled, None, None)
+                }
+            };
         let active_executable = slot.as_ref().and_then(|active| {
             active
                 .executable
@@ -745,6 +842,7 @@ impl BrowserSession {
             active: slot.is_some(),
             current_url,
             executable_selection,
+            executable_state,
             executable_available,
             selected_executable,
             active_executable,
@@ -1070,67 +1168,109 @@ fn bound_utf8(mut value: BoundedValue, maximum: usize) -> BoundedBrowserText {
 }
 
 pub fn chromium_available() -> bool {
-    resolve_browser_executable(None).is_ok()
+    browser_executable_state(None).is_available()
 }
 
 pub fn browser_executable_available(explicit: Option<&Path>) -> bool {
-    resolve_browser_executable(explicit).is_ok()
+    browser_executable_state(explicit).is_available()
 }
 
-pub fn inspect_explicit_browser_executable(path: &Path) -> Result<BrowserExecutableIdentity> {
-    inspect_browser_executable(path, BrowserExecutableSource::Explicit)
-}
-
-pub fn resolve_browser_executable(explicit: Option<&Path>) -> Result<BrowserExecutableIdentity> {
-    match explicit {
-        Some(path) => inspect_explicit_browser_executable(path),
-        None => browser_executable_candidates()
-            .into_iter()
-            .find_map(|path| {
-                inspect_browser_executable(&path, BrowserExecutableSource::AutoDetected).ok()
-            })
-            .context("a supported Chromium installation was not found"),
+pub fn browser_executable_state(explicit: Option<&Path>) -> BrowserExecutableState {
+    match resolve_browser_executable_classified(explicit) {
+        Ok(identity) => BrowserExecutableState::Available {
+            executable: BrowserExecutableSummary::from_identity(&identity),
+        },
+        Err(error) => error.kind.state(),
     }
 }
 
-pub fn chromium_executable() -> Option<PathBuf> {
-    resolve_browser_executable(None)
-        .ok()
-        .map(|identity| identity.path)
+pub fn inspect_explicit_browser_executable(path: &Path) -> Result<BrowserExecutableIdentity> {
+    inspect_browser_executable_classified(path, BrowserExecutableSource::Explicit)
+        .map_err(anyhow::Error::new)
 }
 
-fn inspect_browser_executable(
+pub fn resolve_browser_executable(explicit: Option<&Path>) -> Result<BrowserExecutableIdentity> {
+    resolve_browser_executable_classified(explicit).map_err(anyhow::Error::new)
+}
+
+fn resolve_browser_executable_classified(
+    explicit: Option<&Path>,
+) -> std::result::Result<BrowserExecutableIdentity, BrowserExecutableFailure> {
+    if let Some(path) = explicit {
+        return inspect_browser_executable_classified(path, BrowserExecutableSource::Explicit);
+    }
+    let mut strongest_failure: Option<BrowserExecutableFailure> = None;
+    for path in browser_executable_candidates() {
+        match inspect_browser_executable_classified(&path, BrowserExecutableSource::AutoDetected) {
+            Ok(identity) => return Ok(identity),
+            Err(failure) => {
+                let replace = strongest_failure
+                    .as_ref()
+                    .is_none_or(|current| failure.kind.priority() > current.kind.priority());
+                if replace {
+                    strongest_failure = Some(failure);
+                }
+            }
+        }
+    }
+    Err(strongest_failure.unwrap_or_else(|| {
+        BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Missing,
+            "a supported Chromium installation was not found",
+        )
+    }))
+}
+
+pub fn chromium_executable() -> Option<PathBuf> {
+    match resolve_browser_executable_classified(None) {
+        Ok(identity) => Some(identity.path),
+        Err(_) => None,
+    }
+}
+
+fn inspect_browser_executable_classified(
     path: &Path,
     source: BrowserExecutableSource,
-) -> Result<BrowserExecutableIdentity> {
+) -> std::result::Result<BrowserExecutableIdentity, BrowserExecutableFailure> {
     let resolved = path
         .canonicalize()
-        .with_context(|| format!("browser executable is unavailable: {}", path.display()))?;
-    inspect_resolved_browser_executable(&resolved, source)
+        .map_err(|error| BrowserExecutableFailure::from_io(&error, path))?;
+    let metadata = std::fs::symlink_metadata(&resolved)
+        .map_err(|error| BrowserExecutableFailure::from_io(&error, &resolved))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable must resolve to a real regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(BrowserExecutableFailure::new(
+                BrowserExecutableFailureKind::Corrupt,
+                "browser executable is not executable",
+            ));
+        }
+    }
+    let Some(product) = classify_browser_executable(&resolved) else {
+        return Err(BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable is not a supported Chrome, Chromium, or Edge binary",
+        ));
+    };
+    Ok(BrowserExecutableIdentity {
+        source,
+        product,
+        path: resolved,
+    })
 }
 
 fn inspect_resolved_browser_executable(
     path: &Path,
     source: BrowserExecutableSource,
 ) -> Result<BrowserExecutableIdentity> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("browser executable must resolve to a real regular file");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            bail!("browser executable is not executable");
-        }
-    }
-    let product = classify_browser_executable(path)
-        .context("browser executable is not a supported Chrome, Chromium, or Edge binary")?;
-    Ok(BrowserExecutableIdentity {
-        source,
-        product,
-        path: path.to_path_buf(),
-    })
+    inspect_browser_executable_classified(path, source).map_err(anyhow::Error::new)
 }
 
 fn classify_browser_executable(path: &Path) -> Option<BrowserProduct> {
@@ -1547,6 +1687,43 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn explicit_executable_state_distinguishes_missing_and_corrupt() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let missing = directory.path().join("missing-chromium");
+        assert_eq!(
+            browser_executable_state(Some(&missing)),
+            BrowserExecutableState::Missing
+        );
+
+        let corrupt = directory.path().join("chromium");
+        std::fs::write(&corrupt, b"not a browser")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&corrupt, std::fs::Permissions::from_mode(0o600))?;
+        }
+        assert_eq!(
+            browser_executable_state(Some(&corrupt)),
+            BrowserExecutableState::Corrupt
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_cdp_disables_local_executable_selection() -> Result<()> {
+        let session = BrowserSession::new(
+            BrowserProfile::external(Url::parse("http://127.0.0.1:9222")?)?,
+            true,
+            false,
+            1_024,
+        );
+        let info = session.info_inner().await?;
+        assert_eq!(info.executable_state, BrowserExecutableState::Disabled);
+        assert_eq!(info.executable_available, None);
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn explicit_executable_identity_is_reported_before_and_after_launch() -> Result<()> {
@@ -1573,6 +1750,10 @@ mod tests {
             Some(BrowserExecutableSource::Explicit)
         );
         assert_eq!(before.executable_available, Some(true));
+        assert!(matches!(
+            before.executable_state,
+            BrowserExecutableState::Available { .. }
+        ));
         assert_eq!(selected.source, BrowserExecutableSource::Explicit);
         assert_eq!(selected.product, detected.product);
         assert!(before.active_executable.is_none());

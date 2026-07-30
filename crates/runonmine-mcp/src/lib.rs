@@ -32,7 +32,7 @@ use runonmine_core::{
 use runonmine_oauth::{Scope, ScopeSet};
 use runonmine_platform::desktop::{self, ScreenshotTarget};
 use runonmine_platform::helper::{
-    HelperClient, HelperRequest, HelperResult, MAX_TIMEOUT as MAX_ADMIN_TIMEOUT,
+    HelperAvailability, HelperClient, HelperRequest, HelperResult, MAX_TIMEOUT as MAX_ADMIN_TIMEOUT,
 };
 use runonmine_platform::native::{self, DbusCall};
 use serde::Serialize;
@@ -248,9 +248,42 @@ fn load_enabled_connector(
 pub struct RunOnMineServer {
     runtime: Runtime,
     browser: Arc<BrowserSession>,
-    admin: Option<HelperClient>,
+    admin: Result<HelperClient, HelperAvailability>,
     tool_router: ToolRouter<Self>,
     _session_permit: Arc<SessionPermit>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum HostnameState {
+    Available { hostname: String },
+    Disabled,
+    Unavailable,
+    PermissionDenied,
+}
+
+impl HostnameState {
+    fn detect(disabled: bool) -> Self {
+        if disabled {
+            return Self::Disabled;
+        }
+        match hostname::get() {
+            Ok(hostname) => Self::Available {
+                hostname: hostname.to_string_lossy().into_owned(),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                Self::PermissionDenied
+            }
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+    fn value(&self) -> Option<&str> {
+        match self {
+            Self::Available { hostname } => Some(hostname),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -350,7 +383,8 @@ impl RunOnMineServer {
         Ok(Self {
             runtime,
             browser,
-            admin: HelperClient::for_current_user().ok(),
+            admin: HelperClient::for_current_user()
+                .map_err(|error| HelperAvailability::from_error(&error)),
             tool_router,
             _session_permit: permit,
         })
@@ -693,27 +727,19 @@ impl RunOnMineServer {
         oauth_scopes_allow_capability(scopes, *capability)
     }
 
-    async fn admin_allowlisted_programs(&self) -> Option<usize> {
-        let client = self.admin.as_ref()?;
-        let response = tokio::time::timeout(
-            Duration::from_secs(2),
-            client.request(&HelperRequest::health()),
-        )
-        .await
-        .ok()?
-        .ok()?;
-        match response.result {
-            HelperResult::Healthy {
-                allowlisted_programs,
-                ..
-            } => Some(allowlisted_programs),
-            _ => None,
+    async fn admin_helper_state(&self) -> HelperAvailability {
+        match &self.admin {
+            Ok(client) => tokio::time::timeout(Duration::from_secs(2), client.availability())
+                .await
+                .unwrap_or(HelperAvailability::Unavailable),
+            Err(state) => state.clone(),
         }
     }
 
     async fn admin_available(&self) -> bool {
-        self.admin_allowlisted_programs()
+        self.admin_helper_state()
             .await
+            .allowlisted_programs()
             .is_some_and(|count| count > 0)
     }
 }
@@ -771,22 +797,20 @@ impl RunOnMineServer {
                 | ConnectorKind::CloudflareOauth
                 | ConnectorKind::OpenAiTunnel
         );
-        let hostname = if remote_connector {
-            None
-        } else {
-            hostname::get()
-                .ok()
-                .map(|value| value.to_string_lossy().into_owned())
-        };
+        let hostname_state = HostnameState::detect(remote_connector);
+        let hostname = hostname_state.value();
         let allowed_roots = (!remote_connector).then(|| self.runtime.0.filesystem.roots());
-        let admin_allowlisted_programs = self.admin_allowlisted_programs().await.unwrap_or(0);
+        let admin_helper_state = self.admin_helper_state().await;
+        let admin_allowlisted_programs = admin_helper_state.allowlisted_programs().unwrap_or(0);
         self.success(&json!({
             "hostname": hostname,
+            "hostname_state": hostname_state,
             "os": std::env::consts::OS,
             "architecture": std::env::consts::ARCH,
             "allowed_roots": allowed_roots,
             "allowed_root_count": self.runtime.0.filesystem.roots().len(),
             "admin_helper": admin_allowlisted_programs > 0,
+            "admin_helper_state": admin_helper_state,
             "admin_allowlisted_programs": admin_allowlisted_programs,
             "desktop_capture": desktop::capture_available(),
             "desktop_input": desktop::input_available(),
@@ -1162,7 +1186,7 @@ impl RunOnMineServer {
         let client = self
             .admin
             .as_ref()
-            .ok_or_else(|| McpError::invalid_request("Privileged helper is unavailable", None))?;
+            .map_err(|_| McpError::invalid_request("Privileged helper is unavailable", None))?;
         let timeout = arguments
             .timeout_seconds
             .map_or(self.runtime.0.process_timeout, Duration::from_secs)
@@ -2080,6 +2104,12 @@ use validation::{
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn remote_machine_info_disables_hostname_collection() {
+        assert_eq!(HostnameState::detect(true), HostnameState::Disabled);
+    }
+
     #[test]
     fn shell_scope_does_not_authorize_platform_native_tools() {
         let shell_only = ScopeSet::parse("shell:exec").unwrap_or_default();

@@ -40,11 +40,14 @@ identity checks before each owned launch; the crash lease then records the real
 post-launch executable, which can differ from a small launcher wrapper. If an
 explicit binary is later removed or becomes unsupported, browser tools are
 unavailable but the rest of the configuration still loads, allowing the owner to
-recover with `auto` or another `set`.
+recover with `auto` or another `set`. Diagnostics classify the launch selection
+as `available`, `missing`, `corrupt`, `unavailable`, or `permission_denied`;
+external CDP reports local executable selection as `disabled`.
 
 The local `show` command displays the full canonical path. MCP
 `browser_profile_info` and support bundles expose only automatic/explicit source,
-product family, availability, and executable basename—not the local path. Remote
+typed state, product family, availability, and executable basename—not the local
+path. Remote
 connectors cannot alter executable selection. Selecting a browser does not weaken
 external CDP rules: external attachment does not launch the configured binary,
 remains unavailable to remote connectors, and is rejected in protected mode.

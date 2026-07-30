@@ -247,18 +247,18 @@ impl ArtifactSnapshot {
         })
     }
 
-    fn previous_owner(&self) -> Option<OwnerIdentity> {
+    fn previous_owner(&self) -> Result<Option<OwnerIdentity>> {
         let Self::File {
             kind: ArtifactKind::Policy,
             bytes,
             ..
         } = self
         else {
-            return None;
+            return Ok(None);
         };
-        serde_json::from_slice::<AdminPolicy>(bytes)
-            .ok()
-            .map(|policy| policy.owner)
+        let policy = serde_json::from_slice::<AdminPolicy>(bytes)
+            .context("previous helper policy snapshot is corrupt")?;
+        Ok(Some(policy.owner))
     }
 
     fn restore(&self) -> Result<()> {
@@ -370,7 +370,14 @@ pub(super) async fn install_transaction(
     };
 
     let snapshots = capture_snapshots(request.paths)?;
-    let previous_owner = snapshots.iter().find_map(ArtifactSnapshot::previous_owner);
+    let previous_owner = snapshots
+        .iter()
+        .find_map(|snapshot| match snapshot.previous_owner() {
+            Ok(Some(owner)) => Some(Ok(owner)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .transpose()?;
     let previous_state = lifecycle.state(request.paths)?;
 
     let result = async {
@@ -696,6 +703,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn corrupt_previous_policy_blocks_owner_reconciliation() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let snapshot = ArtifactSnapshot::File {
+            destination: directory.path().join("policy.json"),
+            kind: ArtifactKind::Policy,
+            bytes: b"not valid policy json".to_vec(),
+            #[cfg(unix)]
+            mode: 0o600,
+        };
+        assert!(snapshot.previous_owner().is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn partial_artifact_activation_restores_every_previous_file() -> Result<()> {
         let fixture = Fixture::installed()?;
@@ -894,21 +915,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_of_running_service_requires_a_restored_policy_owner() -> Result<()> {
+    async fn corrupt_previous_policy_fails_before_service_mutation() -> Result<()> {
         let fixture = Fixture::installed()?;
         fs::write(&fixture.paths.policy, b"invalid-old-policy")?;
-        let mut lifecycle = FakeLifecycle::new(ServiceState {
+        let lifecycle = FakeLifecycle::new(ServiceState {
             installed: true,
             enabled: true,
             running: true,
         });
-        lifecycle.fail_activate = true;
         let error = match install_transaction(fixture.request(InstallFault::None), &lifecycle).await
         {
-            Ok(()) => bail!("rollback without a verifiable previous owner unexpectedly succeeded"),
+            Ok(()) => bail!("installation with a corrupt previous policy unexpectedly succeeded"),
             Err(error) => error,
         };
-        assert!(format!("{error:#}").contains("policy owner is unavailable"));
+        assert!(format!("{error:#}").contains("previous helper policy snapshot is corrupt"));
+        assert!(lifecycle.events()?.is_empty());
         assert_eq!(fs::read(&fixture.paths.policy)?, b"invalid-old-policy");
         Ok(())
     }

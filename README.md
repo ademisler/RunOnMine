@@ -94,8 +94,11 @@ runonmine doctor
 runonmine support-bundle --output runonmine-support.zip
 ```
 
-The ZIP contains generated structural summaries, service state, an audit outcome
-summary, per-entry checksums, and at most five bounded redacted text-log tails.
+The schema-v2 ZIP contains generated structural summaries, typed service and
+input states, an audit outcome summary, per-entry checksums, and at most five
+bounded redacted text-log tails. Missing, disabled, corrupt, unavailable, and
+permission-denied inputs are reported explicitly instead of collapsing to one
+empty or false value.
 It excludes raw configuration, the state database, credential stores, browser
 profiles, audit arguments, connector identifiers, hostnames, URLs, and selected
 filesystem roots. Redaction is defense in depth, so review the ZIP before
@@ -124,6 +127,12 @@ on restart/backoff and removed on process stop.
   capabilities can require local approval but cannot be configured to auto-run;
   administrator execution remains denied.
 - Denied tools are omitted from MCP discovery and rejected if called directly.
+- Runtime availability is represented as typed degraded state rather than an
+  absent value. Browser executable selection, privileged-helper health, local
+  hostname disclosure, agent restart markers, and support diagnostics distinguish
+  `available`, `missing`, `disabled`, `corrupt`, `unavailable`, and
+  `permission_denied` where applicable. Corrupt identity/policy state is never
+  treated as a clean first install.
 - Connector binaries have an explicit trust state. Managed versions are immutable
   digest-addressed files with private receipts; external absolute paths are shown
   as unpinned until the owner runs `runonmine connect pin-external-binaries`.

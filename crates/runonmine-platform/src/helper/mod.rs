@@ -428,6 +428,75 @@ impl HelperResult {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HelperAvailability {
+    Available { allowlisted_programs: usize },
+    Missing,
+    Disabled,
+    Corrupt,
+    Unavailable,
+    PermissionDenied,
+}
+
+impl HelperAvailability {
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+
+    #[must_use]
+    pub const fn allowlisted_programs(&self) -> Option<usize> {
+        match self {
+            Self::Available {
+                allowlisted_programs,
+            } => Some(*allowlisted_programs),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        for cause in error.chain() {
+            if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                return match io.kind() {
+                    std::io::ErrorKind::NotFound => Self::Missing,
+                    std::io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+                    std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::BrokenPipe => Self::Disabled,
+                    std::io::ErrorKind::InvalidData => Self::Corrupt,
+                    _ => Self::Unavailable,
+                };
+            }
+            if cause.downcast_ref::<serde_json::Error>().is_some() {
+                return Self::Corrupt;
+            }
+        }
+        Self::Unavailable
+    }
+
+    fn from_health_result(result: HelperResult) -> Self {
+        match result {
+            HelperResult::Healthy {
+                allowlisted_programs,
+                protocol_version,
+                package_version,
+            } if protocol_version == PROTOCOL_VERSION && package_version == HELPER_VERSION => {
+                Self::Available {
+                    allowlisted_programs,
+                }
+            }
+            HelperResult::Healthy { .. }
+            | HelperResult::Completed { .. }
+            | HelperResult::Rejected { .. } => Self::Corrupt,
+            HelperResult::Failed { .. } => Self::Unavailable,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HelperClient {
     owner: OwnerIdentity,
@@ -458,6 +527,13 @@ impl HelperClient {
         #[cfg(not(any(unix, windows)))]
         {
             bail!("the privileged helper is unsupported on this operating system")
+        }
+    }
+
+    pub async fn availability(&self) -> HelperAvailability {
+        match self.request(&HelperRequest::health()).await {
+            Ok(response) => HelperAvailability::from_health_result(response.result),
+            Err(error) => HelperAvailability::from_error(&error),
         }
     }
 }
@@ -1028,6 +1104,44 @@ mod tests {
         )?;
         assert!(ProgramProfileDocument::load(&relative).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn helper_availability_distinguishes_transport_and_protocol_failures() {
+        let missing = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let denied = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let disabled =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert_eq!(
+            HelperAvailability::from_error(&missing),
+            HelperAvailability::Missing
+        );
+        assert_eq!(
+            HelperAvailability::from_error(&denied),
+            HelperAvailability::PermissionDenied
+        );
+        assert_eq!(
+            HelperAvailability::from_error(&disabled),
+            HelperAvailability::Disabled
+        );
+        assert_eq!(
+            HelperAvailability::from_health_result(HelperResult::Healthy {
+                allowlisted_programs: 2,
+                protocol_version: PROTOCOL_VERSION,
+                package_version: HELPER_VERSION.to_owned(),
+            }),
+            HelperAvailability::Available {
+                allowlisted_programs: 2
+            }
+        );
+        assert_eq!(
+            HelperAvailability::from_health_result(HelperResult::Healthy {
+                allowlisted_programs: 2,
+                protocol_version: PROTOCOL_VERSION.saturating_add(1),
+                package_version: HELPER_VERSION.to_owned(),
+            }),
+            HelperAvailability::Corrupt
+        );
     }
 
     #[test]

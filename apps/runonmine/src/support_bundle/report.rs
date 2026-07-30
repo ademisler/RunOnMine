@@ -1,15 +1,16 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 
 use chrono::{DateTime, Utc};
-use runonmine_browser::resolve_browser_executable;
+use runonmine_browser::{BrowserExecutableState, browser_executable_state};
 use runonmine_core::{
     AppConfig, AppPaths, AuditOutcome, BrowserProfileMode, ConnectorConfig, ConnectorKind,
     PolicyPreset, QuickTunnelRuntimeStore, StateStore,
 };
 #[cfg(target_os = "linux")]
 use runonmine_platform::LinuxSystemService;
-use runonmine_platform::{PlatformInfo, UserService, current};
+use runonmine_platform::{PlatformInfo, ServiceStatus, UserService, current};
 use serde::Serialize;
 
 const AUDIT_SAMPLE_LIMIT: usize = 200;
@@ -32,7 +33,9 @@ pub(super) struct SupportSummary {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(super) enum ConfigReport {
     Missing,
-    Invalid,
+    PermissionDenied,
+    Corrupt,
+    Unavailable,
     Valid {
         schema_version: u32,
         loopback_only: bool,
@@ -76,6 +79,7 @@ enum PublicEndpointStatus {
 pub(super) struct BrowserSummary {
     profile_mode: BrowserProfileMode,
     executable_selection: &'static str,
+    executable_state: BrowserExecutableState,
     executable_product: Option<String>,
     executable_available: bool,
     external_cdp_configured: bool,
@@ -97,17 +101,31 @@ pub(super) struct LimitsSummary {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum ServiceReport {
-    Available { installed: bool, running: bool },
+    Available,
+    Missing,
+    Disabled,
+    PermissionDenied,
     Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AuditChainState {
+    Valid,
+    Corrupt,
+    Unavailable,
+    PermissionDenied,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(super) enum StateReport {
     Missing,
+    PermissionDenied,
+    Corrupt,
     Unavailable,
     Available {
-        audit_chain_valid: Option<bool>,
+        audit_chain: AuditChainState,
         sampled_records: usize,
         outcomes: BTreeMap<String, usize>,
     },
@@ -117,9 +135,11 @@ pub(super) enum StateReport {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(super) enum AuditReport {
     Missing,
+    PermissionDenied,
+    Corrupt,
     Unavailable,
     Available {
-        audit_chain_valid: Option<bool>,
+        audit_chain: AuditChainState,
         records: Vec<AuditSample>,
     },
 }
@@ -135,14 +155,29 @@ pub(super) struct AuditSample {
 }
 pub(super) fn config_report(paths: &AppPaths) -> (ConfigReport, Option<AppConfig>) {
     let path = paths.config_file();
-    let Ok(metadata) = fs::symlink_metadata(&path) else {
-        return (ConfigReport::Missing, None);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return (ConfigReport::Missing, None);
+        }
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            return (ConfigReport::PermissionDenied, None);
+        }
+        Err(_) => return (ConfigReport::Unavailable, None),
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return (ConfigReport::Invalid, None);
+        return (ConfigReport::Corrupt, None);
     }
-    let Ok(config) = AppConfig::load(&path) else {
-        return (ConfigReport::Invalid, None);
+    let config = match AppConfig::load(&path) {
+        Ok(config) => config,
+        Err(error) => {
+            let report = match error_io_kind(&error) {
+                Some(ErrorKind::PermissionDenied) => ConfigReport::PermissionDenied,
+                Some(_) => ConfigReport::Unavailable,
+                None => ConfigReport::Corrupt,
+            };
+            return (report, None);
+        }
     };
     let report = ConfigReport::Valid {
         schema_version: config.version,
@@ -160,19 +195,25 @@ pub(super) fn config_report(paths: &AppPaths) -> (ConfigReport, Option<AppConfig
                 .collect()
         },
         browser: {
-            let executable =
-                resolve_browser_executable(config.browser.executable_path.as_deref()).ok();
+            let executable_state = if config.browser.external_cdp_url.is_some() {
+                BrowserExecutableState::Disabled
+            } else {
+                browser_executable_state(config.browser.executable_path.as_deref())
+            };
             BrowserSummary {
                 profile_mode: config.browser.profile_mode,
-                executable_selection: if config.browser.executable_path.is_some() {
+                executable_selection: if config.browser.external_cdp_url.is_some() {
+                    "disabled"
+                } else if config.browser.executable_path.is_some() {
                     "explicit"
                 } else {
                     "automatic"
                 },
-                executable_product: executable
-                    .as_ref()
+                executable_product: executable_state
+                    .executable()
                     .map(|identity| identity.product.to_string()),
-                executable_available: executable.is_some(),
+                executable_available: executable_state.is_available(),
+                executable_state,
                 external_cdp_configured: config.browser.external_cdp_url.is_some(),
                 private_network_allowed: config.browser.allow_private_network,
                 operation_timeout_seconds: config.browser.operation_timeout_seconds,
@@ -244,45 +285,68 @@ fn connector_summary(
 }
 
 fn user_service_report() -> ServiceReport {
-    UserService::discover()
-        .and_then(|service| service.status())
-        .map_or(ServiceReport::Unavailable, |status| {
-            ServiceReport::Available {
-                installed: status.installed,
-                running: status.running,
-            }
-        })
+    match UserService::discover() {
+        Ok(service) => service_status_report(service.status()),
+        Err(error) => service_error_report(&error),
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn system_service_report() -> ServiceReport {
-    LinuxSystemService::discover()
-        .and_then(|service| service.status())
-        .map_or(ServiceReport::Unavailable, |status| {
-            ServiceReport::Available {
-                installed: status.installed,
-                running: status.running,
-            }
-        })
+    match LinuxSystemService::discover() {
+        Ok(service) => service_status_report(service.status()),
+        Err(error) => service_error_report(&error),
+    }
+}
+
+fn service_status_report(status: anyhow::Result<ServiceStatus>) -> ServiceReport {
+    match status {
+        Ok(status) if !status.installed => ServiceReport::Missing,
+        Ok(status) if !status.running => ServiceReport::Disabled,
+        Ok(_) => ServiceReport::Available,
+        Err(error) => service_error_report(&error),
+    }
+}
+
+fn service_error_report(error: &anyhow::Error) -> ServiceReport {
+    if error_io_kind(error) == Some(ErrorKind::PermissionDenied) {
+        ServiceReport::PermissionDenied
+    } else {
+        ServiceReport::Unavailable
+    }
 }
 
 pub(super) fn audit_report(paths: &AppPaths) -> AuditReport {
     let path = paths.state_db();
-    let Ok(metadata) = fs::symlink_metadata(&path) else {
-        return AuditReport::Missing;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return AuditReport::Missing,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            return AuditReport::PermissionDenied;
+        }
+        Err(_) => return AuditReport::Unavailable,
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return AuditReport::Unavailable;
+        return AuditReport::Corrupt;
     }
-    let Ok(store) = StateStore::open(&path) else {
-        return AuditReport::Unavailable;
+    let store = match StateStore::open(&path) {
+        Ok(store) => store,
+        Err(error) => return audit_error_report(&error),
     };
-    let audit_chain_valid = store.verify_audit_chain().ok();
-    let Ok(records) = store.audit_tail(AUDIT_SAMPLE_LIMIT) else {
-        return AuditReport::Unavailable;
+    let audit_chain = match store.verify_audit_chain() {
+        Ok(true) => AuditChainState::Valid,
+        Err(error) if error_io_kind(&error) == Some(ErrorKind::PermissionDenied) => {
+            AuditChainState::PermissionDenied
+        }
+        Err(error) if error_io_kind(&error).is_some() => AuditChainState::Unavailable,
+        Ok(false) | Err(_) => AuditChainState::Corrupt,
+    };
+    let records = match store.audit_tail(AUDIT_SAMPLE_LIMIT) {
+        Ok(records) => records,
+        Err(error) => return audit_error_report(&error),
     };
     AuditReport::Available {
-        audit_chain_valid,
+        audit_chain,
         records: records
             .into_iter()
             .map(|record| AuditSample {
@@ -300,9 +364,11 @@ pub(super) fn audit_report(paths: &AppPaths) -> AuditReport {
 pub(super) fn state_report(audit: &AuditReport) -> StateReport {
     match audit {
         AuditReport::Missing => StateReport::Missing,
+        AuditReport::PermissionDenied => StateReport::PermissionDenied,
+        AuditReport::Corrupt => StateReport::Corrupt,
         AuditReport::Unavailable => StateReport::Unavailable,
         AuditReport::Available {
-            audit_chain_valid,
+            audit_chain,
             records,
         } => {
             let mut outcomes = BTreeMap::new();
@@ -311,12 +377,28 @@ pub(super) fn state_report(audit: &AuditReport) -> StateReport {
                 *outcomes.entry(key).or_insert(0) += 1;
             }
             StateReport::Available {
-                audit_chain_valid: *audit_chain_valid,
+                audit_chain: *audit_chain,
                 sampled_records: records.len(),
                 outcomes,
             }
         }
     }
+}
+
+fn audit_error_report(error: &anyhow::Error) -> AuditReport {
+    match error_io_kind(error) {
+        Some(ErrorKind::PermissionDenied) => AuditReport::PermissionDenied,
+        Some(_) => AuditReport::Unavailable,
+        None => AuditReport::Corrupt,
+    }
+}
+
+fn error_io_kind(error: &anyhow::Error) -> Option<ErrorKind> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind)
+    })
 }
 
 fn sanitize_identifier(value: &str) -> String {
@@ -357,5 +439,56 @@ pub(super) fn build_support_summary(
         },
         state,
         included_log_files,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn support_config_distinguishes_missing_and_corrupt() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let paths = AppPaths::under(directory.path());
+        assert!(matches!(config_report(&paths).0, ConfigReport::Missing));
+
+        fs::create_dir_all(&paths.config_dir)?;
+        fs::write(paths.config_file(), b"not valid toml")?;
+        assert!(matches!(config_report(&paths).0, ConfigReport::Corrupt));
+        Ok(())
+    }
+
+    #[test]
+    fn support_audit_distinguishes_missing_and_corrupt() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let paths = AppPaths::under(directory.path());
+        assert!(matches!(audit_report(&paths), AuditReport::Missing));
+
+        fs::create_dir_all(&paths.state_dir)?;
+        fs::write(paths.state_db(), b"not a sqlite database")?;
+        assert!(matches!(audit_report(&paths), AuditReport::Corrupt));
+        Ok(())
+    }
+
+    #[test]
+    fn service_status_distinguishes_missing_disabled_and_available() {
+        let missing = service_status_report(Ok(ServiceStatus {
+            installed: false,
+            running: false,
+            detail: String::new(),
+        }));
+        let disabled = service_status_report(Ok(ServiceStatus {
+            installed: true,
+            running: false,
+            detail: String::new(),
+        }));
+        let available = service_status_report(Ok(ServiceStatus {
+            installed: true,
+            running: true,
+            detail: String::new(),
+        }));
+        assert!(matches!(missing, ServiceReport::Missing));
+        assert!(matches!(disabled, ServiceReport::Disabled));
+        assert!(matches!(available, ServiceReport::Available));
     }
 }

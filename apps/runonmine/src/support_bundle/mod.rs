@@ -12,7 +12,7 @@ use archive::{BundleEntry, write_zip_atomically};
 use redaction::{collect_redacted_logs, known_sensitive_values};
 use report::{audit_report, build_support_summary, config_report, state_report};
 
-const BUNDLE_SCHEMA_VERSION: u32 = 1;
+const BUNDLE_SCHEMA_VERSION: u32 = 2;
 const README: &str = "RunOnMine redacted support bundle\n\n\
 This archive is generated from bounded summaries. It does not include the raw\n\
 configuration file, state database, browser profiles, credential store, audit\n\
