@@ -78,10 +78,10 @@ Status markers:
 - [x] **P2-19 — Use real redaction for service-manager output or rename it accurately.** Service-manager capture is named `bounded_command_output`; it strips control characters and limits size without claiming secret sanitization.
 - [x] **P2-20 — Record skipped/truncated support-bundle inputs in the manifest.** Schema-v3 manifests report each input as complete, partial or missing with included/skipped/truncated counts and no source paths.
 - [x] **P2-21 — Enforce robust connector IDs.** New connectors use UUIDs; all layers require 8-64 lowercase token IDs with safe boundaries, and support logs redact configured connector IDs only as exact identity tokens.
-- [ ] **P2-22 — Reconcile orphan connector artifacts.** Doctor/startup must report and repair config-less directories and runtime state.
-- [ ] **P2-23 — Inventory orphan secrets outside purge.** Doctor should report credentials with no configured owner.
-- [ ] **P2-24 — Make doctor checks typed and modular.** Standardize ID, severity, status, evidence and remediation.
-- [ ] **P2-25 — Standardize machine-readable diagnostics.** Add consistent `--json` output to status/doctor/audit/service commands.
+- [x] **P2-22 — Reconcile orphan connector artifacts.** HTTP/stdio startup and `doctor --repair` quarantine config-less connector data/state directories, clear orphan Quick runtime records, retain ambiguous/symlinked entries fail-closed, and report typed counts.
+- [x] **P2-23 — Inventory orphan secrets outside purge.** Secret writes maintain an owner-only name index with no values; encrypted storage provides complete enumeration, platform keyrings report partial legacy coverage, and doctor reports or explicitly repairs indexed credentials without a configured connector owner.
+- [x] **P2-24 — Make doctor checks typed and modular.** Doctor is split into domain handlers and emits stable check IDs with severity, status, bounded evidence and remediation; failures, warnings, repairs and skips share one schema.
+- [x] **P2-25 — Standardize machine-readable diagnostics.** Doctor, audit tail, service status and local HTTP status support a common `{schema_version, command, data}` JSON envelope while retaining human-readable defaults.
 - [ ] **P2-26 — Add crash-recoverable config/secret transactions.** Journal generations and reconcile interrupted changes.
 - [ ] **P2-27 — Test interrupted state/config migrations.** Cover process kill, disk full, WAL corruption, restore, downgrade and concurrent migration.
 - [ ] **P2-28 — Install user-service executables into a stable versioned location.** Do not depend on a movable archive path.

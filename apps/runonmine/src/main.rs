@@ -89,7 +89,7 @@ enum Command {
     Uninstall(UninstallArgs),
     /// Create a bounded, redacted ZIP for troubleshooting.
     SupportBundle(SupportBundleArgs),
-    Doctor,
+    Doctor(DoctorArgs),
     Audit {
         #[command(subcommand)]
         command: AuditCommand,
@@ -171,6 +171,9 @@ enum LocalHttpCommand {
         /// Write current credentials to a new owner-only JSON file. The path must be absolute.
         #[arg(long, value_name = "ABSOLUTE_FILE")]
         token_output: Option<PathBuf>,
+        /// Emit a versioned machine-readable status envelope.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -442,7 +445,7 @@ enum ServiceCommand {
     Uninstall(ServiceScopeArgs),
     Start(ServiceScopeArgs),
     Stop(ServiceScopeArgs),
-    Status(ServiceScopeArgs),
+    Status(ServiceStatusArgs),
 }
 
 #[derive(Debug, Args)]
@@ -453,6 +456,16 @@ struct ServiceInstallArgs {
     /// Existing non-root account used by the Linux system service.
     #[arg(long, value_name = "ACCOUNT", requires = "system")]
     user: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Args)]
+struct ServiceStatusArgs {
+    /// Query the headless systemd service (Linux only).
+    #[arg(long)]
+    system: bool,
+    /// Emit a versioned machine-readable status envelope.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Copy, Debug, Args)]
@@ -479,6 +492,16 @@ struct UninstallArgs {
     confirm: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Args)]
+struct DoctorArgs {
+    /// Emit the versioned machine-readable diagnostic report.
+    #[arg(long)]
+    json: bool,
+    /// Quarantine config-less connector directories, clear orphan runtime state, and delete indexed orphan credentials.
+    #[arg(long)]
+    repair: bool,
+}
+
 #[derive(Debug, Args)]
 struct SupportBundleArgs {
     /// Output ZIP. Defaults to a timestamped file in the current directory.
@@ -491,6 +514,9 @@ enum AuditCommand {
     Tail {
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Emit a versioned machine-readable audit envelope.
+        #[arg(long)]
+        json: bool,
     },
     Export {
         output: PathBuf,
@@ -594,7 +620,7 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Lock(args) => emergency_lock(&args),
         Command::Uninstall(args) => uninstall(&args),
         Command::SupportBundle(args) => create_support_bundle(args.output.as_deref()),
-        Command::Doctor => doctor().await,
+        Command::Doctor(args) => doctor(&args).await,
         Command::Audit { command } => audit(command),
     }
 }

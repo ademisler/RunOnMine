@@ -7,6 +7,7 @@ pub mod audit;
 mod audit_mac;
 pub mod config;
 pub mod connector_id;
+pub mod connector_inventory;
 pub mod connector_removal;
 pub mod filesystem;
 pub mod paths;
@@ -31,6 +32,10 @@ pub use config::{
 pub use connector_id::{
     CONNECTOR_ID_MAX_LEN, CONNECTOR_ID_MIN_LEN, connector_id_is_valid, validate_connector_id,
 };
+pub use connector_inventory::{
+    ConnectorArtifactInventory, ConnectorArtifactKind, ConnectorArtifactReconciliation,
+    OrphanConnectorArtifact, inventory_connector_artifacts, reconcile_connector_artifacts,
+};
 pub use connector_removal::{
     ConnectorRemovalJournal, ConnectorRemovalLock, ConnectorRemovalPhase, ConnectorRemovalRecord,
     connector_secret_suffixes, remove_connector_authorization,
@@ -42,8 +47,8 @@ pub use policy::{
     PolicyPreset, PolicyRule, PrincipalContext, PrincipalMatcher, ResourceContext, ResourceMatcher,
 };
 pub use quick_tunnel_runtime::{
-    QuickTunnelGeneration, QuickTunnelRuntimeRecord, QuickTunnelRuntimeStore,
-    validate_quick_tunnel_url,
+    QuickTunnelGeneration, QuickTunnelRuntimeInventory, QuickTunnelRuntimeRecord,
+    QuickTunnelRuntimeStore, validate_quick_tunnel_url,
 };
 pub use storage::{AuditRecord, ConnectorAuthorizationCleanup, StateStore, StateStoreMetrics};
 

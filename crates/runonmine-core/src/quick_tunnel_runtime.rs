@@ -45,6 +45,12 @@ pub struct QuickTunnelRuntimeRecord {
     pub observed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct QuickTunnelRuntimeInventory {
+    pub records: Vec<QuickTunnelRuntimeRecord>,
+    pub unsafe_entries: usize,
+}
+
 impl QuickTunnelRuntimeRecord {
     fn validate(&self) -> Result<()> {
         if self.version != STATE_VERSION {
@@ -73,6 +79,49 @@ impl QuickTunnelRuntimeStore {
         Self {
             directory: paths.state_dir.join(STATE_DIRECTORY),
         }
+    }
+
+    pub fn inventory(&self) -> Result<QuickTunnelRuntimeInventory> {
+        let _lock = self.lock()?;
+        let mut inventory = QuickTunnelRuntimeInventory::default();
+        let entries = fs::read_dir(&self.directory)?;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                inventory.unsafe_entries = inventory.unsafe_entries.saturating_add(1);
+                continue;
+            };
+            if entry.file_name() == STATE_LOCK {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                inventory.unsafe_entries = inventory.unsafe_entries.saturating_add(1);
+                continue;
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() > MAX_STATE_BYTES
+            {
+                inventory.unsafe_entries = inventory.unsafe_entries.saturating_add(1);
+                continue;
+            }
+            let record = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<QuickTunnelRuntimeRecord>(&bytes).ok());
+            let Some(record) = record else {
+                inventory.unsafe_entries = inventory.unsafe_entries.saturating_add(1);
+                continue;
+            };
+            if record.validate().is_err() || self.record_path(&record.connector_id) != path {
+                inventory.unsafe_entries = inventory.unsafe_entries.saturating_add(1);
+                continue;
+            }
+            inventory.records.push(record);
+        }
+        inventory
+            .records
+            .sort_by(|left, right| left.connector_id.cmp(&right.connector_id));
+        Ok(inventory)
     }
 
     pub fn begin(&self, connector_id: &str) -> Result<QuickTunnelGeneration> {

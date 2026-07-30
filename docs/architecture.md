@@ -368,3 +368,20 @@ longer present. Successful disable/removal then reconciles the transport plane:
 a detected HTTP agent is explicitly restarted and must publish a fresh version
 handshake. This closes protocol sessions and tears down managed tunnel process
 groups rather than waiting for an operator restart.
+
+## Diagnostic and orphan-state reconciliation
+
+Doctor checks are domain handlers that return a stable typed record: check ID,
+severity, status, bounded evidence, and remediation. Human output and the
+versioned JSON envelope are rendered from the same records. Startup reconciles
+pending connector removals first, then quarantines valid connector data/state
+directories that no longer exist in committed config and clears config-less
+Quick Tunnel runtime records. Quarantine retains data instead of deleting it;
+invalid IDs, symlinks, and unsafe entry types remain untouched and are counted.
+
+Secret backends are wrapped by a cross-process, owner-only name index. The index
+contains credential names only. Encrypted-file storage can enumerate its full
+key set and merges it with the index. Platform keyrings expose the managed index
+but mark coverage partial because historical keyring entries cannot be listed
+portably. Doctor can therefore report and explicitly delete known orphan
+connector credentials without reading or exporting secret values.

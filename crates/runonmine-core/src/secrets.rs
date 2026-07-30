@@ -15,10 +15,25 @@ use zeroize::Zeroizing;
 
 use crate::{AppPaths, atomic};
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SecretInventory {
+    pub names: Vec<String>,
+    pub complete: bool,
+    pub source: &'static str,
+}
+
 pub trait SecretStore: Send + Sync {
     fn get(&self, name: &str) -> Result<Option<SecretString>>;
     fn set(&self, name: &str, value: &SecretString) -> Result<()>;
     fn delete(&self, name: &str) -> Result<()>;
+
+    fn inventory(&self) -> Result<SecretInventory> {
+        Ok(SecretInventory {
+            names: Vec::new(),
+            complete: false,
+            source: "backend_not_enumerable",
+        })
+    }
 }
 
 /// Records original secret values before mutation so a coordinating caller
@@ -333,17 +348,170 @@ impl SecretStore for EncryptedFileSecretStore {
         file.values.remove(name);
         self.save(&file)
     }
+
+    fn inventory(&self) -> Result<SecretInventory> {
+        let _guard = self.lock()?;
+        let _file_guard = self.process_file_lock()?;
+        let file = self.load()?;
+        Ok(SecretInventory {
+            names: file.values.keys().cloned().collect(),
+            complete: true,
+            source: "encrypted_file",
+        })
+    }
+}
+
+const SECRET_INDEX_VERSION: u16 = 1;
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretNameIndex {
+    version: u16,
+    names: BTreeMap<String, bool>,
+}
+
+struct IndexedSecretStore {
+    inner: Box<dyn SecretStore>,
+    index_path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl std::fmt::Debug for IndexedSecretStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IndexedSecretStore")
+            .field("index_path", &self.index_path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IndexedSecretStore {
+    fn new(inner: Box<dyn SecretStore>, index_path: PathBuf) -> Self {
+        Self {
+            inner,
+            index_path,
+            lock: Mutex::new(()),
+        }
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, ()>> {
+        self.lock
+            .lock()
+            .map_err(|_| anyhow!("secret inventory lock is poisoned"))
+    }
+
+    fn file_lock_path(&self) -> PathBuf {
+        let mut name = self
+            .index_path
+            .file_name()
+            .unwrap_or_default()
+            .to_os_string();
+        name.push(".lock");
+        self.index_path.with_file_name(name)
+    }
+
+    fn load_index(&self) -> Result<SecretNameIndex> {
+        match fs::symlink_metadata(&self.index_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SecretNameIndex {
+                version: SECRET_INDEX_VERSION,
+                names: BTreeMap::new(),
+            }),
+            Err(error) => Err(error.into()),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!("secret inventory must be a regular non-symlink file")
+            }
+            Ok(_) => {
+                let index: SecretNameIndex = serde_json::from_slice(&fs::read(&self.index_path)?)?;
+                if index.version != SECRET_INDEX_VERSION {
+                    bail!("unsupported secret inventory version");
+                }
+                Ok(index)
+            }
+        }
+    }
+
+    fn save_index(&self, index: &SecretNameIndex) -> Result<()> {
+        let parent = self
+            .index_path
+            .parent()
+            .context("secret inventory path has no parent")?;
+        fs::create_dir_all(parent)?;
+        restrict_secret_directory(parent)?;
+        atomic::write(&self.index_path, &serde_json::to_vec(index)?, 0o600)?;
+        restrict_secret_file(&self.index_path)
+    }
+
+    fn record_name(&self, name: &str, present: bool) -> Result<()> {
+        let _guard = self.lock()?;
+        let _process_guard = ProcessFileLock::acquire(&self.file_lock_path())?;
+        let mut index = self.load_index()?;
+        if present {
+            index.names.insert(name.to_owned(), true);
+        } else {
+            index.names.remove(name);
+        }
+        self.save_index(&index)
+    }
+}
+
+impl SecretStore for IndexedSecretStore {
+    fn get(&self, name: &str) -> Result<Option<SecretString>> {
+        self.inner.get(name)
+    }
+
+    fn set(&self, name: &str, value: &SecretString) -> Result<()> {
+        self.inner.set(name, value)?;
+        self.record_name(name, true)
+    }
+
+    fn delete(&self, name: &str) -> Result<()> {
+        self.inner.delete(name)?;
+        self.record_name(name, false)
+    }
+
+    fn inventory(&self) -> Result<SecretInventory> {
+        let _guard = self.lock()?;
+        let _process_guard = ProcessFileLock::acquire(&self.file_lock_path())?;
+        let index = self.load_index()?;
+        let native = self.inner.inventory()?;
+        let mut names = native
+            .names
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        names.extend(index.names.into_keys());
+        Ok(SecretInventory {
+            names: names.into_iter().collect(),
+            complete: native.complete,
+            source: if native.complete {
+                "backend_and_managed_index"
+            } else {
+                "managed_index_partial"
+            },
+        })
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub fn default_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
     #[cfg(debug_assertions)]
-    if std::env::var_os("RUNONMINE_TEST_FILE_SECRETS").is_some() {
-        return Ok(Box::new(EncryptedFileSecretStore::from_environment(
+    let inner: Box<dyn SecretStore> = if std::env::var_os("RUNONMINE_TEST_FILE_SECRETS").is_some() {
+        Box::new(EncryptedFileSecretStore::from_environment(
             paths.state_dir.join("secrets.enc"),
             "dev.runonmine.agent",
-        )?));
-    }
+        )?)
+    } else {
+        default_platform_secret_store(paths)?
+    };
+    #[cfg(not(debug_assertions))]
+    let inner = default_platform_secret_store(paths)?;
+    Ok(Box::new(IndexedSecretStore::new(
+        inner,
+        paths.state_dir.join("secret-names.json"),
+    )))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn default_platform_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
     #[cfg(target_os = "linux")]
     {
         let desktop_secret_service = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
@@ -454,6 +622,27 @@ mod tests {
             Some("original".to_owned())
         );
         assert!(store.get("new")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_store_tracks_names_without_secret_values() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let index_path = directory.path().join("secret-names.json");
+        let store =
+            IndexedSecretStore::new(Box::new(MemorySecretStore::default()), index_path.clone());
+        store.set(
+            "connector.00000000-0000-4000-8000-000000000123.token",
+            &SecretString::from("never-write-this-value".to_owned()),
+        )?;
+        let inventory = store.inventory()?;
+        assert_eq!(inventory.names.len(), 1);
+        assert!(!inventory.complete);
+        let serialized = String::from_utf8(fs::read(&index_path)?)?;
+        assert!(serialized.contains("connector.00000000-0000-4000-8000-000000000123.token"));
+        assert!(!serialized.contains("never-write-this-value"));
+        store.delete("connector.00000000-0000-4000-8000-000000000123.token")?;
+        assert!(store.inventory()?.names.is_empty());
         Ok(())
     }
 

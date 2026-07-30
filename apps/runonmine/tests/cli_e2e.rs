@@ -122,6 +122,22 @@ fn setup_policy_lock_and_purge_run_as_an_isolated_user_flow() -> Result<()> {
     let approvals = cli.run_ok(&["approvals", "list"])?;
     assert!(approvals.contains("No pending approvals."));
     let _audit = cli.run_ok(&["audit", "tail", "--limit", "5"])?;
+    let audit_json: serde_json::Value =
+        serde_json::from_str(&cli.run_ok(&["audit", "tail", "--limit", "5", "--json"])?)?;
+    assert_eq!(audit_json["schema_version"], 1);
+    assert_eq!(audit_json["command"], "audit.tail");
+    assert!(audit_json["data"].is_array());
+
+    let doctor_json: serde_json::Value = serde_json::from_str(&cli.run_ok(&["doctor", "--json"])?)?;
+    assert_eq!(doctor_json["schema_version"], 1);
+    assert_eq!(doctor_json["command"], "doctor");
+    assert!(doctor_json["data"]["checks"].is_array());
+
+    let service_json: serde_json::Value =
+        serde_json::from_str(&cli.run_ok(&["service", "status", "--json"])?)?;
+    assert_eq!(service_json["schema_version"], 1);
+    assert_eq!(service_json["command"], "service.status");
+    assert!(service_json["data"]["installed"].is_boolean());
 
     let bundle_path = cli.root.path().join("support.zip");
     let bundle_path_text = bundle_path.to_string_lossy().into_owned();
@@ -150,6 +166,49 @@ fn setup_policy_lock_and_purge_run_as_an_isolated_user_flow() -> Result<()> {
     let purged = cli.run_ok(&["uninstall", "--purge", "--confirm", "PURGE"])?;
     assert!(purged.contains("permanently removed"));
     assert!(!config_path.exists());
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_and_repairs_indexed_orphan_connector_credentials() -> Result<()> {
+    let cli = IsolatedCli::new()?;
+    let project = cli.project.to_string_lossy().into_owned();
+    let setup = cli.run_ok(&["setup", "--root", &project])?;
+    let config_path = config_path_from_setup(&setup)?;
+    cli.run_ok(&["connect", "local-http", "enable"])?;
+
+    AppConfig::update(&config_path, |config| {
+        config
+            .connectors
+            .retain(|connector| connector.kind != ConnectorKind::LocalHttp);
+        Ok(())
+    })?;
+
+    let report: serde_json::Value = serde_json::from_str(&cli.run_ok(&["doctor", "--json"])?)?;
+    let secret_check = report["data"]["checks"]
+        .as_array()
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|check| check["id"] == "inventory.connector_secrets")
+        })
+        .context("doctor omitted connector secret inventory")?;
+    assert_eq!(secret_check["status"], "warn");
+    assert_eq!(secret_check["evidence"]["orphan_count"], 1);
+
+    let repaired: serde_json::Value =
+        serde_json::from_str(&cli.run_ok(&["doctor", "--repair", "--json"])?)?;
+    let secret_check = repaired["data"]["checks"]
+        .as_array()
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|check| check["id"] == "inventory.connector_secrets")
+        })
+        .context("repaired doctor report omitted connector secret inventory")?;
+    assert_eq!(secret_check["status"], "repaired");
+    assert_eq!(secret_check["evidence"]["repaired_entries"], 1);
+    assert_eq!(repaired["data"]["repaired"], true);
     Ok(())
 }
 
@@ -200,6 +259,12 @@ fn local_http_credentials_never_reach_standard_output() -> Result<()> {
     assert!(status.contains("Token configured: true"));
     assert!(!status.contains(first_token));
     assert!(!status.contains("Bearer token:"));
+    let status_json_text = cli.run_ok(&["connect", "local-http", "status", "--json"])?;
+    let status_json: serde_json::Value = serde_json::from_str(&status_json_text)?;
+    assert_eq!(status_json["schema_version"], 1);
+    assert_eq!(status_json["command"], "connect.local_http.status");
+    assert_eq!(status_json["data"]["token_configured"], true);
+    assert!(!status_json_text.contains(first_token));
 
     let legacy_reveal = cli.run(&["connect", "local-http", "status", "--show-token"])?;
     assert!(!legacy_reveal.status.success());

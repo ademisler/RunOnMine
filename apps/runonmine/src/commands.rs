@@ -2,6 +2,8 @@ use super::*;
 
 mod connector_transactions;
 mod connectors;
+#[path = "commands/doctor.rs"]
+mod doctor_command;
 mod openai_connector_transaction;
 #[cfg(test)]
 use connector_transactions::commit_new_connector;
@@ -11,6 +13,26 @@ use connectors::{
     ensure_private_directory, generate_path_secret, load_connector_binary,
     validate_private_output_path, write_oauth_registration_credentials,
 };
+pub(crate) use doctor_command::doctor;
+
+#[derive(serde::Serialize)]
+struct MachineOutput<'a, T> {
+    schema_version: u16,
+    command: &'a str,
+    data: &'a T,
+}
+
+fn print_json_output<T: serde::Serialize>(command: &str, data: &T) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&MachineOutput {
+            schema_version: 1,
+            command,
+            data,
+        })?
+    );
+    Ok(())
+}
 
 pub(super) fn policy(command: PolicyCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
@@ -597,7 +619,13 @@ pub(super) fn service(command: ServiceCommand) -> Result<()> {
             } else {
                 UserService::discover()?.status()?
             };
-            println!("{}", serde_json::to_string_pretty(&status)?);
+            if args.json {
+                print_json_output("service.status", &status)?;
+            } else {
+                println!("Installed: {}", status.installed);
+                println!("Running: {}", status.running);
+                println!("Detail: {}", status.detail);
+            }
             return Ok(());
         }
     }
@@ -804,296 +832,25 @@ pub(super) fn uninstall(arguments: &UninstallArgs) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::if_not_else, clippy::single_match_else, clippy::too_many_lines)]
-pub(super) async fn doctor() -> Result<()> {
-    let paths = AppPaths::discover()?;
-    println!("RunOnMine doctor");
-    println!("Platform: {} {}", current().os, current().architecture);
-    let config =
-        AppConfig::load(&paths.config_file()).context("configuration is missing or invalid")?;
-    println!(
-        "Config: valid (loopback {}:{})",
-        config.bind_host, config.port
-    );
-    println!("Legacy MacMCP port 45799: reserved and untouched");
-    let mut failures = 0_u32;
-    if config.browser.external_cdp_url.is_some() {
-        println!("Browser executable: inactive (external CDP attachment configured)");
-    } else {
-        match resolve_browser_executable(config.browser.executable_path.as_deref()) {
-            Ok(identity) => println!(
-                "Browser executable: {} ({}) at {}",
-                identity.product,
-                identity.source,
-                identity.path.display()
-            ),
-            Err(error) => {
-                println!("Browser executable: FAILED ({error})");
-                failures = failures.saturating_add(1);
-            }
-        }
-    }
-    let state = StateStore::open(&paths.state_db())?;
-    if !state.verify_audit_chain()? {
-        println!("Audit chain: FAILED");
-        failures = failures.saturating_add(1);
-    } else {
-        println!("Audit chain: valid");
-    }
-    let agent_reachable = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        tokio::net::TcpStream::connect(("127.0.0.1", config.port)),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok());
-    println!("Agent loopback listener: {agent_reachable}");
-    let secrets = default_secret_store(&paths)?;
-    let quick_runtime = QuickTunnelRuntimeStore::new(&paths);
-    for connector in config
-        .connectors
-        .iter()
-        .filter(|connector| connector.enabled)
-    {
-        match connector.kind {
-            ConnectorKind::LocalHttp => {
-                if secrets
-                    .get(&local_http_secret_name(&connector.id))?
-                    .is_some()
-                {
-                    println!("{}: authenticated local HTTP configured", connector.id);
-                } else {
-                    println!("{}: local HTTP bearer token missing", connector.id);
-                    failures = failures.saturating_add(1);
-                }
-            }
-            ConnectorKind::CloudflareQuick => {
-                let Some(settings) = &connector.cloudflare_quick else {
-                    println!("{}: Cloudflare Quick settings FAILED", connector.id);
-                    failures = failures.saturating_add(1);
-                    continue;
-                };
-                match load_connector_binary(
-                    &paths,
-                    BinaryKind::Cloudflared,
-                    ReleaseProvider::Cloudflared,
-                    settings.cloudflared_path.as_deref(),
-                )? {
-                    Some(binary) => {
-                        match BinaryProbe::run_compatible(
-                            &binary,
-                            std::time::Duration::from_secs(10),
-                        )
-                        .await
-                        {
-                            Ok(probe) => {
-                                let runtime_url_discovered = match quick_runtime.get(&connector.id)
-                                {
-                                    Ok(record) => record.and_then(|item| item.public_url).is_some(),
-                                    Err(_) => {
-                                        println!(
-                                            "{}: Quick Tunnel runtime state FAILED",
-                                            connector.id
-                                        );
-                                        failures = failures.saturating_add(1);
-                                        false
-                                    }
-                                };
-                                println!(
-                                    "{}: cloudflared {}, public URL discovered={runtime_url_discovered}",
-                                    connector.id, probe.version
-                                );
-                            }
-                            Err(_) => {
-                                println!("{}: cloudflared probe FAILED", connector.id);
-                                failures = failures.saturating_add(1);
-                            }
-                        }
-                    }
-                    None => {
-                        println!("{}: cloudflared missing", connector.id);
-                        failures = failures.saturating_add(1);
-                    }
-                }
-                if secrets
-                    .get(&format!("connector.{}.path_secret", connector.id))?
-                    .is_none()
-                {
-                    println!("{}: Quick Tunnel path credential missing", connector.id);
-                    failures = failures.saturating_add(1);
-                }
-            }
-            ConnectorKind::CloudflareOauth => {
-                let Some(settings) = &connector.cloudflare_named else {
-                    println!("{}: Cloudflare OAuth settings FAILED", connector.id);
-                    failures = failures.saturating_add(1);
-                    continue;
-                };
-                match load_connector_binary(
-                    &paths,
-                    BinaryKind::Cloudflared,
-                    ReleaseProvider::Cloudflared,
-                    settings.cloudflared_path.as_deref(),
-                )? {
-                    Some(binary) => {
-                        match BinaryProbe::run_compatible(
-                            &binary,
-                            std::time::Duration::from_secs(10),
-                        )
-                        .await
-                        {
-                            Ok(probe) => {
-                                println!(
-                                    "{}: cloudflared {}, OAuth configured",
-                                    connector.id, probe.version
-                                );
-                            }
-                            Err(_) => {
-                                println!("{}: cloudflared probe FAILED", connector.id);
-                                failures = failures.saturating_add(1);
-                            }
-                        }
-                    }
-                    None => {
-                        println!("{}: cloudflared missing", connector.id);
-                        failures = failures.saturating_add(1);
-                    }
-                }
-                for suffix in [
-                    "github_client_id",
-                    "github_client_secret",
-                    "oauth_hash_key",
-                    "oauth_registration_token",
-                ] {
-                    if secrets
-                        .get(&format!("connector.{}.{suffix}", connector.id))?
-                        .is_none()
-                    {
-                        println!("{}: OAuth credential {suffix} missing", connector.id);
-                        failures = failures.saturating_add(1);
-                    }
-                }
-                if connector
-                    .oauth_owner
-                    .as_ref()
-                    .map(|owner| owner.github_id)
-                    .is_none_or(|id| id == 0)
-                {
-                    println!("{}: immutable GitHub owner ID missing", connector.id);
-                    failures = failures.saturating_add(1);
-                }
-            }
-            ConnectorKind::OpenAiTunnel => {
-                let Some(settings) = &connector.openai_tunnel else {
-                    println!("{}: OpenAI settings FAILED", connector.id);
-                    failures = failures.saturating_add(1);
-                    continue;
-                };
-                let Some(binary) = load_connector_binary(
-                    &paths,
-                    BinaryKind::OpenAiTunnelClient,
-                    ReleaseProvider::OpenAiTunnelClient,
-                    settings.tunnel_client_path.as_deref(),
-                )?
-                else {
-                    println!("{}: tunnel-client missing", connector.id);
-                    failures = failures.saturating_add(1);
-                    continue;
-                };
-                match BinaryProbe::run_compatible(&binary, std::time::Duration::from_secs(10)).await
-                {
-                    Ok(probe) => println!("{}: tunnel-client {}", connector.id, probe.version),
-                    Err(_) => {
-                        println!("{}: tunnel-client probe FAILED", connector.id);
-                        failures = failures.saturating_add(1);
-                        continue;
-                    }
-                }
-                let Some(runtime_key) =
-                    secrets.get(&format!("connector.{}.runtime_api_key", connector.id))?
-                else {
-                    println!("{}: OpenAI runtime key missing", connector.id);
-                    failures = failures.saturating_add(1);
-                    continue;
-                };
-                let profile_directory = paths
-                    .data_dir
-                    .join("connectors")
-                    .join(&connector.id)
-                    .join("openai-profiles");
-                let health_directory = paths.state_dir.join("connectors").join(&connector.id);
-                let profile = OpenAiTunnelProfile::builder(
-                    &settings.profile,
-                    &settings.tunnel_id,
-                    OpenAiMcpTarget::runonmine_stdio(
-                        std::env::current_exe()?.canonicalize()?,
-                        &connector.id,
-                    )?,
-                )
-                .profile_directory(profile_directory)
-                .health_address(format!("127.0.0.1:{}", settings.health_port).parse()?)
-                .health_url_file(health_directory.join("tunnel-health.url"))
-                .build();
-                match profile {
-                    Ok(profile) => {
-                        let report = run_once(
-                            profile.doctor_command(
-                                &binary,
-                                SecretValue::new(runtime_key.expose_secret().to_owned())?,
-                            )?,
-                            std::time::Duration::from_secs(30),
-                            256 * 1_024,
-                        )
-                        .await?;
-                        if report.success {
-                            println!("{}: tunnel-client doctor passed", connector.id);
-                        } else {
-                            println!("{}: tunnel-client doctor FAILED", connector.id);
-                            failures = failures.saturating_add(1);
-                        }
-                    }
-                    Err(_) => {
-                        println!("{}: OpenAI profile FAILED", connector.id);
-                        failures = failures.saturating_add(1);
-                    }
-                }
-            }
-            ConnectorKind::LocalStdio => {}
-        }
-    }
-    let status = UserService::discover()?.status()?;
-    println!(
-        "User service: installed={}, running={}",
-        status.installed, status.running
-    );
-    #[cfg(target_os = "linux")]
-    {
-        let status = LinuxSystemService::discover()?.status()?;
-        println!(
-            "System service: installed={}, running={}",
-            status.installed, status.running
-        );
-    }
-    if failures > 0 {
-        bail!("doctor found {failures} failing check(s)");
-    }
-    println!("Doctor result: healthy");
-    Ok(())
-}
-
 pub(super) fn audit(command: AuditCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
     let state = StateStore::open(&paths.state_db()).context("run `runonmine setup` first")?;
     match command {
-        AuditCommand::Tail { limit } => {
-            for record in state.audit_tail(limit)? {
-                println!(
-                    "{}  {}  {}  {:?}  {}",
-                    record.sequence,
-                    record.event.timestamp.to_rfc3339(),
-                    record.event.tool_name,
-                    record.event.outcome,
-                    record.event.summary
-                );
+        AuditCommand::Tail { limit, json } => {
+            let records = state.audit_tail(limit)?;
+            if json {
+                print_json_output("audit.tail", &records)?;
+            } else {
+                for record in records {
+                    println!(
+                        "{}  {}  {}  {:?}  {}",
+                        record.sequence,
+                        record.event.timestamp.to_rfc3339(),
+                        record.event.tool_name,
+                        record.event.outcome,
+                        record.event.summary
+                    );
+                }
             }
         }
         AuditCommand::Export { output, limit } => {

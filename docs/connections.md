@@ -250,6 +250,18 @@ OAuth issuers are intentionally root-only. A configured issuer such as `https://
 
 A GitHub callback first claims pending authorization state with a short lease bound to a domain-separated hash of the provider code. Only one callback can hold the claim. A different code can never replace the bound code. Temporary provider failures release the claim so the same state and code can be retried; terminal denial consumes it. The one-time code exchange itself is not blindly replayed, while the authenticated `/user` lookup has a bounded retry for transport, rate-limit, and server failures. On success, consent insertion and authorization-state deletion occur in one SQLite transaction.
 
+## Orphan connector reconciliation
+
+Before HTTP or stdio transport starts, RunOnMine completes pending removal
+journals and compares connector artifact directories and Quick Tunnel runtime
+records with committed config. Config-less real directories with valid connector
+IDs are moved into an owner-only quarantine directory on the same filesystem;
+they are not deleted. Orphan Quick runtime records are ephemeral and removed.
+Invalid IDs, symlinks, non-directory entries, and corrupt runtime records are
+reported as unsafe and left unchanged. The same inventory is visible through
+`runonmine doctor`; explicit `doctor --repair` also removes managed-index
+credentials whose connector owner no longer exists.
+
 ## Connector identity format
 
 RunOnMine-generated connector IDs are UUIDs. Every connector ID used by config,

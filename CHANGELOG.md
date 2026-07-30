@@ -9,6 +9,9 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Add startup and doctor reconciliation for config-less connector artifacts: valid orphan directories are preserved in owner-only quarantine, stale Quick Tunnel runtime records are removed, and ambiguous or symlinked entries remain untouched and visible.
+- Maintain a credential-name-only owner index so doctor can report and explicitly repair orphan connector secrets without exposing values; encrypted storage has complete enumeration while legacy platform-keyring coverage is marked partial.
+- Replace the monolithic doctor output with typed modular checks and add a shared versioned JSON envelope to doctor, audit tail, service status, and local HTTP status.
 - Require connector IDs to be 8-64 lowercase ASCII token characters with alphanumeric boundaries; keep UUIDs for generated connectors, reject ambiguous legacy beta IDs fail-closed, and redact configured connector IDs only at exact identity boundaries in support logs.
 - Upgrade support bundles to schema v3 with privacy-preserving input completeness records for included, skipped and truncated log material; rename service-manager capture to bounded command output rather than implying that truncation sanitizes secrets.
 - Preserve sanitized internal diagnostics without widening remote errors: MCP tool, authorization, approval, audit, storage, browser, helper and output failures now carry request/incident correlation and audit UUIDs when available; OAuth storage failures log bounded request/connector/category/operation fields while public OAuth bodies remain unchanged. Raw causes, arguments and secrets are excluded from these structured failure logs.

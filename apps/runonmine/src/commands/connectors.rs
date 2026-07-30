@@ -176,7 +176,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     token_output.as_deref(),
                 )?;
             }
-            LocalHttpCommand::Status { token_output } => {
+            LocalHttpCommand::Status { token_output, json } => {
                 validate_private_output_path(token_output.as_deref())?;
                 let connector = config
                     .connectors
@@ -186,11 +186,25 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 let connector_id = connector.id.clone();
                 let enabled = connector.enabled;
                 let secret_name = local_http_secret_name(&connector_id);
-                println!("Connector: {connector_id}");
-                println!("Enabled: {enabled}");
-                println!("Endpoint: http://127.0.0.1:{}/mcp", config.port);
+                let endpoint = format!("http://127.0.0.1:{}/mcp", config.port);
                 let token = secrets.get(&secret_name)?;
-                println!("Token configured: {}", token.is_some());
+                if json {
+                    super::print_json_output(
+                        "connect.local_http.status",
+                        &serde_json::json!({
+                            "connector_id": connector_id,
+                            "enabled": enabled,
+                            "endpoint": endpoint,
+                            "token_configured": token.is_some(),
+                            "credentials_export_requested": token_output.is_some(),
+                        }),
+                    )?;
+                } else {
+                    println!("Connector: {connector_id}");
+                    println!("Enabled: {enabled}");
+                    println!("Endpoint: {endpoint}");
+                    println!("Token configured: {}", token.is_some());
+                }
                 if let Some(output) = token_output.as_deref() {
                     let token = token.context("local HTTP token is not configured")?;
                     write_local_http_credentials(
@@ -199,8 +213,10 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                         &connector_id,
                         token.expose_secret(),
                     )?;
-                    println!("Credentials written to {}.", output.display());
-                } else {
+                    if !json {
+                        println!("Credentials written to {}.", output.display());
+                    }
+                } else if !json {
                     println!(
                         "Bearer token is not printed. Use --token-output <absolute-file> to export it securely."
                     );

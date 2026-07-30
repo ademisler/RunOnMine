@@ -91,8 +91,17 @@ sharing raw configuration, state, or log directories:
 
 ```console
 runonmine doctor
+runonmine doctor --json
+runonmine doctor --repair
 runonmine support-bundle --output runonmine-support.zip
 ```
+
+Doctor checks have stable IDs, severity, status, bounded evidence, and remediation.
+`--repair` quarantines config-less connector directories, clears orphan ephemeral
+runtime state, and removes only credentials recorded in the managed name index
+that no longer have a configured connector owner. It does not delete ambiguous
+or symlinked entries. JSON diagnostics use the common
+`{schema_version, command, data}` envelope.
 
 The schema-v3 ZIP contains generated structural summaries, typed service and
 input states, an audit outcome summary, per-entry checksums, and at most five
@@ -167,6 +176,7 @@ on restart/backoff and removed on process stop.
   tools without invalidating the rest of the configuration. External CDP remains
   a separate loopback-only expert mode and never launches the selected binary.
 - Secrets use the operating-system credential store, with an explicit encrypted headless Linux fallback. The encrypted file backend uses an owner-only cross-process lock so CLI, desktop, and agent updates cannot overwrite one another.
+- Credential writes also maintain an owner-only index containing names only, never values. Encrypted-file inventory is complete; platform keyrings cannot enumerate historical unmanaged entries, so doctor marks that coverage partial while still detecting every credential created or updated by current RunOnMine versions.
 - Core state and OAuth SQLite connections are owned by dedicated serialized database workers instead of request-handler mutexes. The core worker has a bounded 128-job queue, one-second enqueue backpressure, and overload metrics; dangerous authorization and audit paths fail closed when work cannot be admitted. Accepted jobs finish without an ambiguous reply timeout. Database directories are private, database/WAL/shared-memory files are owner-only, and worker threads are joined during shutdown. MCP authorization, approval, and audit paths use asynchronous worker replies.
 - OAuth clients, authorization state, codes, tokens, and refresh families are isolated by connector/issuer even when connectors share one local SQLite database.
 - Generated connector IDs are UUIDs. Persisted IDs must be 8-64 lowercase ASCII letters, digits, `-`, or `_`, with alphanumeric boundaries. Older beta configurations with weaker IDs fail closed and must recreate the affected connector rather than silently renaming credential and authorization namespaces.

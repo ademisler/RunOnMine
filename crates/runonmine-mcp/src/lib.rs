@@ -1,5 +1,6 @@
 //! Policy-aware MCP server and local transports.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -2073,6 +2074,27 @@ pub(crate) async fn reconcile_browser_orphans(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
+fn reconcile_orphan_connector_artifacts(paths: &AppPaths, config: &AppConfig) -> Result<()> {
+    let configured_ids = config
+        .connectors
+        .iter()
+        .map(|connector| connector.id.clone())
+        .collect::<BTreeSet<_>>();
+    let report = runonmine_core::reconcile_connector_artifacts(paths, &configured_ids)?;
+    if report.quarantined_directories > 0
+        || report.removed_runtime_records > 0
+        || report.unsafe_entries > 0
+    {
+        tracing::warn!(
+            quarantined_directories = report.quarantined_directories,
+            removed_runtime_records = report.removed_runtime_records,
+            unsafe_entries = report.unsafe_entries,
+            "reconciled orphan connector artifacts"
+        );
+    }
+    Ok(())
+}
+
 pub async fn serve_stdio(connector_id: &str) -> Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure()?;
@@ -2081,6 +2103,8 @@ pub async fn serve_stdio(connector_id: &str) -> Result<()> {
     if reconciled > 0 {
         tracing::info!(reconciled, "completed pending connector removals");
     }
+    let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
+    reconcile_orphan_connector_artifacts(&paths, &config)?;
     let server = RunOnMineServer::new(Runtime::load(connector_id)?)?;
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

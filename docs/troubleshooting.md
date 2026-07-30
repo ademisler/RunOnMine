@@ -50,6 +50,28 @@ session with Secret Service or supply a valid 32-byte `RUNONMINE_MASTER_KEY`
 through the host's secret manager. RunOnMine deliberately does not create a
 fallback plaintext store.
 
+## Typed doctor and JSON diagnostics
+
+`runonmine doctor` renders human-readable checks. `runonmine doctor --json`,
+`runonmine audit tail --json`, `runonmine service status --json`, and
+`runonmine connect local-http status --json` emit the same versioned envelope:
+
+```json
+{"schema_version":1,"command":"doctor","data":{}}
+```
+
+Each doctor check has a stable ID, severity, status, bounded evidence, and an
+optional remediation. `runonmine doctor --repair` performs only explicit safe
+reconciliation: config-less connector directories are moved into owner-only
+quarantine, orphan Quick Tunnel runtime records are removed, and indexed
+connector credentials without a configured owner are deleted. Invalid names,
+symlinks, and ambiguous filesystem entries are reported but never modified.
+
+Platform credential stores generally cannot enumerate credentials created by
+older versions or other tools. Doctor therefore reports keyring inventory
+coverage as partial. The managed secret-name index contains names only; it never
+contains credential values.
+
 ## Redacted support bundle
 
 Run the doctor first, then create a private support ZIP when diagnostics need to

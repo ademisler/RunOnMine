@@ -176,6 +176,7 @@ pub async fn serve_loopback() -> Result<()> {
         tracing::info!(reconciled, "completed pending connector removals");
     }
     let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
+    super::reconcile_orphan_connector_artifacts(&paths, &config)?;
     let HttpConnectorBuild { state, degraded } = build_http_connector_state(&paths, &config);
     let connector_runtime = ConnectorRuntimeRegistry::from_failures(&degraded);
     let connector_state = Arc::new(state);
