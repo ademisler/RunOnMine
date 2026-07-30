@@ -72,7 +72,12 @@ pub struct GitHubCallback {
 pub struct ConsentChallenge {
     pub id: Uuid,
     pub csrf: SecretString,
-    pub client_name: String,
+    /// A display name supplied by the dynamic client and not verified by `RunOnMine`.
+    pub claimed_client_name: String,
+    pub client_id_fingerprint: String,
+    pub registered_at: DateTime<Utc>,
+    pub requested_redirect_origin: String,
+    pub registered_redirect_origins: Vec<String>,
     pub scopes: ScopeSet,
 }
 
@@ -82,7 +87,14 @@ impl std::fmt::Debug for ConsentChallenge {
             .debug_struct("ConsentChallenge")
             .field("id", &self.id)
             .field("csrf", &"[REDACTED]")
-            .field("client_name", &self.client_name)
+            .field("claimed_client_name", &self.claimed_client_name)
+            .field("client_id_fingerprint", &self.client_id_fingerprint)
+            .field("registered_at", &self.registered_at)
+            .field("requested_redirect_origin", &self.requested_redirect_origin)
+            .field(
+                "registered_redirect_origins",
+                &self.registered_redirect_origins,
+            )
             .field("scopes", &self.scopes)
             .finish()
     }

@@ -140,3 +140,7 @@ runonmine connect enable <id>
 runonmine connect disable <id>
 runonmine connect remove <id> --confirm REMOVE
 ```
+
+## OAuth consent identity
+
+Dynamic OAuth client names are unverified display text and are never treated as an identity signal. The local consent page labels the claimed name as unverified and also shows a stable client-ID fingerprint, registration time, the redirect origin used by the current request, and every redirect origin registered by that client. Invisible and bidirectional control characters are rejected from client names so a client cannot visually impersonate another application.

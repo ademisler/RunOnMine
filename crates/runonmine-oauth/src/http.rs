@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use html_escape::encode_text;
+use html_escape::{encode_double_quoted_attribute, encode_text};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
@@ -176,14 +176,15 @@ async fn revoke(
 }
 
 fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Response {
-    let client_name = encode_text(&challenge.client_name);
+    let client_identity = consent_client_identity(challenge);
     let scopes = consent_scope_list(&challenge.scopes);
     let consent_endpoint = service.consent_endpoint();
-    let action = encode_text(consent_endpoint.as_str());
+    let action = encode_double_quoted_attribute(consent_endpoint.as_str());
+    let consent_id_value = challenge.id.to_string();
+    let consent_id = encode_double_quoted_attribute(&consent_id_value);
+    let csrf = encode_double_quoted_attribute(challenge.csrf.expose_secret());
     let body = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>RunOnMine authorization</title></head><body><main><h1>Allow AI access to this machine?</h1><p><strong>{client_name}</strong> requests these capabilities:</p>{scopes}<form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"consent_id\" value=\"{}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button><button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button></form></main></body></html>",
-        challenge.id,
-        challenge.csrf.expose_secret(),
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>RunOnMine authorization</title></head><body><main><h1>Allow AI access to this machine?</h1>{client_identity}<h2>Requested capabilities</h2>{scopes}<form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"consent_id\" value=\"{consent_id}\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button><button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button></form></main></body></html>"
     );
     let mut response = Html(body).into_response();
     no_store_headers(response.headers_mut());
@@ -202,6 +203,39 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+fn consent_client_identity(challenge: &ConsentChallenge) -> String {
+    let claimed_name = encode_text(&challenge.claimed_client_name);
+    let fingerprint = encode_text(&challenge.client_id_fingerprint);
+    let registered_at = challenge
+        .registered_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let registered_at_text = encode_text(&registered_at);
+    let registered_at_attribute = encode_double_quoted_attribute(&registered_at);
+    let requested_origin = encode_text(&challenge.requested_redirect_origin);
+    let registered_origins = consent_redirect_origins(
+        &challenge.registered_redirect_origins,
+        &challenge.requested_redirect_origin,
+    );
+    format!(
+        "<aside role=\"alert\"><strong>Unverified OAuth client</strong><p>The client supplied the name below. RunOnMine has not verified its name, publisher, or identity.</p></aside><dl><dt>Claimed name (unverified)</dt><dd>{claimed_name}</dd><dt>Client ID fingerprint</dt><dd><code>{fingerprint}</code></dd><dt>Registered</dt><dd><time datetime=\"{registered_at_attribute}\">{registered_at_text}</time></dd><dt>Redirect origin for this request</dt><dd><code>{requested_origin}</code></dd><dt>All registered redirect origins</dt><dd>{registered_origins}</dd></dl>"
+    )
+}
+
+fn consent_redirect_origins(origins: &[String], requested_origin: &str) -> String {
+    let mut html = String::from("<ul>");
+    for origin in origins {
+        let is_requested = origin == requested_origin;
+        let origin = encode_text(origin);
+        if is_requested {
+            let _ignored = write!(html, "<li><code>{origin}</code> — current request</li>");
+        } else {
+            let _ignored = write!(html, "<li><code>{origin}</code></li>");
+        }
+    }
+    html.push_str("</ul>");
+    html
 }
 
 fn consent_scope_list(scopes: &crate::ScopeSet) -> String {
@@ -236,6 +270,34 @@ fn no_store_redirect(target: &url::Url) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consent_identity_warns_and_renders_stable_client_details_safely() {
+        let challenge = ConsentChallenge {
+            id: uuid::Uuid::nil(),
+            csrf: secrecy::SecretString::from("csrf-token".to_owned()),
+            claimed_client_name: "RunOnMine Official <script>alert(1)</script>".to_owned(),
+            client_id_fingerprint: "sha256:abc&def".to_owned(),
+            registered_at: chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                .unwrap_or_else(chrono::Utc::now),
+            requested_redirect_origin: "https://client.example".to_owned(),
+            registered_redirect_origins: vec![
+                "http://127.0.0.1:8787".to_owned(),
+                "https://client.example".to_owned(),
+            ],
+            scopes: crate::ScopeSet::machine_read(),
+        };
+        let html = consent_client_identity(&challenge);
+        assert!(html.contains("Unverified OAuth client"));
+        assert!(html.contains("has not verified its name, publisher, or identity"));
+        assert!(html.contains("Claimed name (unverified)"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("sha256:abc&amp;def"));
+        assert!(html.contains("2023-11-14T22:13:20Z"));
+        assert!(html.contains("https://client.example</code> — current request"));
+        assert!(html.contains("http://127.0.0.1:8787"));
+    }
 
     #[test]
     fn consent_scope_list_distinguishes_shell_from_platform_automation() {

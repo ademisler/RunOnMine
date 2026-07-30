@@ -2,8 +2,10 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use chrono::{Duration, Utc};
 use secrecy::{ExposeSecret, SecretString};
+use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
@@ -221,7 +223,7 @@ impl OAuthService {
             .to_owned();
         if client_name.is_empty()
             || client_name.len() > 100
-            || client_name.chars().any(char::is_control)
+            || client_name.chars().any(unsafe_display_character)
         {
             return Err(OAuthError::invalid_request());
         }
@@ -356,6 +358,9 @@ impl OAuthService {
             .ok_or_else(OAuthError::invalid_client)?;
         let csrf = generate_secret()?;
         let id = Uuid::new_v4();
+        let requested_redirect_origin = redirect_origin(&pending.redirect_uri)?;
+        let registered_redirect_origins = registered_redirect_origins(&client.redirect_uris)?;
+        let client_id_fingerprint = client_id_fingerprint(&client.client_id);
         self.store
             .put_consent(&PendingConsent {
                 id,
@@ -374,7 +379,11 @@ impl OAuthService {
         Ok(ConsentChallenge {
             id,
             csrf,
-            client_name: client.client_name,
+            claimed_client_name: client.client_name,
+            client_id_fingerprint,
+            registered_at: client.issued_at,
+            requested_redirect_origin,
+            registered_redirect_origins,
             scopes: pending.scopes,
         })
     }
@@ -559,6 +568,41 @@ fn token_response(
         expires_in: ACCESS_TOKEN_TTL.num_seconds().try_into().unwrap_or(900),
         scope: grant.scopes,
     }
+}
+
+fn unsafe_display_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{feff}'
+        )
+}
+
+fn client_id_fingerprint(client_id: &str) -> String {
+    let digest = Sha256::digest(client_id.as_bytes());
+    let compact = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..12]);
+    format!("sha256:{compact}")
+}
+
+fn registered_redirect_origins(redirect_uris: &[Url]) -> Result<Vec<String>, OAuthError> {
+    redirect_uris
+        .iter()
+        .map(redirect_origin)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(BTreeSet::into_iter)
+        .map(Iterator::collect)
+}
+
+fn redirect_origin(url: &Url) -> Result<String, OAuthError> {
+    let origin = url.origin().ascii_serialization();
+    if origin == "null" {
+        return Err(OAuthError::invalid_request());
+    }
+    Ok(origin)
 }
 
 fn validate_public_url(url: &Url, allow_query: bool) -> Result<(), OAuthError> {
@@ -748,6 +792,86 @@ mod tests {
             .query_pairs()
             .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
             .ok_or_else(OAuthError::server)
+    }
+
+    #[test]
+    fn client_name_rejects_invisible_and_bidirectional_control_characters() -> Result<(), OAuthError>
+    {
+        let service = service()?;
+        for unsafe_name in [
+            "Trusted client\nFingerprint: trusted",
+            "Trusted client\u{202e}moc.live",
+            "Trusted\u{200b}client",
+            "Trusted\u{2066}client\u{2069}",
+        ] {
+            let mut request = registration_request()?;
+            request.client_name = Some(unsafe_name.to_owned());
+            assert!(matches!(
+                service.register_client(request, TEST_REGISTRATION_TOKEN, "unsafe-name-source"),
+                Err(error) if error.code == crate::OAuthErrorCode::InvalidRequest
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consent_challenge_identifies_unverified_client_beyond_claimed_name()
+    -> Result<(), OAuthError> {
+        let service = service()?;
+        let mut request = registration_request()?;
+        request.client_name = Some("RunOnMine Official Client".to_owned());
+        request.redirect_uris = vec![
+            Url::parse("https://client.example/callback")
+                .map_err(|_| OAuthError::invalid_request())?,
+            Url::parse("https://client.example/other?source=registration")
+                .map_err(|_| OAuthError::invalid_request())?,
+            Url::parse("http://127.0.0.1:8787/oauth/callback")
+                .map_err(|_| OAuthError::invalid_request())?,
+        ];
+        let client =
+            service.register_client(request, TEST_REGISTRATION_TOKEN, "consent-identity-source")?;
+        let stored = service
+            .store
+            .client(&client.client_id)
+            .map_err(map_store_server_error)?
+            .ok_or_else(OAuthError::server)?;
+        let start = service.begin_authorization(AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: client.client_id.clone(),
+            redirect_uri: Url::parse("https://client.example/callback")
+                .map_err(|_| OAuthError::invalid_request())?,
+            scope: "machine:read".to_owned(),
+            state: "client-csrf-state-identity-123456789".to_owned(),
+            code_challenge: challenge(&verifier()),
+            code_challenge_method: "S256".to_owned(),
+            resource: Some(
+                Url::parse("https://mine.example/mcp")
+                    .map_err(|_| OAuthError::invalid_request())?,
+            ),
+        })?;
+        let consent = service
+            .complete_github_callback(GitHubCallback {
+                code: "github-code".to_owned(),
+                state: start.provider_state.expose_secret().to_owned(),
+            })
+            .await?;
+        assert_eq!(consent.claimed_client_name, "RunOnMine Official Client");
+        assert_eq!(
+            consent.client_id_fingerprint,
+            client_id_fingerprint(&client.client_id)
+        );
+        assert!(consent.client_id_fingerprint.starts_with("sha256:"));
+        assert!(!consent.client_id_fingerprint.contains(&client.client_id));
+        assert_eq!(consent.registered_at, stored.issued_at);
+        assert_eq!(consent.requested_redirect_origin, "https://client.example");
+        assert_eq!(
+            consent.registered_redirect_origins,
+            vec![
+                "http://127.0.0.1:8787".to_owned(),
+                "https://client.example".to_owned(),
+            ]
+        );
+        Ok(())
     }
 
     #[test]
