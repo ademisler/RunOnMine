@@ -1,6 +1,7 @@
-use super::super::*;
+use super::super::{RunOnMineDesktop, StatusTone, UiIcon, egui, theme};
 
 impl RunOnMineDesktop {
+    #[allow(clippy::too_many_lines)] // Screen-section extraction remains tracked in P2-02.
     pub(super) fn show_audit(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {

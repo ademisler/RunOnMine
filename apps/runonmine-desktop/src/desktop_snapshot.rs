@@ -21,7 +21,6 @@ const MAX_HEALTH_RESPONSE_BYTES: usize = 256 * 1024;
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ConnectorLifecycle {
     pub(crate) connector_id: String,
-    pub(crate) kind: ConnectorKind,
     pub(crate) phase: String,
     #[serde(default)]
     pub(crate) stage: Option<String>,

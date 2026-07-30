@@ -1,4 +1,7 @@
-use super::super::*;
+use super::super::{
+    ConnectorConfig, ConnectorKind, RunOnMineDesktop, StatusTone, Zeroize, egui, rotation_label,
+    theme,
+};
 
 impl RunOnMineDesktop {
     fn connector_lifecycle_display(
@@ -56,6 +59,7 @@ impl RunOnMineDesktop {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Screen-section extraction remains tracked in P2-02.
     pub(super) fn show_connections(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {

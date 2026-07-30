@@ -404,6 +404,7 @@ pub(crate) fn ring_gauge(ui: &mut egui::Ui, score: u32, label: &str) {
     );
 }
 
+#[allow(clippy::too_many_lines)] // Icon variants stay centralized while extraction is tracked in P2-02.
 fn paint_icon(
     painter: &egui::Painter,
     rect: egui::Rect,

@@ -1,3 +1,4 @@
+name = "runonmine"
 product-name = "RunOnMine"
 version = "0.1.0-beta.1"
 identifier = "dev.runonmine.app"
@@ -5,12 +6,12 @@ description = "Let AI work on the machines you own."
 homepage = "https://github.com/ademisler/RunOnMine"
 authors = ["RunOnMine contributors"]
 publisher = "RunOnMine contributors"
-license-file = "LICENSE"
-binaries-dir = "target/packager-input"
-out-dir = "dist"
+license-file = "../LICENSE"
+binaries-dir = "../target/packager-input"
+out-dir = "../dist"
 target-triple = "x86_64-pc-windows-msvc"
 formats = ["nsis"]
-resources = ["README.md"]
+resources = ["../README.md"]
 binaries = [
   { path = "runonmine-desktop", main = true },
   { path = "runonmine", main = false },

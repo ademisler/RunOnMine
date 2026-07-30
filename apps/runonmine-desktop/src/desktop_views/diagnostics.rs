@@ -1,4 +1,4 @@
-use super::super::*;
+use super::super::{RunOnMineDesktop, egui, theme};
 
 impl RunOnMineDesktop {
     pub(super) fn show_diagnostics(&mut self, ui: &mut egui::Ui) {

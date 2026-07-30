@@ -1031,13 +1031,11 @@ mod tests {
             Some("secret".to_owned())
         );
         assert!(final_binary.is_file());
-        assert_eq!(
-            managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient)
-                .resolve_active()?
-                .context("OpenAI version was not activated")?
-                .binary_path,
-            final_binary
-        );
+        let active_binary = managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient)
+            .resolve_active()?
+            .context("OpenAI version was not activated")?
+            .binary_path;
+        assert_eq!(active_binary.canonicalize()?, final_binary.canonicalize()?);
         assert!(
             paths
                 .data_dir
@@ -1093,13 +1091,11 @@ exit 0
         assert!(immutable.is_file());
         prepared.activate()?;
         let store = managed_binary_store(&paths.data_dir, BinaryKind::OpenAiTunnelClient);
-        assert_eq!(
-            store
-                .resolve_active()?
-                .context("missing active version")?
-                .binary_path,
-            immutable
-        );
+        let active_binary = store
+            .resolve_active()?
+            .context("missing active version")?
+            .binary_path;
+        assert_eq!(active_binary.canonicalize()?, immutable.canonicalize()?);
         prepared.rollback()?;
         assert!(store.resolve_active()?.is_none());
         assert!(legacy.is_file());

@@ -173,17 +173,22 @@ fn assign_socket_owner(owner_uid: u32) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
     struct ResetSocketPath;
 
-    #[cfg(target_os = "linux")]
     impl Drop for ResetSocketPath {
         fn drop(&mut self) {
             set_test_socket_path(None);
         }
     }
 
-    #[cfg(target_os = "linux")]
+    struct RemoveAcceptanceDirectory(PathBuf);
+
+    impl Drop for RemoveAcceptanceDirectory {
+        fn drop(&mut self) {
+            let _ignored = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn encode_hex(bytes: &[u8]) -> Result<String> {
         use std::fmt::Write as _;
         let mut output = String::with_capacity(bytes.len().saturating_mul(2));
@@ -193,12 +198,12 @@ mod tests {
         Ok(output)
     }
 
-    #[cfg(target_os = "linux")]
     fn peer_client(
         socket: &std::path::Path,
         encoded_hex: &str,
         user: &nix::unistd::User,
     ) -> Result<std::process::Output> {
+        #[cfg(not(target_os = "macos"))]
         use std::os::unix::process::CommandExt as _;
         use std::process::Command;
         let script = r"
@@ -219,14 +224,30 @@ while len(data) < length:
     data += chunk
 print(data.decode())
 ";
-        Ok(Command::new("/usr/bin/python3")
-            .arg("-c")
-            .arg(script)
-            .arg(socket)
-            .arg(encoded_hex)
-            .uid(user.uid.as_raw())
-            .gid(user.gid.as_raw())
-            .output()?)
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Command::new("/usr/bin/sudo")
+                .arg("-n")
+                .arg("-u")
+                .arg(&user.name)
+                .arg("/usr/bin/python3")
+                .arg("-c")
+                .arg(script)
+                .arg(socket)
+                .arg(encoded_hex)
+                .output()?)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(Command::new("/usr/bin/python3")
+                .arg("-c")
+                .arg(script)
+                .arg(socket)
+                .arg(encoded_hex)
+                .uid(user.uid.as_raw())
+                .gid(user.gid.as_raw())
+                .output()?)
+        }
     }
 
     #[test]
@@ -242,7 +263,6 @@ print(data.decode())
         assert!(parent.is_some());
     }
 
-    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires root and two real Unix user identities"]
     async fn real_peer_uid_and_socket_acl_reject_a_second_user() -> Result<()> {
@@ -251,16 +271,30 @@ print(data.decode())
         if !nix::unistd::Uid::effective().is_root() {
             bail!("real helper identity acceptance must run as root");
         }
-        let owner = nix::unistd::User::from_name("github1-dev")?
-            .context("github1-dev acceptance owner is missing")?;
-        let attacker = nix::unistd::User::from_name("nobody")?
-            .context("nobody acceptance identity is missing")?;
+        let owner_name = std::env::var("RUNONMINE_ACCEPTANCE_OWNER_USER")
+            .context("RUNONMINE_ACCEPTANCE_OWNER_USER must name the non-root helper owner")?;
+        let attacker_name = std::env::var("RUNONMINE_ACCEPTANCE_ATTACKER_USER")
+            .context("RUNONMINE_ACCEPTANCE_ATTACKER_USER must name a distinct second user")?;
+        let owner = nix::unistd::User::from_name(&owner_name)?
+            .with_context(|| format!("acceptance owner {owner_name} is missing"))?;
+        let attacker = nix::unistd::User::from_name(&attacker_name)?
+            .with_context(|| format!("acceptance attacker {attacker_name} is missing"))?;
         if owner.uid == attacker.uid {
             bail!("helper acceptance identities must be distinct");
         }
 
-        let directory = tempfile::tempdir()?;
-        let socket = directory.path().join("helper.sock");
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let temporary_root = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let directory = temporary_root.join(format!("romh-{}", &token[..12]));
+        fs::create_dir(&directory).context("failed to create acceptance runtime directory")?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+            .context("failed to make the root-owned acceptance directory traversable")?;
+        let _remove_directory = RemoveAcceptanceDirectory(directory.clone());
+        let socket = directory.join("helper.sock");
         set_test_socket_path(Some(socket.clone()));
         let _reset = ResetSocketPath;
         let policy = AdminPolicy {

@@ -13,23 +13,22 @@ use anyhow::{Context, Result, bail};
 use eframe::egui;
 use runonmine_core::secrets::{default_secret_store, recover_pending_config_secret_transaction};
 use runonmine_core::{
-    AppConfig, AppPaths, ApprovalDecision, ApprovalRequest, AuditRecord, AuditVerificationReport,
-    ConnectorConfig, ConnectorKind, PersistentGrant, PolicyPreset, StateStore,
+    AppConfig, AppPaths, ApprovalDecision, ConnectorConfig, ConnectorKind, PersistentGrant,
+    PolicyPreset, StateStore,
 };
 use secrecy::SecretString;
 
 use crate::connector_wizard::{ConnectorCommand, ConnectorWizardState, rotation_label};
 use crate::credential_update::replace_connector_secrets_transactionally;
 use crate::desktop_process::{BackgroundCliTask, run_cli};
-use crate::desktop_snapshot::{BackgroundDesktopSnapshot, ConnectorLifecycle, DesktopSnapshot};
+use crate::desktop_snapshot::{BackgroundDesktopSnapshot, DesktopSnapshot};
 use crate::layout;
 use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
 use crate::theme::{self, Icon as UiIcon, StatusTone};
-use runonmine_oauth::{OAuthSession, RegisteredClient, SqliteOAuthStore};
+use runonmine_oauth::SqliteOAuthStore;
 use runonmine_platform::UserService;
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use url::Url;
+use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::{Icon, TrayIconBuilder};
 use uuid::Uuid;
 
 pub fn run() -> Result<()> {

@@ -1,15 +1,16 @@
+name = "runonmine"
 product-name = "RunOnMine"
 version = "0.1.0-beta.1"
 identifier = "dev.runonmine.agent"
 description = "Let AI work on the machines you own."
 homepage = "https://github.com/ademisler/RunOnMine"
 authors = ["RunOnMine contributors"]
-license-file = "LICENSE"
-binaries-dir = "target/packager-input"
-out-dir = "dist"
+license-file = "../LICENSE"
+binaries-dir = "../target/packager-input"
+out-dir = "../dist"
 target-triple = "aarch64-unknown-linux-gnu"
 formats = ["deb"]
-resources = ["README.md"]
+resources = ["../README.md"]
 binaries = [
   { path = "runonmine", main = true },
   { path = "runonmine-agent", main = false },

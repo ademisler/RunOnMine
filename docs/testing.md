@@ -48,3 +48,31 @@ scheduled workflow. `helper-unix-identity.sh` is root-only and uses real owner
 and attacker UIDs. `artifact-preflight.yml` runs fresh-host artifact checks but
 explicitly does not claim OS reboot, code signing, notarization or release
 clean-install acceptance.
+
+
+## Real Unix helper identity acceptance
+
+On macOS, run the helper identity acceptance as root with a real temporary second user:
+
+```console
+RUNONMINE_ACCEPTANCE_ATTACKER_USER=<second-user> sudo -E ./scripts/acceptance/helper-unix-identity.sh
+```
+
+The active console user is the helper owner. The test verifies UID ownership, socket mode `0600`, a successful owner health frame, and kernel denial for the second user. Remove the temporary account after the run.
+
+## Physical macOS desktop acceptance
+
+A physical Apple-silicon acceptance run builds both `aarch64-apple-darwin` and
+`x86_64-apple-darwin`, merges the four application binaries with `lipo`,
+validates the portable archive and CycloneDX SBOM, and packages the universal
+DMG with cargo-packager 0.11.8. The installed application is exercised through
+native and Rosetta launches, LaunchAgent install/stop/start, loopback health,
+Streamable HTTP initialize and discovery, `machine_info`, a locally approved
+`fs_write`, every desktop navigation view at the supported layout bounds,
+non-purge uninstall, full purge, and restoration of the pre-existing user
+state.
+
+This acceptance does not substitute for Developer ID signing, Apple
+notarization, or a real operating-system reboot. Unsigned local artifacts are
+expected to fail Gatekeeper assessment until the release credentials are
+provided.

@@ -786,7 +786,12 @@ pub fn default_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
     )))
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+// The shared fallible signature is required by the Linux encrypted-file fallback;
+// native keyrings on other targets are infallible at construction time.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(clippy::unnecessary_wraps, unused_variables)
+)]
 fn default_platform_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
     #[cfg(target_os = "linux")]
     {

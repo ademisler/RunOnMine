@@ -470,7 +470,7 @@ impl BrowserSession {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fn with_network_test_support(
         profile: BrowserProfile,
         headless: bool,
@@ -1519,15 +1519,22 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(target_os = "linux")]
     use futures::FutureExt as _;
+    #[cfg(target_os = "linux")]
     use futures::future::BoxFuture;
+    #[cfg(target_os = "linux")]
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    #[cfg(target_os = "linux")]
     use tokio::net::TcpListener;
+    #[cfg(target_os = "linux")]
     use tokio::sync::oneshot;
 
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::network_proxy::ResolvedDestination;
 
     #[test]
@@ -1910,6 +1917,7 @@ mod tests {
         assert!(persistent.cleanup_directory().is_none());
     }
 
+    #[cfg(target_os = "linux")]
     #[derive(Debug)]
     struct BrowserTestResolver {
         host: String,
@@ -1917,6 +1925,7 @@ mod tests {
         connect_address: std::net::SocketAddr,
     }
 
+    #[cfg(target_os = "linux")]
     impl DestinationResolver for BrowserTestResolver {
         fn resolve<'a>(
             &'a self,
@@ -1945,6 +1954,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     async fn spawn_seed_server(
         private_url: String,
     ) -> Result<(
@@ -2012,6 +2022,7 @@ mod tests {
         Ok((address, shutdown, task))
     }
 
+    #[cfg(target_os = "linux")]
     async fn spawn_private_probe() -> Result<(
         std::net::SocketAddr,
         Arc<AtomicUsize>,
@@ -2044,6 +2055,7 @@ mod tests {
         Ok((address, connections, shutdown, task))
     }
 
+    #[cfg(target_os = "linux")]
     fn browser_attack_script(
         private_url: &str,
         private_address: std::net::SocketAddr,

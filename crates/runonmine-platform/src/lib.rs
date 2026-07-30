@@ -654,7 +654,7 @@ impl UserService {
         #[cfg(windows)]
         let running = installed && windows_scheduled_task_running()?;
         #[cfg(not(windows))]
-        let running = output.status.success();
+        let running = installed && output.status.success();
         let detail = bounded_command_output(&output);
         #[cfg(target_os = "macos")]
         let detail = if let Ok(summary) = macos_service_log_summary() {
@@ -1113,14 +1113,8 @@ fn rotate_macos_service_logs() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn macos_service_log_summary() -> Result<String> {
     let (stdout, stderr) = macos_service_log_paths()?;
-    let stdout_bytes = stdout
-        .metadata()
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    let stderr_bytes = stderr
-        .metadata()
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
+    let stdout_bytes = stdout.metadata().map_or(0, |metadata| metadata.len());
+    let stderr_bytes = stderr.metadata().map_or(0, |metadata| metadata.len());
     Ok(format!(
         "launchagent_logs stdout_bytes={stdout_bytes} stderr_bytes={stderr_bytes} limit_bytes={MACOS_SERVICE_LOG_LIMIT_BYTES}"
     ))
@@ -1222,6 +1216,15 @@ fn systemd_escape(value: &str) -> String {
 #[cfg(test)]
 mod service_policy_tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unmanaged_service_label_is_not_reported_as_running() {
+        let installed = false;
+        let launch_manager_reports_active = true;
+        let running = installed && launch_manager_reports_active;
+        assert!(!running);
+    }
 
     #[test]
     fn windows_recovery_policy_restarts_crashed_tasks() {

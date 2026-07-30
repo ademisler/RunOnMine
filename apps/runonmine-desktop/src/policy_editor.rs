@@ -54,6 +54,7 @@ pub(crate) enum PolicyEditorAction {
 }
 
 impl PolicyEditorState {
+    #[allow(clippy::too_many_lines)] // Policy form extraction remains tracked in P2-02.
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,

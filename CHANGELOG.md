@@ -5,6 +5,10 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Restore macOS desktop compilation by declaring its direct Serde dependency and remove platform-only warning regressions exposed by full-feature Clippy.
+- Make every cargo-packager 0.11.8 configuration self-identifying and resolve license, binary, output, and resource paths from the configuration directory; add an xtask regression gate for this contract.
+- Validate the universal macOS DMG on a physical Apple-silicon Mac through native and Rosetta launches, LaunchAgent lifecycle, Streamable HTTP MCP approval flow, all desktop navigation views, retained-data uninstall, full purge, and user-state restoration. Developer ID signing, notarization, and reboot evidence remain separate release gates.
+
 - Make GitHub OAuth callback recovery replay-safe with short-lived state+code claims, bounded user-endpoint retries, atomic consent completion, and explicit root-only issuer deployment.
 
 ### Security

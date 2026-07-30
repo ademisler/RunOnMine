@@ -1,4 +1,4 @@
-use super::*;
+use super::{RunOnMineDesktop, StatusTone, Tab, UiIcon, egui, layout, theme};
 
 #[path = "desktop_views/approvals.rs"]
 mod approvals;
@@ -16,6 +16,7 @@ mod overview;
 mod permissions;
 
 impl RunOnMineDesktop {
+    #[allow(clippy::too_many_lines)] // Sidebar section extraction remains tracked in P2-02.
     fn render_sidebar(&mut self, ui: &mut egui::Ui, sidebar_rect: egui::Rect) -> bool {
         let sidebar_inner = sidebar_rect.shrink2(egui::vec2(17.0, 18.0));
         let mut sidebar = ui.new_child(

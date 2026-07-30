@@ -96,6 +96,57 @@ const PACKAGER_CONFIGS: [&str; 4] = [
     "packaging/Packager.linux-aarch64.toml",
 ];
 
+fn packager_string(table: &toml::Table, relative: &str, keys: &[&str]) -> Result<String> {
+    keys.iter()
+        .find_map(|key| table.get(*key).and_then(toml::Value::as_str))
+        .map(str::to_owned)
+        .with_context(|| format!("{relative} has no {} field", keys.join("/")))
+}
+
+fn validate_packager_config(relative: &str, content: &str) -> Result<String> {
+    let parsed: toml::Value =
+        toml::from_str(content).with_context(|| format!("failed to parse {relative} as TOML"))?;
+    let table = parsed
+        .as_table()
+        .with_context(|| format!("{relative} must contain one packager table"))?;
+    let name = packager_string(table, relative, &["name"])?;
+    if name != "runonmine" {
+        bail!("{relative} must declare name = \"runonmine\" for cargo-packager");
+    }
+    let version = packager_string(table, relative, &["version"])?;
+    for (label, keys, expected) in [
+        (
+            "license",
+            &["license-file", "licenseFile"][..],
+            "../LICENSE",
+        ),
+        (
+            "binaries directory",
+            &["binaries-dir", "binariesDir"][..],
+            "../target/packager-input",
+        ),
+        ("output directory", &["out-dir", "outDir"][..], "../dist"),
+    ] {
+        let actual = packager_string(table, relative, keys)?;
+        if actual != expected {
+            bail!(
+                "{relative} {label} must be {expected:?} because cargo-packager resolves paths from packaging/; received {actual:?}"
+            );
+        }
+    }
+    let resources = table
+        .get("resources")
+        .and_then(toml::Value::as_array)
+        .with_context(|| format!("{relative} has no resources array"))?;
+    if !resources
+        .iter()
+        .any(|resource| resource.as_str() == Some("../README.md"))
+    {
+        bail!("{relative} must package ../README.md relative to packaging/");
+    }
+    Ok(version)
+}
+
 fn verify_versions() -> Result<()> {
     let root = workspace_root()?;
     let metadata_output = Command::new("cargo")
@@ -133,10 +184,7 @@ fn verify_versions() -> Result<()> {
     for relative in PACKAGER_CONFIGS {
         let path = root.join(relative);
         let content = fs::read_to_string(&path)?;
-        let declared = content
-            .lines()
-            .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
-            .with_context(|| format!("{relative} has no version field"))?;
+        let declared = validate_packager_config(relative, &content)?;
         if declared != VERSION {
             bail!("{relative} has version {declared}; expected {VERSION}");
         }
@@ -902,6 +950,37 @@ fn write_checksum(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packager_config_requires_a_name_and_config_relative_paths() -> Result<()> {
+        let valid = r#"
+name = "runonmine"
+version = "1.2.3"
+licenseFile = "../LICENSE"
+binariesDir = "../target/packager-input"
+outDir = "../dist"
+resources = ["../README.md"]
+"#;
+        assert_eq!(
+            validate_packager_config("packaging/test.toml", valid)?,
+            "1.2.3"
+        );
+        assert!(
+            validate_packager_config(
+                "packaging/test.toml",
+                &valid.replacen("name = \"runonmine\"\n", "", 1),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_packager_config(
+                "packaging/test.toml",
+                &valid.replace("../target/packager-input", "target/packager-input"),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn sbom_contains_dependency_edges_and_lockfile_checksums() -> Result<()> {

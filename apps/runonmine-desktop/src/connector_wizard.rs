@@ -33,6 +33,7 @@ pub(crate) struct ConnectorCommand {
 }
 
 impl ConnectorWizardState {
+    #[allow(clippy::too_many_lines)] // Connector form extraction remains tracked in P2-02.
     pub(crate) fn show(
         &mut self,
         context: &egui::Context,
