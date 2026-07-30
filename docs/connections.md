@@ -146,6 +146,14 @@ and fails closed with a repair/removal error; setup never deletes or replaces it
 before the connector commit. Explicit absolute user-supplied binaries are
 verified and probed but never modified.
 
+The current beta uses a singleton local tunnel-client profile and fixed loopback
+health endpoint, so it supports only one **configured** OpenAI Secure MCP Tunnel
+connector. This is an explicit configuration invariant rather than a best-effort
+runtime assumption: a second connector is rejected before any download, staging,
+credential mutation, profile initialization, or doctor process, even when the
+existing connector is disabled or the candidate names a different health port.
+Remove the existing OpenAI connector before creating another one.
+
 Availability in ChatGPT depends on the user's current plan, workspace policy,
 and Developer Mode access. RunOnMine does not claim or bypass those permissions.
 

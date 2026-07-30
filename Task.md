@@ -46,7 +46,7 @@ Status markers:
 - [x] **P1-15 — Reconcile connector enable/disable/remove at runtime.** Disabling or removing a connector must immediately stop live transports and sessions without a manual agent restart.
 - [x] **P1-16 — Make connector removal recoverable and idempotent.** Use tombstones/journaling and startup reconciliation for partial cleanup.
 - [x] **P1-17 — Remove pre-commit OpenAI connector side effects.** Implement prepare/validate/commit/activate with rollback guards.
-- [ ] **P1-18 — Allocate OpenAI health ports safely or enforce singleton behavior.** Avoid fixed-port collisions and side effects before validation.
+- [x] **P1-18 — Allocate OpenAI health ports safely or enforce singleton behavior.** Avoid fixed-port collisions and side effects before validation.
 - [ ] **P1-19 — Isolate connector startup failures.** One failed connector must become degraded without taking healthy local or remote connectors down.
 - [ ] **P1-20 — Move OpenAI init/doctor out of blocking agent startup.** Activate connectors asynchronously with visible states and deadlines.
 - [ ] **P1-21 — Store Quick Tunnel runtime URL as ephemeral state.** Clear stale URLs and keep runtime discovery out of durable desired configuration.

@@ -134,6 +134,11 @@ only files whose digest/receipt or transaction marker proves ownership. Existing
 managed binary/receipt pairs are never repaired implicitly: incomplete, symlinked
 or integrity-invalid pairs fail closed without pre-commit replacement.
 
+Because the beta tunnel-client profile uses fixed loopback health port `47823`,
+configuration validation permits at most one configured OpenAI connector. The
+singleton check is evaluated with the full candidate before any staging or
+external process execution; it does not rely only on an eventual bind failure.
+
 ## Network ownership
 
 The MCP listener is fixed to `127.0.0.1:47821`; configuration validation rejects

@@ -695,6 +695,16 @@ fn validate_singleton_connectors(connectors: &[ConnectorConfig]) -> Result<()> {
             bail!("only one enabled {kind:?} connector is supported");
         }
     }
+    if connectors
+        .iter()
+        .filter(|connector| connector.kind == ConnectorKind::OpenAiTunnel)
+        .count()
+        > 1
+    {
+        bail!(
+            "only one configured OpenAI Secure MCP Tunnel connector is supported because its local health endpoint is singleton"
+        );
+    }
     Ok(())
 }
 
@@ -876,6 +886,57 @@ mod tests {
             ..AppConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    fn test_openai_connector(id: &str, enabled: bool, health_port: u16) -> ConnectorConfig {
+        ConnectorConfig {
+            id: id.to_owned(),
+            name: format!("OpenAI {id}"),
+            kind: ConnectorKind::OpenAiTunnel,
+            enabled,
+            policy_preset: PolicyPreset::Safe,
+            pack_overrides: BTreeMap::new(),
+            tool_overrides: BTreeMap::new(),
+            policy_rules: Vec::new(),
+            public_base_url: None,
+            cloudflare_quick: None,
+            cloudflare_named: None,
+            oauth_owner: None,
+            openai_tunnel: Some(OpenAiTunnelSettings {
+                tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".to_owned(),
+                profile: id.to_owned(),
+                tunnel_client_path: None,
+                health_port,
+            }),
+        }
+    }
+
+    #[test]
+    fn only_one_configured_openai_tunnel_is_supported_even_when_disabled() -> Result<()> {
+        let mut config = AppConfig::default();
+        config
+            .connectors
+            .push(test_openai_connector("first", true, 47_823));
+        let first_validation = config.validate();
+        assert!(first_validation.is_ok(), "{first_validation:?}");
+        config
+            .connectors
+            .push(test_openai_connector("second", false, 47_825));
+        assert!(config.validate().is_err());
+        let Some(first) = config
+            .connectors
+            .iter_mut()
+            .find(|connector| connector.id == "first")
+        else {
+            bail!("test OpenAI connector must exist");
+        };
+        first.enabled = false;
+        assert!(config.validate().is_err());
+        config
+            .connectors
+            .retain(|connector| connector.id != "first");
+        assert!(config.validate().is_ok());
+        Ok(())
     }
 
     #[test]

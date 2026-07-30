@@ -937,6 +937,36 @@ mod tests {
     }
 
     #[test]
+    fn second_configured_openai_connector_is_rejected_before_staging() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let config_path = paths.config_file();
+        let binary = std::env::current_exe()?.canonicalize()?;
+        let mut config = AppConfig::default();
+        let mut existing = connector_with_binary("existing-openai", binary.clone());
+        existing.enabled = false;
+        config.connectors.push(existing);
+        config.save(&config_path)?;
+        let mut candidate = connector_with_binary("second-openai", binary);
+        candidate
+            .openai_tunnel
+            .as_mut()
+            .context("test OpenAI settings are missing")?
+            .health_port = 47_825;
+
+        assert!(validate_new_openai_connector(&paths, &config_path, candidate).is_err());
+        assert!(
+            fs::read_dir(&paths.data_dir)?
+                .filter_map(std::result::Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".openai-"))
+        );
+        assert!(!paths.data_dir.join("connectors/second-openai").exists());
+        assert!(!paths.state_dir.join("connectors/second-openai").exists());
+        Ok(())
+    }
+
+    #[test]
     fn validation_failure_creates_no_connector_artifacts() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let paths = AppPaths::under(directory.path());
