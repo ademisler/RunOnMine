@@ -2065,9 +2065,36 @@ fn restrict_sqlite_files(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
+    use proptest::prelude::*;
 
     use super::*;
     use crate::audit::{AuditEvent, AuditOutcome};
+
+    #[tokio::test]
+    async fn async_status_and_pending_inventory_report_inserted_approval() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        let approval = ApprovalRequest::new(
+            "inventory-connector",
+            ApprovalPrincipal::LocalHttp,
+            "fs_write",
+            "write inventory target",
+            "inventory-argument-hash",
+            Utc::now() + chrono::Duration::hours(1),
+        );
+        store.insert_approval(&approval)?;
+
+        let status = store
+            .approval_status_async(approval.id)
+            .await?
+            .context("inserted approval was missing from async status")?;
+        assert_eq!(status.id, approval.id);
+        assert_eq!(status.status, ApprovalStatus::Pending);
+
+        let pending = store.pending_approvals()?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, approval.id);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn bounded_worker_rejects_overload_and_reports_metrics() -> Result<()> {
@@ -3064,5 +3091,94 @@ mod tests {
         })?;
         assert!(!store.verify_audit_chain()?);
         Ok(())
+    }
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn approval_resolution_matches_reference_model(operations in prop::collection::vec(any::<u8>(), 0..64)) {
+            let Ok(store) = StateStore::in_memory() else {
+                return Err(TestCaseError::fail("could not create in-memory state store"));
+            };
+            let principal = ApprovalPrincipal::OAuth {
+                client_id: "property-client".to_owned(),
+                subject: "property-owner".to_owned(),
+            };
+            let approval = ApprovalRequest::new(
+                "property-connector",
+                principal.clone(),
+                "fs_write",
+                "write property target",
+                "property-argument-hash",
+                Utc::now() + chrono::Duration::hours(1),
+            );
+            if store.insert_approval(&approval).is_err() {
+                return Err(TestCaseError::fail("could not insert property approval"));
+            }
+
+            let mut expected_status = ApprovalStatus::Pending;
+            let mut expected_decision = None;
+            let mut grant_active = false;
+            for operation in operations {
+                match operation % 7 {
+                    0..=3 => {
+                        let decision = match operation % 4 {
+                            0 => ApprovalDecision::Once,
+                            1 => ApprovalDecision::ForTenMinutes,
+                            2 => ApprovalDecision::Always,
+                            _ => ApprovalDecision::Deny,
+                        };
+                        let Ok(resolved) = store.resolve_approval(approval.id, decision) else {
+                            return Err(TestCaseError::fail("could not resolve property approval"));
+                        };
+                        prop_assert_eq!(resolved, expected_status == ApprovalStatus::Pending);
+                        if resolved {
+                            expected_status = if decision == ApprovalDecision::Deny {
+                                ApprovalStatus::Denied
+                            } else {
+                                ApprovalStatus::Approved
+                            };
+                            expected_decision = Some(decision);
+                            grant_active = matches!(
+                                decision,
+                                ApprovalDecision::ForTenMinutes | ApprovalDecision::Always
+                            );
+                        }
+                    }
+                    4 => {
+                        let Ok(Some(stored)) = store.approval_status(approval.id) else {
+                            return Err(TestCaseError::fail("property approval disappeared"));
+                        };
+                        prop_assert_eq!(stored.status, expected_status);
+                        prop_assert_eq!(stored.decision, expected_decision);
+                        prop_assert_eq!(stored.principal_fingerprint, principal.fingerprint());
+                    }
+                    5 => {
+                        let Ok(allowed) = store.grant_allows(
+                            "property-connector",
+                            &principal,
+                            "fs_write",
+                            "property-argument-hash",
+                        ) else {
+                            return Err(TestCaseError::fail("could not query property grant"));
+                        };
+                        prop_assert_eq!(allowed, grant_active);
+                    }
+                    _ => {
+                        if store
+                            .clear_persistent_grants(Some("property-connector"))
+                            .is_err()
+                        {
+                            return Err(TestCaseError::fail(
+                                "could not clear property persistent grants",
+                            ));
+                        }
+                        if expected_decision == Some(ApprovalDecision::Always) {
+                            grant_active = false;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

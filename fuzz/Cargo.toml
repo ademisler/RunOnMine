@@ -8,16 +8,20 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+chrono = "0.4"
 libfuzzer-sys = "0.4"
-runonmine-core = { path = "../crates/runonmine-core" }
-url.workspace = true
-serde_json.workspace = true
-runonmine-platform = { path = "../crates/runonmine-platform" }
 runonmine-browser = { path = "../crates/runonmine-browser" }
+runonmine-connectors = { path = "../crates/runonmine-connectors" }
+runonmine-core = { path = "../crates/runonmine-core" }
+runonmine-mcp = { path = "../crates/runonmine-mcp" }
 runonmine-oauth = { path = "../crates/runonmine-oauth" }
+runonmine-platform = { path = "../crates/runonmine-platform" }
 serde_json = "1.0"
 toml = "0.9"
 url = "2.5"
+
+[workspace]
+members = ["."]
 
 [[bin]]
 name = "config_toml"
@@ -32,9 +36,6 @@ path = "fuzz_targets/policy_engine.rs"
 test = false
 doc = false
 bench = false
-
-[workspace]
-members = ["."]
 
 [[bin]]
 name = "oauth_models"
@@ -53,6 +54,27 @@ bench = false
 [[bin]]
 name = "helper_frames"
 path = "fuzz_targets/helper_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_sessions"
+path = "fuzz_targets/mcp_sessions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_entries"
+path = "fuzz_targets/archive_entries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "approval_transitions"
+path = "fuzz_targets/approval_transitions.rs"
 test = false
 doc = false
 bench = false

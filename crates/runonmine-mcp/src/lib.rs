@@ -46,6 +46,8 @@ mod approval_flow;
 mod audit;
 mod connector_removal;
 mod diagnostics;
+#[doc(hidden)]
+pub mod fuzzing;
 mod http;
 mod managed_connectors;
 mod rate_limit;

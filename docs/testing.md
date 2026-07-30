@@ -18,12 +18,19 @@ and session deletion.
 
 ## Fuzzing and concurrency
 
-Nightly fuzz targets cover TOML config, filesystem resolution, policy,
-redaction, OAuth request models, restricted browser URLs, and privileged-helper
-request frames. MCP HTTP health publishes a fresh process epoch and documents
-that sessions and rate-limit buckets reset after restart. OAuth dynamic client
-registration is limited both globally and per registration source. A
-64-concurrent-call test exercises atomic rate-limit admission on every normal
+The scheduled fuzz matrix builds every committed target from the independent
+`fuzz/Cargo.lock` before running it. Targets cover TOML config, policy rules,
+OAuth request models, restricted browser URL parsing, privileged-helper frames,
+MCP session/header binding transitions, verified ZIP/TAR executable-entry
+selection, and SQLite-backed approval transitions. Parser/state targets also
+receive local libFuzzer smoke runs before changes are accepted.
+
+Normal tests use reference models for approval resolution and MCP session
+binding. The weekly mutation workflow narrows `cargo-mutants` to those critical
+state machines instead of mutating the entire workspace: the current baseline
+catches all 20 generated MCP session mutants and all 15 viable approval mutants.
+OAuth dynamic client registration remains globally and per-source limited, and
+a 64-concurrent-call test exercises atomic rate-limit admission on every normal
 quality run.
 
 

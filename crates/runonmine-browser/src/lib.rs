@@ -2142,3 +2142,40 @@ mod tests {
         Ok(())
     }
 }
+
+#[doc(hidden)]
+pub mod fuzzing {
+    use std::net::IpAddr;
+
+    use url::Url;
+
+    /// Exercise restricted URL parsing, redaction and literal-address policy.
+    pub fn exercise_restricted_url(value: &str) {
+        if value.len() > 1024 * 1024 {
+            return;
+        }
+        let _redacted = super::redacted_destination(value);
+        let Ok(url) = Url::parse(value) else {
+            return;
+        };
+        if !matches!(
+            url.scheme(),
+            "about" | "data" | "blob" | "http" | "https" | "ws" | "wss"
+        ) {
+            return;
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return;
+        }
+        let Some(host) = url.host_str() else {
+            return;
+        };
+        let host = super::canonical_destination_host(host);
+        if host == "localhost" || host.ends_with(".localhost") {
+            return;
+        }
+        if let Ok(address) = host.parse::<IpAddr>() {
+            let _non_public = super::is_non_public_address(address);
+        }
+    }
+}

@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -579,43 +579,62 @@ fn create_new_private(path: &Path) -> Result<File> {
         .context("failed to create extracted executable")
 }
 
-fn extract_tar_gz(archive_path: &Path, destination: &Path, expected_name: &str) -> Result<()> {
-    let archive_file = File::open(archive_path).context("failed to open verified tar archive")?;
-    let mut archive = tar::Archive::new(GzDecoder::new(archive_file));
-    let mut found = false;
-    for entry in archive
+fn tar_executable_index<R: Read>(
+    archive: &mut tar::Archive<R>,
+    expected_name: &str,
+) -> Result<usize> {
+    let mut found = None;
+    for (index, entry) in archive
         .entries()
         .context("verified tar archive is invalid")?
+        .enumerate()
     {
-        let mut entry = entry.context("verified tar archive entry is invalid")?;
+        let entry = entry.context("verified tar archive entry is invalid")?;
         let path = entry.path().context("verified tar path is invalid")?;
         let matches = path.file_name().and_then(|name| name.to_str()) == Some(expected_name);
         if !matches {
             continue;
         }
-        if found || !entry.header().entry_type().is_file() {
+        if found.is_some() || !entry.header().entry_type().is_file() {
             bail!("verified tar archive has an ambiguous executable entry");
         }
-        let mut output = create_new_private(destination)?;
-        copy_capped(&mut entry, &mut output, DEFAULT_ARTIFACT_LIMIT)?;
-        output
-            .sync_all()
-            .context("failed to sync extracted executable")?;
-        found = true;
+        found = Some(index);
     }
-    if !found {
-        bail!("verified tar archive does not contain the expected executable");
-    }
+    found.context("verified tar archive does not contain the expected executable")
+}
+
+fn extract_tar_gz(archive_path: &Path, destination: &Path, expected_name: &str) -> Result<()> {
+    let selected = {
+        let archive_file =
+            File::open(archive_path).context("failed to open verified tar archive")?;
+        let mut archive = tar::Archive::new(GzDecoder::new(archive_file));
+        tar_executable_index(&mut archive, expected_name)?
+    };
+
+    let archive_file = File::open(archive_path).context("failed to reopen verified tar archive")?;
+    let mut archive = tar::Archive::new(GzDecoder::new(archive_file));
+    let mut entries = archive
+        .entries()
+        .context("verified tar archive is invalid during extraction")?;
+    let mut entry = entries
+        .nth(selected)
+        .context("verified tar executable entry disappeared")?
+        .context("verified tar archive entry is invalid during extraction")?;
+    let mut output = create_new_private(destination)?;
+    copy_capped(&mut entry, &mut output, DEFAULT_ARTIFACT_LIMIT)?;
+    output
+        .sync_all()
+        .context("failed to sync extracted executable")?;
     Ok(())
 }
 
-fn extract_zip(archive_path: &Path, destination: &Path, expected_name: &str) -> Result<()> {
-    let archive_file = File::open(archive_path).context("failed to open verified zip archive")?;
-    let mut archive =
-        zip::ZipArchive::new(archive_file).context("verified zip archive is invalid")?;
-    let mut found = false;
+fn zip_executable_index<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    expected_name: &str,
+) -> Result<usize> {
+    let mut found = None;
     for index in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(index)
             .context("verified zip archive entry is invalid")?;
         let Some(path) = entry.enclosed_name() else {
@@ -631,20 +650,46 @@ fn extract_zip(archive_path: &Path, destination: &Path, expected_name: &str) -> 
         if !matches {
             continue;
         }
-        if found || !entry.is_file() {
+        if found.is_some() || !entry.is_file() {
             bail!("verified zip archive has an ambiguous executable entry");
         }
-        let mut output = create_new_private(destination)?;
-        copy_capped(&mut entry, &mut output, DEFAULT_ARTIFACT_LIMIT)?;
-        output
-            .sync_all()
-            .context("failed to sync extracted executable")?;
-        found = true;
+        found = Some(index);
     }
-    if !found {
-        bail!("verified zip archive does not contain the expected executable");
-    }
+    found.context("verified zip archive does not contain the expected executable")
+}
+
+fn extract_zip(archive_path: &Path, destination: &Path, expected_name: &str) -> Result<()> {
+    let archive_file = File::open(archive_path).context("failed to open verified zip archive")?;
+    let mut archive =
+        zip::ZipArchive::new(archive_file).context("verified zip archive is invalid")?;
+    let selected = zip_executable_index(&mut archive, expected_name)?;
+    let mut entry = archive
+        .by_index(selected)
+        .context("verified zip executable entry disappeared")?;
+    let mut output = create_new_private(destination)?;
+    copy_capped(&mut entry, &mut output, DEFAULT_ARTIFACT_LIMIT)?;
+    output
+        .sync_all()
+        .context("failed to sync extracted executable")?;
     Ok(())
+}
+
+#[doc(hidden)]
+pub mod fuzzing {
+    use std::io::Cursor;
+
+    use flate2::read::GzDecoder;
+
+    use super::{tar_executable_index, zip_executable_index};
+
+    /// Exercise the exact archive entry scanners used before executable extraction.
+    pub fn exercise_archive_parsers(data: &[u8]) {
+        if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(data)) {
+            let _result = zip_executable_index(&mut archive, "runonmine-bin");
+        }
+        let mut archive = tar::Archive::new(GzDecoder::new(Cursor::new(data)));
+        let _result = tar_executable_index(&mut archive, "runonmine-bin");
+    }
 }
 
 fn copy_capped(reader: &mut impl Read, writer: &mut impl Write, limit: usize) -> Result<()> {
@@ -783,6 +828,72 @@ mod tests {
         assert!(digest.verify_file(&binary)?);
         fs::write(&binary, b"tampered bytes")?;
         assert!(!digest.verify_file(&binary)?);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_zip_executable_is_rejected_before_destination_creation() -> Result<()> {
+        use zip::write::SimpleFileOptions;
+
+        let directory = tempdir()?;
+        let archive_path = directory.path().join("duplicate.zip");
+        let file = File::create(&archive_path)?;
+        let mut archive = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default().unix_permissions(0o755);
+        for path in ["first/runonmine-bin", "second/runonmine-bin"] {
+            archive.start_file(path, options)?;
+            archive.write_all(b"executable")?;
+        }
+        archive.finish()?;
+
+        let destination = directory.path().join("runonmine-bin");
+        assert!(extract_zip(&archive_path, &destination, "runonmine-bin").is_err());
+        assert!(!destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_zip_path_is_rejected_before_destination_creation() -> Result<()> {
+        use zip::write::SimpleFileOptions;
+
+        let directory = tempdir()?;
+        let archive_path = directory.path().join("unsafe.zip");
+        let file = File::create(&archive_path)?;
+        let mut archive = zip::ZipWriter::new(file);
+        archive.start_file("../runonmine-bin", SimpleFileOptions::default())?;
+        archive.write_all(b"executable")?;
+        archive.finish()?;
+
+        let destination = directory.path().join("runonmine-bin");
+        assert!(extract_zip(&archive_path, &destination, "runonmine-bin").is_err());
+        assert!(!destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_tar_executable_is_rejected_before_destination_creation() -> Result<()> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let directory = tempdir()?;
+        let archive_path = directory.path().join("duplicate.tar.gz");
+        let file = File::create(&archive_path)?;
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for path in ["first/runonmine-bin", "second/runonmine-bin"] {
+            let bytes = b"executable";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(u64::try_from(bytes.len())?);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive.append_data(&mut header, path, bytes.as_slice())?;
+        }
+        let encoder = archive.into_inner()?;
+        encoder.finish()?;
+
+        let destination = directory.path().join("runonmine-bin");
+        assert!(extract_tar_gz(&archive_path, &destination, "runonmine-bin").is_err());
+        assert!(!destination.exists());
         Ok(())
     }
 

@@ -1,0 +1,67 @@
+name: Mutation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-main
+  cancel-in-progress: true
+
+env:
+  HOME: /home/runonmine-ci
+  USER: runonmine-ci
+  LOGNAME: runonmine-ci
+  CARGO_HOME: /home/runonmine-ci/.cargo
+  RUSTUP_HOME: /home/runonmine-ci/.rustup
+  PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  critical-state-machines:
+    runs-on: [self-hosted, Linux, X64, runonmine]
+    timeout-minutes: 90
+    concurrency:
+      group: mutation-${{ matrix.name }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: approval
+            package: runonmine-core
+            file: crates/runonmine-core/src/storage.rs
+            examine: resolve_approval_connection|ApprovalPrincipal|ApprovalRequest
+          - name: mcp-session
+            package: runonmine-mcp
+            file: crates/runonmine-mcp/src/http.rs
+            examine: valid_session_id|prune_session_bindings|authorize_session_binding|bind_session|remove_session_binding
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - name: Verify isolated runner environment
+        run: ./scripts/ci/verify-runner-environment.sh
+      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
+        with:
+          toolchain: 1.95.0
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-mutants@27.0.0
+      - name: Mutate ${{ matrix.name }} state machine
+        run: >-
+          cargo mutants --cargo-arg=--locked --no-default-features
+          --package "${{ matrix.package }}"
+          --file "${{ matrix.file }}"
+          --re "${{ matrix.examine }}"
+          --jobs 2 --timeout 180
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: runonmine-mutants-${{ matrix.name }}
+          path: mutants.out
+          if-no-files-found: ignore

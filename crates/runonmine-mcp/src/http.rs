@@ -584,14 +584,15 @@ async fn http_connector_auth_inner(
     };
     if let Some(session_id) = &request_session {
         let mut sessions = state.sessions.lock().await;
-        sessions.retain(|_, binding| binding.last_seen.elapsed() < state.session_idle_ttl);
-        let Some(binding) = sessions.get_mut(session_id) else {
-            return StatusCode::NOT_FOUND.into_response();
-        };
-        if binding.access != access {
+        if !authorize_session_binding(
+            &mut sessions,
+            session_id,
+            &access,
+            state.session_idle_ttl,
+            Instant::now(),
+        ) {
             return StatusCode::NOT_FOUND.into_response();
         }
-        binding.last_seen = Instant::now();
     }
     request.extensions_mut().insert(access.clone());
     let method = request.method().clone();
@@ -602,18 +603,19 @@ async fn http_connector_auth_inner(
         )
         .await;
     if let Some(response_session) = response_session_id(response.headers()) {
-        state.sessions.lock().await.insert(
+        let mut sessions = state.sessions.lock().await;
+        bind_session(
+            &mut sessions,
             response_session,
-            SessionBinding {
-                access: access.clone(),
-                last_seen: Instant::now(),
-            },
+            access.clone(),
+            Instant::now(),
         );
     }
     if method == Method::DELETE
         && let Some(session_id) = request_session
     {
-        state.sessions.lock().await.remove(&session_id);
+        let mut sessions = state.sessions.lock().await;
+        remove_session_binding(&mut sessions, &session_id);
     }
     response
 }
@@ -856,6 +858,64 @@ fn oauth_policy_scopes(connector: &ConnectorConfig) -> ScopeSet {
         .collect()
 }
 
+fn valid_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == 45 || byte == 95)
+}
+
+fn prune_session_bindings(
+    sessions: &mut HashMap<String, SessionBinding>,
+    idle_ttl: Duration,
+    now: Instant,
+) {
+    sessions.retain(|_, binding| now.saturating_duration_since(binding.last_seen) < idle_ttl);
+}
+
+fn authorize_session_binding(
+    sessions: &mut HashMap<String, SessionBinding>,
+    session_id: &str,
+    access: &RequestAccess,
+    idle_ttl: Duration,
+    now: Instant,
+) -> bool {
+    prune_session_bindings(sessions, idle_ttl, now);
+    let Some(binding) = sessions.get_mut(session_id) else {
+        return false;
+    };
+    if binding.access != *access {
+        return false;
+    }
+    binding.last_seen = now;
+    true
+}
+
+fn bind_session(
+    sessions: &mut HashMap<String, SessionBinding>,
+    session_id: String,
+    access: RequestAccess,
+    now: Instant,
+) {
+    if valid_session_id(&session_id) {
+        sessions.insert(
+            session_id,
+            SessionBinding {
+                access,
+                last_seen: now,
+            },
+        );
+    }
+}
+
+fn remove_session_binding(
+    sessions: &mut HashMap<String, SessionBinding>,
+    session_id: &str,
+) -> bool {
+    sessions.remove(session_id).is_some()
+}
+
 #[allow(clippy::result_large_err)]
 fn session_id(headers: &axum::http::HeaderMap) -> Result<Option<String>, Response> {
     headers
@@ -864,12 +924,7 @@ fn session_id(headers: &axum::http::HeaderMap) -> Result<Option<String>, Respons
             let value = value
                 .to_str()
                 .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
-            if value.is_empty()
-                || value.len() > 128
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            {
+            if !valid_session_id(value) {
                 return Err(StatusCode::BAD_REQUEST.into_response());
             }
             Ok(value.to_owned())
@@ -881,8 +936,57 @@ fn response_session_id(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get("mcp-session-id")
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .filter(|value| valid_session_id(value))
         .map(str::to_owned)
+}
+
+pub(crate) fn exercise_fuzz_session_state(data: &[u8]) {
+    let split = data
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(data.len());
+    if let Ok(value) = std::str::from_utf8(&data[..split]) {
+        let _accepted = valid_session_id(value);
+    }
+
+    let now = Instant::now();
+    let ttl = Duration::from_millis(8);
+    let local = RequestAccess {
+        connector_id: "local-http".to_owned(),
+        principal: RequestPrincipal::LocalHttp,
+    };
+    let quick = RequestAccess {
+        connector_id: "quick-tunnel".to_owned(),
+        principal: RequestPrincipal::QuickTunnel,
+    };
+    let mut sessions = HashMap::new();
+    for (index, operation) in data[split..].iter().copied().enumerate() {
+        let session_id = format!("session_{operation:02x}");
+        let tick = Duration::from_millis(u64::try_from(index).unwrap_or(u64::MAX));
+        let logical_now = now.checked_add(tick).unwrap_or(now);
+        match operation % 6 {
+            0 => bind_session(&mut sessions, session_id, local.clone(), logical_now),
+            1 => {
+                let _accepted =
+                    authorize_session_binding(&mut sessions, &session_id, &local, ttl, logical_now);
+            }
+            2 => {
+                let _accepted =
+                    authorize_session_binding(&mut sessions, &session_id, &quick, ttl, logical_now);
+            }
+            3 => {
+                let _removed = remove_session_binding(&mut sessions, &session_id);
+            }
+            4 => prune_session_bindings(&mut sessions, ttl, logical_now),
+            _ => bind_session(
+                &mut sessions,
+                format!("invalid session {operation}"),
+                quick.clone(),
+                logical_now,
+            ),
+        }
+        debug_assert!(sessions.keys().all(|id| valid_session_id(id)));
+    }
 }
 
 async fn public_oauth_host_guard(
@@ -1200,6 +1304,61 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         Ok(())
+    }
+
+    #[test]
+    fn session_binding_state_machine_is_access_bound_expiring_and_deletable() {
+        let started = Instant::now();
+        let ttl = Duration::from_secs(10);
+        let local = RequestAccess {
+            connector_id: "local-http".to_owned(),
+            principal: RequestPrincipal::LocalHttp,
+        };
+        let quick = RequestAccess {
+            connector_id: "quick-tunnel".to_owned(),
+            principal: RequestPrincipal::QuickTunnel,
+        };
+        let mut sessions = HashMap::new();
+
+        bind_session(
+            &mut sessions,
+            "safe_ID-123".to_owned(),
+            local.clone(),
+            started,
+        );
+        bind_session(
+            &mut sessions,
+            "unsafe session".to_owned(),
+            quick.clone(),
+            started,
+        );
+        assert_eq!(sessions.len(), 1);
+        assert!(authorize_session_binding(
+            &mut sessions,
+            "safe_ID-123",
+            &local,
+            ttl,
+            started + Duration::from_secs(1),
+        ));
+        assert!(!authorize_session_binding(
+            &mut sessions,
+            "safe_ID-123",
+            &quick,
+            ttl,
+            started + Duration::from_secs(2),
+        ));
+        assert!(!authorize_session_binding(
+            &mut sessions,
+            "safe_ID-123",
+            &local,
+            ttl,
+            started + Duration::from_secs(11),
+        ));
+        assert!(sessions.is_empty());
+
+        bind_session(&mut sessions, "delete_me".to_owned(), local, started);
+        assert!(remove_session_binding(&mut sessions, "delete_me"));
+        assert!(!remove_session_binding(&mut sessions, "delete_me"));
     }
 
     #[test]

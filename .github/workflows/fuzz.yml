@@ -19,13 +19,28 @@ env:
   CARGO_HOME: /home/runonmine-ci/.cargo
   RUSTUP_HOME: /home/runonmine-ci/.rustup
   PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  RUSTFLAGS: -C target-feature=-crt-static
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  core-parsers:
+  fuzz-target:
     runs-on: [self-hosted, Linux, X64, runonmine]
-    timeout-minutes: 30
-    env:
-      RUSTFLAGS: -C target-feature=-crt-static
+    timeout-minutes: 20
+    concurrency:
+      group: fuzz-${{ matrix.target }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - config_toml
+          - policy_engine
+          - oauth_models
+          - browser_urls
+          - helper_frames
+          - mcp_sessions
+          - archive_entries
+          - approval_transitions
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
@@ -37,13 +52,18 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-fuzz@0.13.2
-      - name: Fuzz configuration parsing and validation
-        run: cargo +nightly-2026-07-18 fuzz run config_toml --target x86_64-unknown-linux-gnu -- -max_total_time=90 -rss_limit_mb=2048
-      - name: Fuzz policy rule evaluation
-        run: cargo +nightly-2026-07-18 fuzz run policy_engine --target x86_64-unknown-linux-gnu -- -max_total_time=90 -rss_limit_mb=2048
+      - name: Build ${{ matrix.target }} fuzz target
+        run: >-
+          cargo +nightly-2026-07-18 fuzz build ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu
+      - name: Run ${{ matrix.target }} fuzz target
+        run: >-
+          cargo +nightly-2026-07-18 fuzz run ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu --
+          -max_total_time=90 -rss_limit_mb=2048 -timeout=15
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: runonmine-fuzz-artifacts
-          path: fuzz/artifacts
+          name: runonmine-fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
