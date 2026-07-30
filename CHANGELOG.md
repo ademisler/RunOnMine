@@ -9,6 +9,12 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Add a real Streamable HTTP MCP acceptance client covering JSON/SSE negotiation, session lifecycle, repeated discovery, a safe read, an owner-approved exact fs_write, negative authentication/malformed requests and disconnect.
+- Persist authenticated incremental audit-verification checkpoints and move desktop config/state/OAuth/audit/connector-health refresh into a bounded background snapshot.
+- Extend real Chromium private-network regression coverage to redirects, popups, iframes, downloads, workers, WebSockets, rebinding, file URLs and IPv6 variants, with zero private-probe connections.
+- Verify the Unix helper boundary with real distinct UIDs and a kernel-enforced owner-only socket; add fresh-host artifact preflight workflows without claiming reboot or publisher signing.
+- Remove direct production rand 0.9 usage in favor of fallible getrandom calls and raise enforced measured coverage to 70% global / 90% critical / 80% changed lines.
+
 - Store desktop credential, token, password and API-key form inputs in zeroizing memory and explicitly wipe existing submit/cancel/reset paths instead of retaining ordinary `String` buffers.
 - Make macOS, Windows and ARM platform CI unconditional for relevant pull requests and replace unsupported Rust-toolchain action inputs with a checked-in exact `rustup` installer.
 - Add global/critical/changed-line coverage ratchets, three additional fuzz targets, a 64-concurrent-call admission soak test, an observable MCP process epoch, and per-source OAuth registration limits.

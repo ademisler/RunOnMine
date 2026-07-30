@@ -127,3 +127,12 @@ history, and disables force-push and deletion. Review the exact GitHub check nam
 before applying after workflow renames.
 
 See [release-rollback.md](release-rollback.md) for rollback and downgrade rules.
+
+## Artifact preflight versus release acceptance
+
+The `Artifact preflight` workflow runs on fresh hosted Linux x86/ARM, macOS and
+Windows runners and records build, checksum/SBOM, setup, agent, MCP, owner-approved
+tool call, desktop launch where applicable, uninstall and residue checks. Its
+report type is `artifact_preflight_not_release_acceptance` and explicitly does
+not claim an operating-system reboot, publisher signature or notarization.
+Those items remain required evidence for the release clean-install gate.

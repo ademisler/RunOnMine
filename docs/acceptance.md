@@ -71,3 +71,12 @@ then update only the corresponding gate in `acceptance/release-gates.toml`.
 ## Fuzz dependency maintenance
 
 The fuzz harness has its own committed lockfile and is scanned by the security workflow. Workspace dependency upgrades are managed from the repository root because the harness consumes `runonmine-core` through a path dependency; a second Dependabot Cargo source would create duplicate PRs that can also alter production dependency constraints.
+
+## Artifact preflight versus release acceptance
+
+The `Artifact preflight` workflow runs on fresh hosted Linux x86/ARM, macOS and
+Windows runners and records build, checksum/SBOM, setup, agent, MCP, owner-approved
+tool call, desktop launch where applicable, uninstall and residue checks. Its
+report type is `artifact_preflight_not_release_acceptance` and explicitly does
+not claim an operating-system reboot, publisher signature or notarization.
+Those items remain required evidence for the release clean-install gate.

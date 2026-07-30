@@ -23,7 +23,7 @@ use crate::audit_mac::AuditMacKey;
 
 pub const AUDIT_RETENTION_DAYS: i64 = 30;
 pub const AUDIT_MAX_BYTES: u64 = 100 * 1024 * 1024;
-const STATE_SCHEMA_VERSION: i64 = 3;
+const STATE_SCHEMA_VERSION: i64 = 4;
 const STATE_DB_QUEUE_CAPACITY: usize = 128;
 const STATE_DB_ENQUEUE_TIMEOUT: StdDuration = StdDuration::from_secs(1);
 const STATE_DB_ENQUEUE_RETRY: StdDuration = StdDuration::from_millis(1);
@@ -42,6 +42,15 @@ pub struct StateStoreMetrics {
     pub high_watermark: usize,
     pub rejected: u64,
     pub completed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct AuditVerificationReport {
+    pub valid: bool,
+    pub full: bool,
+    pub checkpoint_sequence: u64,
+    pub tail_sequence: u64,
+    pub records_verified: usize,
 }
 
 #[derive(Debug, Default)]
@@ -663,7 +672,16 @@ impl StateStore {
 
     pub fn verify_audit_chain(&self) -> Result<bool> {
         let audit_mac = self.audit_mac.clone();
-        self.call(move |connection| verify_audit_chain_connection(connection, &audit_mac))
+        self.call(move |connection| {
+            Ok(verify_audit_chain_full_connection(connection, &audit_mac)?.valid)
+        })
+    }
+
+    pub fn verify_audit_chain_incremental(&self) -> Result<AuditVerificationReport> {
+        let audit_mac = self.audit_mac.clone();
+        self.call(move |connection| {
+            verify_audit_chain_incremental_connection(connection, &audit_mac)
+        })
     }
 
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditRecord>> {
@@ -1042,10 +1060,18 @@ fn append_audit_row(
     Ok((record_hash, sequence))
 }
 
-fn verify_audit_chain_connection(
+#[derive(Clone, Debug)]
+struct AuditVerificationCheckpoint {
+    sequence: u64,
+    record_hash: String,
+    record_mac: String,
+    checkpoint_mac: String,
+}
+
+fn verify_audit_chain_full_connection(
     connection: &mut Connection,
     audit_mac: &AuditMacKey,
-) -> Result<bool> {
+) -> Result<AuditVerificationReport> {
     let tail = audit_tail_state(connection)?;
     let mut statement = connection.prepare(
         "SELECT sequence, id, timestamp, connector_id, tool_name, capability,
@@ -1056,53 +1082,240 @@ fn verify_audit_chain_connection(
     let mut rows = statement.query([])?;
     let mut expected_previous = tail.anchor_hash.clone();
     let mut last = None;
+    let mut records_verified = 0_usize;
     while let Some(row) = rows.next()? {
         let stored = map_stored_audit_row(row)?;
-        if stored.previous_hash != expected_previous || !stored_audit_row_is_authentic(&stored)? {
-            return Ok(false);
-        }
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(stored.previous_hash.as_bytes());
-        hasher.update(&stored.payload);
-        if hasher.finalize().to_hex().as_str() != stored.record_hash
-            || !audit_mac.verifies_record(
-                &stored.record_mac,
-                stored.sequence,
-                &stored.previous_hash,
-                &stored.record_hash,
-                &stored.payload,
-            )
-        {
-            return Ok(false);
+        if !verify_stored_audit_row(&stored, &expected_previous, audit_mac)? {
+            return Ok(AuditVerificationReport {
+                valid: false,
+                full: true,
+                checkpoint_sequence: 0,
+                tail_sequence: tail.sequence,
+                records_verified,
+            });
         }
         expected_previous.clone_from(&stored.record_hash);
         last = Some((stored.sequence, stored.record_hash, stored.record_mac));
+        records_verified = records_verified.saturating_add(1);
     }
-    match last {
-        Some((sequence, record_hash, record_mac)) => {
-            if tail.sequence != sequence
-                || tail.record_hash != record_hash
-                || tail.record_mac != record_mac
-            {
-                return Ok(false);
-            }
+    let valid_tail = match last {
+        Some((sequence, ref record_hash, ref record_mac)) => {
+            tail.sequence == sequence
+                && tail.record_hash == *record_hash
+                && tail.record_mac == *record_mac
         }
         None => {
-            if tail.sequence != 0
-                || tail.record_hash != tail.anchor_hash
-                || !tail.record_mac.is_empty()
-            {
-                return Ok(false);
-            }
+            tail.sequence == 0 && tail.record_hash == tail.anchor_hash && tail.record_mac.is_empty()
         }
-    }
-    Ok(audit_mac.verifies_tail(
+    } && audit_mac.verifies_tail(
         &tail.tail_mac,
         &tail.anchor_hash,
         tail.sequence,
         &tail.record_hash,
         &tail.record_mac,
-    ))
+    );
+    if valid_tail {
+        update_audit_verification_checkpoint(connection, audit_mac, &tail)?;
+    }
+    Ok(AuditVerificationReport {
+        valid: valid_tail,
+        full: true,
+        checkpoint_sequence: 0,
+        tail_sequence: tail.sequence,
+        records_verified,
+    })
+}
+
+fn verify_audit_chain_incremental_connection(
+    connection: &mut Connection,
+    audit_mac: &AuditMacKey,
+) -> Result<AuditVerificationReport> {
+    let tail = audit_tail_state(connection)?;
+    let Some(checkpoint) = load_audit_verification_checkpoint(connection)? else {
+        return verify_audit_chain_full_connection(connection, audit_mac);
+    };
+    if checkpoint.sequence > tail.sequence
+        || !audit_mac.verifies_tail(
+            &checkpoint.checkpoint_mac,
+            &tail.anchor_hash,
+            checkpoint.sequence,
+            &checkpoint.record_hash,
+            &checkpoint.record_mac,
+        )
+        || !checkpoint_matches_audit_row(connection, audit_mac, &tail, &checkpoint)?
+    {
+        return Ok(AuditVerificationReport {
+            valid: false,
+            full: false,
+            checkpoint_sequence: checkpoint.sequence,
+            tail_sequence: tail.sequence,
+            records_verified: 0,
+        });
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT sequence, id, timestamp, connector_id, tool_name, capability,
+                outcome, argument_hash, summary, duration_ms, output_bytes,
+                previous_hash, record_hash, payload, record_mac
+         FROM audit_events WHERE sequence > ?1 ORDER BY sequence",
+    )?;
+    let mut rows = statement.query([i64::try_from(checkpoint.sequence)
+        .context("audit verification checkpoint sequence is too large")?])?;
+    let mut expected_previous = checkpoint.record_hash.clone();
+    let mut last = (
+        checkpoint.sequence,
+        checkpoint.record_hash,
+        checkpoint.record_mac,
+    );
+    let mut records_verified = 0_usize;
+    while let Some(row) = rows.next()? {
+        let stored = map_stored_audit_row(row)?;
+        if !verify_stored_audit_row(&stored, &expected_previous, audit_mac)? {
+            return Ok(AuditVerificationReport {
+                valid: false,
+                full: false,
+                checkpoint_sequence: checkpoint.sequence,
+                tail_sequence: tail.sequence,
+                records_verified,
+            });
+        }
+        expected_previous.clone_from(&stored.record_hash);
+        last = (stored.sequence, stored.record_hash, stored.record_mac);
+        records_verified = records_verified.saturating_add(1);
+    }
+    let valid = last.0 == tail.sequence
+        && last.1 == tail.record_hash
+        && last.2 == tail.record_mac
+        && audit_mac.verifies_tail(
+            &tail.tail_mac,
+            &tail.anchor_hash,
+            tail.sequence,
+            &tail.record_hash,
+            &tail.record_mac,
+        );
+    if valid {
+        update_audit_verification_checkpoint(connection, audit_mac, &tail)?;
+    }
+    Ok(AuditVerificationReport {
+        valid,
+        full: false,
+        checkpoint_sequence: checkpoint.sequence,
+        tail_sequence: tail.sequence,
+        records_verified,
+    })
+}
+
+fn verify_stored_audit_row(
+    stored: &StoredAuditRow,
+    expected_previous: &str,
+    audit_mac: &AuditMacKey,
+) -> Result<bool> {
+    if stored.previous_hash != expected_previous || !stored_audit_row_is_authentic(stored)? {
+        return Ok(false);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(stored.previous_hash.as_bytes());
+    hasher.update(&stored.payload);
+    Ok(hasher.finalize().to_hex().as_str() == stored.record_hash
+        && audit_mac.verifies_record(
+            &stored.record_mac,
+            stored.sequence,
+            &stored.previous_hash,
+            &stored.record_hash,
+            &stored.payload,
+        ))
+}
+
+fn load_audit_verification_checkpoint(
+    connection: &Connection,
+) -> Result<Option<AuditVerificationCheckpoint>> {
+    connection
+        .query_row(
+            "SELECT sequence, record_hash, record_mac, checkpoint_mac
+             FROM audit_verification_checkpoint WHERE id = 1",
+            [],
+            |row| {
+                Ok(AuditVerificationCheckpoint {
+                    sequence: u64::try_from(row.get::<_, i64>(0)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?,
+                    record_hash: row.get(1)?,
+                    record_mac: row.get(2)?,
+                    checkpoint_mac: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .context("failed to load audit verification checkpoint")
+}
+
+fn checkpoint_matches_audit_row(
+    connection: &Connection,
+    audit_mac: &AuditMacKey,
+    tail: &AuditTailState,
+    checkpoint: &AuditVerificationCheckpoint,
+) -> Result<bool> {
+    if checkpoint.sequence == 0 {
+        return Ok(checkpoint.record_hash == tail.anchor_hash && checkpoint.record_mac.is_empty());
+    }
+    let mut statement = connection.prepare(
+        "SELECT sequence, id, timestamp, connector_id, tool_name, capability,
+                outcome, argument_hash, summary, duration_ms, output_bytes,
+                previous_hash, record_hash, payload, record_mac
+         FROM audit_events WHERE sequence = ?1",
+    )?;
+    let mut rows = statement.query([i64::try_from(checkpoint.sequence)
+        .context("audit verification checkpoint sequence is too large")?])?;
+    let stored = rows.next()?.map(map_stored_audit_row).transpose()?;
+    let Some(stored) = stored else {
+        return Ok(false);
+    };
+    Ok(stored.record_hash == checkpoint.record_hash
+        && stored.record_mac == checkpoint.record_mac
+        && stored_audit_row_is_authentic(&stored)?
+        && audit_mac.verifies_record(
+            &stored.record_mac,
+            stored.sequence,
+            &stored.previous_hash,
+            &stored.record_hash,
+            &stored.payload,
+        ))
+}
+
+fn update_audit_verification_checkpoint(
+    connection: &Connection,
+    audit_mac: &AuditMacKey,
+    tail: &AuditTailState,
+) -> Result<()> {
+    let checkpoint_mac = audit_mac.tail_mac(
+        &tail.anchor_hash,
+        tail.sequence,
+        &tail.record_hash,
+        &tail.record_mac,
+    );
+    connection.execute(
+        "INSERT INTO audit_verification_checkpoint (
+            id, sequence, record_hash, record_mac, checkpoint_mac, verified_at
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+            sequence = excluded.sequence,
+            record_hash = excluded.record_hash,
+            record_mac = excluded.record_mac,
+            checkpoint_mac = excluded.checkpoint_mac,
+            verified_at = excluded.verified_at",
+        params![
+            i64::try_from(tail.sequence).context("audit verification sequence is too large")?,
+            tail.record_hash,
+            tail.record_mac,
+            checkpoint_mac,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn map_stored_audit_row(row: &rusqlite::Row<'_>) -> Result<StoredAuditRow> {
@@ -1280,11 +1493,12 @@ fn migrate(connection: &Connection, audit_mac: &AuditMacKey) -> Result<()> {
     migrate_principal_bound_approvals(&transaction)?;
     remove_legacy_connector_wide_grants(&transaction)?;
     create_grant_and_audit_tables(&transaction)?;
-    if current < STATE_SCHEMA_VERSION {
+    if current < 3 {
         migrate_audit_integrity_v3(&transaction, audit_mac)?;
     } else {
         validate_audit_integrity_v3_schema(&transaction)?;
     }
+    create_audit_verification_checkpoint_table(&transaction)?;
     transaction.execute(
         "INSERT INTO schema_versions(component, version) VALUES ('core_state', ?1)
          ON CONFLICT(component) DO UPDATE SET version = excluded.version",
@@ -1393,6 +1607,28 @@ fn create_grant_and_audit_tables(connection: &Connection) -> Result<()> {
             tail_hash TEXT NOT NULL,
             tail_record_mac TEXT NOT NULL,
             tail_mac TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS audit_verification_checkpoint (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            record_hash TEXT NOT NULL,
+            record_mac TEXT NOT NULL,
+            checkpoint_mac TEXT NOT NULL,
+            verified_at TEXT NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+fn create_audit_verification_checkpoint_table(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS audit_verification_checkpoint (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            record_hash TEXT NOT NULL,
+            record_mac TEXT NOT NULL,
+            checkpoint_mac TEXT NOT NULL,
+            verified_at TEXT NOT NULL
         );",
     )?;
     Ok(())
@@ -1670,6 +1906,7 @@ fn prune_audit_connection(
         &tail_record_mac,
     );
     let transaction = connection.transaction()?;
+    transaction.execute("DELETE FROM audit_verification_checkpoint", [])?;
     transaction.execute(
         "DELETE FROM audit_events WHERE sequence <= ?1",
         [last_sequence],
@@ -2636,6 +2873,126 @@ mod tests {
             "argument-hash",
             summary,
         )
+    }
+
+    #[test]
+    fn incremental_audit_verification_advances_authenticated_checkpoint() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        store.append_audit(&test_audit_event("first"))?;
+        store.append_audit(&test_audit_event("second"))?;
+        assert!(store.verify_audit_chain()?);
+        let checkpoint: i64 = store.test_call(|connection| {
+            Ok(connection.query_row(
+                "SELECT sequence FROM audit_verification_checkpoint WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        assert_eq!(checkpoint, 2);
+
+        store.append_audit(&test_audit_event("third"))?;
+        let report = store.verify_audit_chain_incremental()?;
+        assert!(report.valid);
+        assert!(!report.full);
+        assert_eq!(report.checkpoint_sequence, 2);
+        assert_eq!(report.tail_sequence, 3);
+        assert_eq!(report.records_verified, 1);
+        let advanced: i64 = store.test_call(|connection| {
+            Ok(connection.query_row(
+                "SELECT sequence FROM audit_verification_checkpoint WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        assert_eq!(advanced, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_audit_verification_rejects_checkpoint_row_tampering() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        store.append_audit(&test_audit_event("checkpointed"))?;
+        assert!(store.verify_audit_chain()?);
+        store.test_call(|connection| {
+            connection.execute(
+                "UPDATE audit_events SET summary = 'tampered before checkpoint' WHERE sequence = 1",
+                [],
+            )?;
+            Ok(())
+        })?;
+        let report = store.verify_audit_chain_incremental()?;
+        assert!(!report.valid);
+        assert!(!report.full);
+        assert_eq!(report.records_verified, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_pruning_invalidates_checkpoint_and_forces_full_verification() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        store.append_audit(&test_audit_event("old"))?;
+        assert!(store.verify_audit_chain()?);
+        store.test_call(|connection| {
+            connection.execute(
+                "UPDATE audit_events SET timestamp = '2000-01-01T00:00:00+00:00' WHERE sequence = 1",
+                [],
+            )?;
+            let audit_mac = AuditMacKey::generate()?;
+            let _ = audit_mac;
+            Ok(())
+        })?;
+        // The public pruning path authenticates and re-anchors the retained chain, then deletes
+        // any checkpoint that was bound to the previous anchor.
+        let audit_mac = store.audit_mac.clone();
+        store.test_call(move |connection| {
+            let _ = prune_audit_connection(
+                connection,
+                chrono::Duration::zero(),
+                AUDIT_MAX_BYTES,
+                &audit_mac,
+            )?;
+            Ok(())
+        })?;
+        let checkpoint_count: i64 = store.test_call(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM audit_verification_checkpoint",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        assert_eq!(checkpoint_count, 0);
+        let report = store.verify_audit_chain_incremental()?;
+        assert!(report.valid);
+        assert!(report.full);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "scheduled large-state soak"]
+    fn large_audit_chain_incremental_verification_soak() -> Result<()> {
+        const INITIAL: usize = 20_000;
+        const INCREMENTAL: usize = 2_000;
+        let store = StateStore::in_memory()?;
+        for index in 0..INITIAL {
+            store.append_audit(&test_audit_event(&format!("initial-{index}")))?;
+        }
+        let full = store.verify_audit_chain_incremental()?;
+        assert!(full.valid);
+        assert!(full.full);
+        assert_eq!(full.records_verified, INITIAL);
+        for index in 0..INCREMENTAL {
+            store.append_audit(&test_audit_event(&format!("incremental-{index}")))?;
+        }
+        let incremental = store.verify_audit_chain_incremental()?;
+        assert!(incremental.valid);
+        assert!(!incremental.full);
+        assert_eq!(incremental.records_verified, INCREMENTAL);
+        assert_eq!(
+            usize::try_from(incremental.tail_sequence)?,
+            INITIAL + INCREMENTAL
+        );
+        assert_eq!(store.audit_tail(100)?.len(), 100);
+        Ok(())
     }
 
     #[test]

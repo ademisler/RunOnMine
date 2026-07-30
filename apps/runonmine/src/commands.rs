@@ -504,7 +504,7 @@ fn rotate_oauth_registration_token(
     output: Option<&Path>,
 ) -> Result<()> {
     validate_private_output_path(output)?;
-    let token = generate_path_secret();
+    let token = generate_path_secret()?;
     let secrets = default_secret_store(paths)?;
     let endpoint = update_config_with_secrets(
         &paths.config_file(),
@@ -713,21 +713,21 @@ fn rotate_lock_credentials(paths: &AppPaths) -> Result<(usize, usize, usize, usi
                 ConnectorKind::LocalHttp => {
                     transaction.set(
                         &local_http_secret_name(&connector.id),
-                        &SecretString::from(generate_path_secret()),
+                        &SecretString::from(generate_path_secret()?),
                     )?;
                     local_http += 1;
                 }
                 ConnectorKind::CloudflareQuick => {
                     transaction.set(
                         &format!("connector.{}.path_secret", connector.id),
-                        &SecretString::from(generate_path_secret()),
+                        &SecretString::from(generate_path_secret()?),
                     )?;
                     quick_tunnels += 1;
                 }
                 ConnectorKind::CloudflareOauth => {
                     transaction.set(
                         &format!("connector.{}.oauth_registration_token", connector.id),
-                        &SecretString::from(generate_path_secret()),
+                        &SecretString::from(generate_path_secret()?),
                     )?;
                     oauth_registration += 1;
                 }

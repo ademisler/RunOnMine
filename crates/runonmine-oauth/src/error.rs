@@ -170,3 +170,119 @@ impl From<std::io::Error> for StoreError {
         Self::Io(value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_public_error_code_has_stable_wire_name_and_status() {
+        let cases = [
+            (
+                OAuthErrorCode::InvalidRequest,
+                "invalid_request",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OAuthErrorCode::InvalidClient,
+                "invalid_client",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                OAuthErrorCode::InvalidGrant,
+                "invalid_grant",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OAuthErrorCode::InvalidScope,
+                "invalid_scope",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OAuthErrorCode::UnauthorizedClient,
+                "unauthorized_client",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OAuthErrorCode::UnsupportedGrantType,
+                "unsupported_grant_type",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OAuthErrorCode::AccessDenied,
+                "access_denied",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OAuthErrorCode::TemporarilyUnavailable,
+                "temporarily_unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                OAuthErrorCode::ServerError,
+                "server_error",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ];
+        for (code, wire, status) in cases {
+            let error = OAuthError::new(code, "description");
+            assert_eq!(code.as_str(), wire);
+            assert_eq!(error.description(), "description");
+            assert_eq!(error.status(), status);
+            assert!(format!("{error}").contains(&format!("{code:?}")));
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+    }
+
+    #[test]
+    fn constructor_descriptions_are_deliberately_low_detail() {
+        let cases = [
+            OAuthError::invalid_request(),
+            OAuthError::invalid_client(),
+            OAuthError::invalid_grant(),
+            OAuthError::invalid_scope(),
+            OAuthError::unsupported_grant(),
+            OAuthError::access_denied(),
+            OAuthError::temporarily_unavailable(),
+            OAuthError::configuration(),
+            OAuthError::server(),
+        ];
+        for error in cases {
+            assert!(!error.description().is_empty());
+            assert!(!error.description().contains("token"));
+            assert!(!error.description().contains("database"));
+        }
+    }
+
+    #[test]
+    fn persistence_errors_preserve_local_sources_without_public_detail() {
+        let sqlite = rusqlite::Error::InvalidQuery;
+        let database = StoreError::from(sqlite);
+        assert!(matches!(database, StoreError::Database(_)));
+        assert_eq!(database.to_string(), "OAuth persistence failed");
+
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private path");
+        let stored = StoreError::from(io);
+        assert!(matches!(stored, StoreError::Io(_)));
+        assert_eq!(stored.to_string(), "OAuth persistence I/O failed");
+        assert_eq!(
+            StoreError::NotFound.to_string(),
+            "OAuth state was not found"
+        );
+        assert_eq!(
+            StoreError::InvalidGrant.to_string(),
+            "OAuth state is invalid or expired"
+        );
+        assert_eq!(
+            StoreError::RefreshReuse.to_string(),
+            "refresh token reuse was detected"
+        );
+        assert!(
+            StoreError::Corrupt("fixture")
+                .to_string()
+                .contains("fixture")
+        );
+    }
+}

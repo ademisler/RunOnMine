@@ -123,7 +123,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
         ConnectCommand::LocalHttp { command } => match command {
             LocalHttpCommand::Enable { token_output } => {
                 validate_private_output_path(token_output.as_deref())?;
-                let token = generate_path_secret();
+                let token = generate_path_secret()?;
                 let secret = SecretString::from(token.clone());
                 let (connector_id, port) = enable_local_http_transactionally(
                     &paths,
@@ -149,7 +149,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             }
             LocalHttpCommand::Rotate { token_output } => {
                 validate_private_output_path(token_output.as_deref())?;
-                let token = generate_path_secret();
+                let token = generate_path_secret()?;
                 let secret = SecretString::from(token.clone());
                 let _removal_lock = ConnectorRemovalLock::acquire(&paths)?;
                 let (connector_id, port) = update_config_with_secrets(
@@ -231,7 +231,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 },
         } => {
             if let Some(id) = rotate {
-                let path_secret = SecretString::from(generate_path_secret());
+                let path_secret = SecretString::from(generate_path_secret()?);
                 update_config_with_secrets(
                     &config_path,
                     secrets.as_ref(),
@@ -256,7 +256,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
             )
             .await?;
             let id = Uuid::new_v4().to_string();
-            let path_secret = generate_path_secret();
+            let path_secret = generate_path_secret()?;
             let connector = ConnectorConfig {
                 id: id.clone(),
                 name: "Cloudflare Quick Tunnel".to_owned(),
@@ -331,7 +331,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                 bail!("GitHub owner ID must be greater than zero");
             }
             let id = Uuid::new_v4().to_string();
-            let registration_token = generate_path_secret();
+            let registration_token = generate_path_secret()?;
             let public_base_url = Url::parse(&format!("https://{hostname}/"))
                 .context("public Cloudflare hostname is invalid")?;
             let connector = ConnectorConfig {
@@ -374,7 +374,7 @@ pub(crate) async fn connect(command: ConnectCommand) -> Result<()> {
                     ),
                     (
                         format!("connector.{id}.oauth_hash_key"),
-                        SecretString::from(generate_path_secret()),
+                        SecretString::from(generate_path_secret()?),
                     ),
                     (
                         format!("connector.{id}.oauth_registration_token"),
@@ -1124,10 +1124,12 @@ pub(super) fn restrict_private_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn generate_path_secret() -> String {
+pub(super) fn generate_path_secret() -> Result<String> {
     let mut raw = [0_u8; 32];
-    rand::rng().fill_bytes(&mut raw);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+    getrandom::fill(&mut raw).map_err(|error| {
+        anyhow::anyhow!("failed to generate connector credential material: {error}")
+    })?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw))
 }
 
 #[cfg(test)]

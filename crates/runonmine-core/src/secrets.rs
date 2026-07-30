@@ -8,7 +8,6 @@ use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use fs2::FileExt as _;
-use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -596,7 +595,8 @@ impl SecretStore for EncryptedFileSecretStore {
         let _file_guard = self.process_file_lock()?;
         let mut file = self.load()?;
         let mut nonce = [0_u8; 24];
-        rand::rng().fill_bytes(&mut nonce);
+        getrandom::fill(&mut nonce)
+            .map_err(|error| anyhow::anyhow!("failed to generate secret nonce: {error}"))?;
         let ciphertext = self
             .cipher()
             .encrypt(

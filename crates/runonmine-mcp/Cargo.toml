@@ -23,7 +23,6 @@ chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
 hostname.workspace = true
-rand.workspace = true
 rmcp.workspace = true
 runonmine-browser.workspace = true
 runonmine-connectors.workspace = true

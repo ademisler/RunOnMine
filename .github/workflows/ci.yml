@@ -39,10 +39,8 @@ jobs:
         run: |
           target="${RUNNER_TEMP}/runonmine-quality-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           printf 'CARGO_TARGET_DIR=%s\n' "$target" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
-        with:
-          toolchain: 1.95.0
-          components: rustfmt,clippy,llvm-tools-preview
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "rustfmt,clippy,llvm-tools-preview" ""
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-audit,cargo-deny,cargo-llvm-cov@0.8.7
@@ -56,11 +54,16 @@ jobs:
           --all-targets --locked -- -D warnings
       - name: Test desktop crate headless contract
         run: cargo test -p runonmine-desktop --no-default-features --locked
-      - name: Enforce headless line coverage baseline
-        run: >-
-          cargo llvm-cov --workspace --exclude runonmine-desktop
-          --no-default-features --locked --fail-under-lines 45
-          --lcov --output-path coverage.lcov
+      - name: Run MCP Streamable HTTP acceptance
+        run: ./scripts/acceptance/mcp-http-smoke.sh
+      - name: Enforce measured coverage targets
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          cargo llvm-cov --workspace --exclude runonmine-desktop \
+            --no-default-features --locked --lcov --output-path coverage.lcov
+          python3 scripts/ci/check-lcov.py coverage.lcov \
+            --global 70 --critical 90 --changed 80
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runonmine-coverage-lcov

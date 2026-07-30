@@ -17,7 +17,6 @@ env:
 
 jobs:
   test-headless:
-    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_GITHUB_HOSTED_PLATFORM_CI == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -36,12 +35,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
-        with:
-          toolchain: 1.95.0
-          components: clippy
-      - name: Install target
-        run: rustup target add ${{ matrix.target }} --toolchain 1.95.0
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "clippy" ""
       - name: Lint headless workspace
         run: >-
           cargo clippy --workspace --exclude runonmine-desktop
@@ -53,7 +48,6 @@ jobs:
           --no-default-features --target ${{ matrix.target }} --locked
 
   desktop-build:
-    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_GITHUB_HOSTED_PLATFORM_CI == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -64,10 +58,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
-        with:
-          toolchain: 1.95.0
-          components: clippy
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "clippy" ""
       - name: Lint desktop-enabled applications
         run: >-
           cargo clippy -p runonmine -p runonmine-agent -p runonmine-desktop

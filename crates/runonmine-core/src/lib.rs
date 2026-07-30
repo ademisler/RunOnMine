@@ -50,7 +50,10 @@ pub use quick_tunnel_runtime::{
     QuickTunnelGeneration, QuickTunnelRuntimeInventory, QuickTunnelRuntimeRecord,
     QuickTunnelRuntimeStore, validate_quick_tunnel_url,
 };
-pub use storage::{AuditRecord, ConnectorAuthorizationCleanup, StateStore, StateStoreMetrics};
+pub use storage::{
+    AuditRecord, AuditVerificationReport, ConnectorAuthorizationCleanup, StateStore,
+    StateStoreMetrics,
+};
 
 /// Product identifier used for OS integration and MCP metadata.
 pub const PRODUCT_NAME: &str = "RunOnMine";

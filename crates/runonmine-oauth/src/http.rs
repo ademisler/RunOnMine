@@ -277,6 +277,7 @@ fn no_store_redirect(target: &url::Url) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use url::Url;
 
     #[test]
     fn consent_identity_warns_and_renders_stable_client_details_safely() {
@@ -335,6 +336,124 @@ mod tests {
             assert!(registration_bearer_token(&headers).is_err());
         }
         assert!(registration_bearer_token(&HeaderMap::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_router_and_response_helpers_apply_security_headers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let redirect = Url::parse("https://client.example/callback?code=value")?;
+        let response = no_store_redirect(&redirect);
+        assert!(response.status().is_redirection());
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::PRAGMA], "no-cache");
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(response.headers()[header::LOCATION], redirect.as_str());
+
+        let mut headers = HeaderMap::new();
+        no_store_headers(&mut headers);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::PRAGMA], "no-cache");
+
+        let response = TokenResponse {
+            access_token: "access".to_owned(),
+            token_type: "Bearer",
+            expires_in: 900,
+            refresh_token: "refresh".to_owned(),
+            scope: "machine:read".to_owned(),
+        };
+        let value = serde_json::to_value(response)?;
+        assert_eq!(value["token_type"], "Bearer");
+        assert_eq!(value["expires_in"], 900);
+        Ok(())
+    }
+
+    #[test]
+    fn consent_page_escapes_every_dynamic_field_and_sets_browser_guards()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(crate::SqliteOAuthStore::in_memory()?);
+        let verifier = Arc::new(TestVerifier);
+        let service = OAuthService::new(
+            crate::OAuthServiceConfig {
+                connector_id: "oauth-test".to_owned(),
+                issuer: Url::parse("https://mine.example/")?,
+                protected_resource: Url::parse("https://mine.example/mcp")?,
+                github_client_id: "github-client".to_owned(),
+                github_callback_url: Url::parse("https://mine.example/oauth/github/callback")?,
+            },
+            store,
+            crate::TokenHasher::new([7_u8; 32])?,
+            &secrecy::SecretString::from("registration-access-token-000000000000".to_owned()),
+            verifier,
+        )?;
+        let challenge = ConsentChallenge {
+            id: uuid::Uuid::nil(),
+            csrf: secrecy::SecretString::from("csrf<&\"".to_owned()),
+            claimed_client_name: "<client>".to_owned(),
+            client_id_fingerprint: "finger&print".to_owned(),
+            registered_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).ok_or("timestamp")?,
+            requested_redirect_origin: "https://client.example".to_owned(),
+            registered_redirect_origins: vec!["https://client.example".to_owned()],
+            scopes: crate::ScopeSet::machine_read(),
+        };
+        let response = consent_page(&service, &challenge);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::PRAGMA], "no-cache");
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert!(
+            response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()?
+                .contains("frame-ancestors 'none'")
+        );
+        Ok(())
+    }
+
+    #[derive(Debug)]
+    struct TestVerifier;
+
+    #[async_trait::async_trait]
+    impl crate::GitHubOwnerVerifier for TestVerifier {
+        async fn verify_code(
+            &self,
+            _code: secrecy::SecretString,
+            _callback_url: &Url,
+        ) -> Result<crate::GitHubIdentity, OAuthError> {
+            Ok(crate::GitHubIdentity {
+                id: 42,
+                login: "owner".to_owned(),
+            })
+        }
+    }
+
+    #[test]
+    fn callback_query_and_consent_origin_lists_cover_optional_and_current_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let query: GitHubCallbackQuery = serde_json::from_value(serde_json::json!({
+            "code": "code", "state": "state", "error": null
+        }))?;
+        assert_eq!(query.code.as_deref(), Some("code"));
+        assert_eq!(query.state.as_deref(), Some("state"));
+        assert!(query.error.is_none());
+        let denied: GitHubCallbackQuery =
+            serde_json::from_value(serde_json::json!({"error":"access_denied"}))?;
+        assert_eq!(denied.error.as_deref(), Some("access_denied"));
+
+        let html = consent_redirect_origins(
+            &[
+                "https://one.example".to_owned(),
+                "https://two.example/?x=<tag>".to_owned(),
+            ],
+            "https://one.example",
+        );
+        assert!(html.contains("current request"));
+        assert!(html.contains("&lt;tag&gt;"));
+        assert!(html.starts_with("<ul>"));
+        assert!(html.ends_with("</ul>"));
         Ok(())
     }
 

@@ -1005,13 +1005,13 @@ mod tests {
         paths.ensure()?;
         let config_path = paths.config_file();
         AppConfig::default().save(&config_path)?;
-        let staging = prepared_staging(&paths, "success")?;
+        let staging = prepared_staging(&paths, "success-connector")?;
         let binary = versioned_binary(&paths, b"successful tunnel client")?;
         let final_binary = binary.configured_binary_path();
         let store = TestSecretStore::default();
-        let name = "connector.success.runtime_api_key".to_owned();
+        let name = "connector.success-connector.runtime_api_key".to_owned();
         commit_prepared_openai_connector(
-            connector_with_binary("success", final_binary.clone()),
+            connector_with_binary("success-connector", final_binary.clone()),
             &paths,
             &config_path,
             &store,
@@ -1021,7 +1021,7 @@ mod tests {
         )?;
         assert!(
             AppConfig::load(&config_path)?
-                .connector("success")
+                .connector("success-connector")
                 .is_some()
         );
         assert_eq!(
@@ -1041,13 +1041,13 @@ mod tests {
         assert!(
             paths
                 .data_dir
-                .join("connectors/success/openai-profiles/test-profile.yaml")
+                .join("connectors/success-connector/openai-profiles/test-profile.yaml")
                 .is_file()
         );
         assert!(
             paths
                 .state_dir
-                .join(format!("connectors/success/{ACTIVATION_MARKER}"))
+                .join(format!("connectors/success-connector/{ACTIVATION_MARKER}"))
                 .is_file()
         );
         Ok(())

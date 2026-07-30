@@ -37,9 +37,8 @@ jobs:
         run: |
           target="${RUNNER_TEMP}/runonmine-security-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           printf 'CARGO_TARGET_DIR=%s\n' "$target" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
-        with:
-          toolchain: 1.95.0
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-audit,cargo-deny

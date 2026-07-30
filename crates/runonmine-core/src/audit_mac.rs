@@ -28,7 +28,8 @@ impl std::fmt::Debug for AuditMacKey {
 impl AuditMacKey {
     pub(crate) fn generate() -> Result<Self> {
         let mut key = [0_u8; KEY_BYTES];
-        getrandom::fill(&mut key).context("failed to generate an audit MAC key")?;
+        getrandom::fill(&mut key)
+            .map_err(|error| anyhow::anyhow!("failed to generate an audit MAC key: {error}"))?;
         Ok(Self(key))
     }
 

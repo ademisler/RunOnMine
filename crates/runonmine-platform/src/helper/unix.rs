@@ -92,7 +92,28 @@ async fn handle_client(
     write_frame(&mut stream, &response, MAX_RESPONSE_BYTES).await
 }
 
+#[cfg(test)]
+static TEST_SOCKET_PATH: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_test_socket_path(path: Option<PathBuf>) {
+    let mutex = TEST_SOCKET_PATH.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut value) = mutex.lock() {
+        *value = path;
+    }
+}
+
 fn socket_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_SOCKET_PATH
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|value| value.clone())
+    {
+        return path;
+    }
     if cfg!(target_os = "linux") {
         PathBuf::from("/run/runonmine-helper/helper.sock")
     } else {
@@ -152,6 +173,62 @@ fn assign_socket_owner(owner_uid: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    struct ResetSocketPath;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ResetSocketPath {
+        fn drop(&mut self) {
+            set_test_socket_path(None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn encode_hex(bytes: &[u8]) -> Result<String> {
+        use std::fmt::Write as _;
+        let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            write!(&mut output, "{byte:02x}")?;
+        }
+        Ok(output)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn peer_client(
+        socket: &std::path::Path,
+        encoded_hex: &str,
+        user: &nix::unistd::User,
+    ) -> Result<std::process::Output> {
+        use std::os::unix::process::CommandExt as _;
+        use std::process::Command;
+        let script = r"
+import socket, struct, sys
+path=sys.argv[1]
+payload=bytes.fromhex(sys.argv[2])
+s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(3)
+s.connect(path)
+s.sendall(struct.pack('>I', len(payload)) + payload)
+head=s.recv(4)
+if len(head) != 4: raise SystemExit('short response header')
+length=struct.unpack('>I', head)[0]
+data=b''
+while len(data) < length:
+    chunk=s.recv(length-len(data))
+    if not chunk: raise SystemExit('short response body')
+    data += chunk
+print(data.decode())
+";
+        Ok(Command::new("/usr/bin/python3")
+            .arg("-c")
+            .arg(script)
+            .arg(socket)
+            .arg(encoded_hex)
+            .uid(user.uid.as_raw())
+            .gid(user.gid.as_raw())
+            .output()?)
+    }
+
     #[test]
     fn socket_never_uses_legacy_macmcp_port_or_name() {
         let path = socket_path().to_string_lossy().to_lowercase();
@@ -163,5 +240,80 @@ mod tests {
     fn runtime_parent_is_not_user_writable_by_design() {
         let parent = socket_path().parent().map(std::path::Path::to_path_buf);
         assert!(parent.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires root and two real Unix user identities"]
+    async fn real_peer_uid_and_socket_acl_reject_a_second_user() -> Result<()> {
+        use std::time::Duration;
+
+        if !nix::unistd::Uid::effective().is_root() {
+            bail!("real helper identity acceptance must run as root");
+        }
+        let owner = nix::unistd::User::from_name("github1-dev")?
+            .context("github1-dev acceptance owner is missing")?;
+        let attacker = nix::unistd::User::from_name("nobody")?
+            .context("nobody acceptance identity is missing")?;
+        if owner.uid == attacker.uid {
+            bail!("helper acceptance identities must be distinct");
+        }
+
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("helper.sock");
+        set_test_socket_path(Some(socket.clone()));
+        let _reset = ResetSocketPath;
+        let policy = AdminPolicy {
+            version: super::super::POLICY_VERSION,
+            owner: OwnerIdentity::UnixUid {
+                uid: owner.uid.as_raw(),
+            },
+            allowed_programs: Vec::new(),
+        };
+        let server = tokio::spawn(serve(policy));
+        for _ in 0..100 {
+            if fs::symlink_metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket())
+            {
+                break;
+            }
+            if server.is_finished() {
+                return server.await.context("helper server task failed")?;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let metadata = fs::symlink_metadata(&socket)?;
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.uid(), owner.uid.as_raw());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+
+        let request = HelperRequest::health();
+        let request_id = request.request_id;
+        let encoded = serde_json::to_vec(&request)?;
+        let encoded_hex = encode_hex(&encoded)?;
+        let owner_output = peer_client(&socket, &encoded_hex, &owner)?;
+        assert!(
+            owner_output.status.success(),
+            "owner client failed: {}",
+            String::from_utf8_lossy(&owner_output.stderr)
+        );
+        let response: HelperResponse = serde_json::from_slice(&owner_output.stdout)?;
+        assert_eq!(response.request_id, request_id);
+        assert!(matches!(
+            response.result,
+            super::super::HelperResult::Healthy { .. }
+        ));
+
+        let attacker_output = peer_client(&socket, &encoded_hex, &attacker)?;
+        assert!(!attacker_output.status.success());
+        let attacker_error = String::from_utf8_lossy(&attacker_output.stderr);
+        assert!(
+            attacker_error.contains("PermissionError")
+                || attacker_error.contains("Permission denied"),
+            "unexpected second-user failure: {attacker_error}"
+        );
+
+        server.abort();
+        let _ignored = server.await;
+        Ok(())
     }
 }

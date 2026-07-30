@@ -420,6 +420,102 @@ mod tests {
     }
 
     #[test]
+    fn github_verifier_configuration_and_debug_are_fail_closed() -> Result<(), OAuthError> {
+        for (client_id, secret, owner_id) in [
+            ("", "secret", 42),
+            ("   ", "secret", 42),
+            ("client", "", 42),
+            ("client", "secret", 0),
+        ] {
+            assert!(
+                GitHubApiOwnerVerifier::new(
+                    client_id.to_owned(),
+                    SecretString::from(secret.to_owned()),
+                    owner_id,
+                )
+                .is_err()
+            );
+        }
+        let verifier = GitHubApiOwnerVerifier::new(
+            "client-id".to_owned(),
+            SecretString::from("client-secret".to_owned()),
+            42,
+        )?;
+        let debug = format!("{verifier:?}");
+        assert!(debug.contains("client-id"));
+        assert!(debug.contains("owner_id: 42"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("client-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn github_identity_rejects_every_unsafe_login_boundary() {
+        let invalid = [
+            (0, 0, "owner"),
+            (42, 7, "owner"),
+            (42, 42, ""),
+            (42, 42, "-owner"),
+            (42, 42, "owner-"),
+            (42, 42, "owner_name"),
+            (42, 42, "owner.name"),
+            (42, 42, "owner space"),
+            (42, 42, "abcdefghijklmnopqrstuvwxyzabcdefghijklmn"),
+        ];
+        for (expected, actual, login) in invalid {
+            assert!(
+                verify_owner_identity(
+                    expected,
+                    GitHubUserResponse {
+                        id: actual,
+                        login: login.to_owned()
+                    },
+                )
+                .is_err(),
+                "accepted {login:?}"
+            );
+        }
+        for login in [
+            "a",
+            "owner-2",
+            "Owner2",
+            "a23456789012345678901234567890123456789",
+        ] {
+            assert!(
+                verify_owner_identity(
+                    42,
+                    GitHubUserResponse {
+                        id: 42,
+                        login: login.to_owned()
+                    },
+                )
+                .is_ok(),
+                "rejected {login:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn observation_error_and_observed_verifier_debug_are_non_sensitive() {
+        let observer = std::sync::Arc::new(RecordingObserver {
+            observed: std::sync::Mutex::new(Vec::new()),
+            fail: false,
+        });
+        let verifier = ObservedGitHubOwnerVerifier::new(
+            std::sync::Arc::new(StaticVerifier(GitHubIdentity {
+                id: 42,
+                login: "owner".to_owned(),
+            })),
+            observer,
+        );
+        let debug = format!("{verifier:?}");
+        assert!(debug.contains("dyn GitHubOwnerVerifier"));
+        assert!(debug.contains("dyn GitHubIdentityObserver"));
+        let error = GitHubIdentityObservationError::new();
+        assert_eq!(error.to_string(), "GitHub identity observation failed");
+    }
+
+    #[test]
     fn github_user_agent_tracks_the_package_version() {
         assert_eq!(
             GITHUB_USER_AGENT,

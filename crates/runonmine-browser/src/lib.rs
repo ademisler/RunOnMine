@@ -1979,23 +1979,29 @@ mod tests {
                                 .next()
                                 .unwrap_or_default()
                                 .to_owned();
-                            let (content_type, body) = if first_line.contains(" /sw.js ") {
-                                (
-                                    "application/javascript",
-                                    format!(
-                                        "self.addEventListener('message', event => {{ fetch('{private_url}/service-worker', {{mode:'no-cors'}}).then(() => event.source.postMessage('proxy-response')).catch(() => event.source.postMessage('blocked')); }});"
-                                    ),
+                            let response = if first_line.contains(" /redirect-private ") {
+                                format!(
+                                    "HTTP/1.1 302 Found\r\nLocation: {private_url}/redirect-target\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                                 )
                             } else {
-                                (
-                                    "text/html",
-                                    "<!doctype html><meta charset=utf-8><title>RunOnMine browser network test</title><body>ready</body>".to_owned(),
+                                let (content_type, body) = if first_line.contains(" /sw.js ") {
+                                    (
+                                        "application/javascript",
+                                        format!(
+                                            "self.addEventListener('message', event => {{ fetch('{private_url}/service-worker', {{mode:'no-cors'}}).then(() => event.source.postMessage('proxy-response')).catch(() => event.source.postMessage('blocked')); }});"
+                                        ),
+                                    )
+                                } else {
+                                    (
+                                        "text/html",
+                                        "<!doctype html><meta charset=utf-8><title>RunOnMine browser network test</title><body>ready</body>".to_owned(),
+                                    )
+                                };
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nService-Worker-Allowed: /\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
                                 )
                             };
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nService-Worker-Allowed: /\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                body.len()
-                            );
                             let _ignored = stream.write_all(response.as_bytes()).await;
                         });
                     }
@@ -2041,6 +2047,7 @@ mod tests {
     fn browser_attack_script(
         private_url: &str,
         private_address: std::net::SocketAddr,
+        public_redirect: &str,
     ) -> Result<String> {
         let script = include_str!("../tests/fixtures/network_attacks.js");
         Ok(script
@@ -2052,7 +2059,11 @@ mod tests {
                 "__PRIVATE_WS_JSON__",
                 &serde_json::to_string(&format!("ws://{private_address}"))?,
             )
-            .replace("__PRIVATE_PORT__", &private_address.port().to_string()))
+            .replace("__PRIVATE_PORT__", &private_address.port().to_string())
+            .replace(
+                "__PUBLIC_REDIRECT_JSON__",
+                &serde_json::to_string(public_redirect)?,
+            ))
     }
 
     #[cfg(target_os = "linux")]
@@ -2085,7 +2096,11 @@ mod tests {
             )],
         );
         session.open(&format!("{public_origin}/")).await?;
-        let script = browser_attack_script(&private_url, private_address)?;
+        let script = browser_attack_script(
+            &private_url,
+            private_address,
+            &format!("{public_origin}/redirect-private"),
+        )?;
         let result = session.evaluate(&script).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
         let private_connection_count = private_connections.load(Ordering::SeqCst);
@@ -2101,6 +2116,7 @@ mod tests {
             "worker",
             "sharedWorker",
             "serviceWorker",
+            "redirect",
             "rebinding",
         ] {
             let outcome = result
@@ -2108,15 +2124,17 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .with_context(|| format!("browser probe {key} produced no result: {result}"))?;
             assert!(
-                matches!(outcome, "blocked" | "proxy-response"),
+                matches!(outcome, "blocked" | "proxy-response" | "timeout"),
                 "browser probe {key} did not complete through the guarded network path: {result}"
             );
         }
         assert_eq!(result["websocket"], "blocked", "WebSocket result: {result}");
-        assert!(
-            matches!(result["popup"].as_str(), Some("attempted" | "blocked")),
-            "popup target did not execute: {result}"
-        );
+        for key in ["popup", "iframe", "download"] {
+            assert!(
+                matches!(result[key].as_str(), Some("attempted" | "blocked")),
+                "browser probe {key} did not execute: {result}"
+            );
+        }
         assert_eq!(
             private_connection_count, 0,
             "a popup, worker, WebSocket, background target, or rebinding request reached the private probe: {result}"

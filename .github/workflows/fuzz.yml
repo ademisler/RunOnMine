@@ -32,9 +32,8 @@ jobs:
           persist-credentials: false
       - name: Verify isolated runner environment
         run: ./scripts/ci/verify-runner-environment.sh
-      - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
-        with:
-          toolchain: nightly-2026-07-18
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh nightly-2026-07-18
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-fuzz@0.13.2

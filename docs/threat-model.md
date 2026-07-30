@@ -27,6 +27,10 @@ compromised.
 
 | Threat | Primary controls |
 | --- | --- |
+| A desktop refresh stalls rendering or repeatedly scans the complete audit history | non-overlapping background snapshots, bounded connector-health I/O, authenticated incremental audit checkpoints, explicit audit pagination |
+| A redacted approval preview is mistaken for a safety guarantee | visible warning that redaction only hides credential values; complete effective action and requester must be reviewed |
+| A test reports MCP health without exercising the protocol | real JSON/SSE Streamable HTTP initialize, initialized, tools/list, approved tool call, negative transport and session-delete acceptance |
+| A second local Unix user connects to the privileged helper | real-UID root acceptance plus owner UID/mode 0600 socket and kernel permission denial; Windows SID evidence remains a platform gate |
 | An internet user discovers a tunnel endpoint | Quick paths contain 256 random bits; permanent connections use OAuth; invalid paths return 404 |
 | A forged Host authority routes a request into the public OAuth connector | exact configured hostname matching, only absent/default HTTPS port 443 accepted, unmatched authorities return 404 |
 | A confused-deputy or prompt-injection request invokes a destructive tool | deny/ask/allow policy, argument-aware local-only approval, exact connector/principal/tool/argument grants, explicit deny precedence over grants, remote safety ceiling, truthful destructive/open-world annotations |

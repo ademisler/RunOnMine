@@ -1,0 +1,60 @@
+name: Soak
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-main
+  cancel-in-progress: true
+
+jobs:
+  state-and-mcp:
+    runs-on: [self-hosted, Linux, X64, runonmine]
+    timeout-minutes: 60
+    env:
+      HOME: /home/runonmine-ci
+      USER: runonmine-ci
+      LOGNAME: runonmine-ci
+      CARGO_HOME: /home/runonmine-ci/.cargo
+      RUSTUP_HOME: /home/runonmine-ci/.rustup
+      PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      CARGO_INCREMENTAL: 0
+      RUNONMINE_MCP_SOAK_ITERATIONS: 5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - name: Verify isolated runner environment
+        run: ./scripts/ci/verify-runner-environment.sh
+      - name: Configure ephemeral target
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/runonmine-soak-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0
+      - name: Run state and MCP soak
+        run: ./scripts/acceptance/soak.sh
+      - name: Remove ephemeral build output
+        if: always()
+        run: rm -rf -- "${CARGO_TARGET_DIR:-}"
+
+
+  desktop-macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      RUNONMINE_DESKTOP_SOAK_SECONDS: 1800
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0
+      - name: Build desktop
+        run: cargo build --locked -p runonmine-desktop
+      - name: Run 30-minute desktop lifecycle soak
+        run: ./scripts/acceptance/desktop-launch-smoke.sh target/debug/runonmine-desktop

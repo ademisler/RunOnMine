@@ -38,6 +38,33 @@ Notification delivery and pulse-write failures are exposed through
 `approval_notification_metrics`; notification failure never changes the result
 of an already committed owner decision.
 
+
+## Desktop layers and refresh
+
+The desktop executable is a thin bootstrap. `desktop_model.rs` owns durable UI
+state, `desktop_app.rs` owns update/orchestration, `desktop_snapshot.rs` owns
+blocking effects, and `desktop_views.rs` owns rendering. A single background
+snapshot performs config/secret recovery, SQLite and OAuth reads, incremental
+audit verification, Quick runtime discovery and a 250 ms/256 KiB-bounded
+loopback connector-health request. Snapshots never overlap; the UI only applies
+a completed value. Audit history starts at 100 records and doubles on explicit
+owner requests up to 10,000.
+
+Connector lifecycle from the direct-loopback endpoint is rendered as typed
+configured/starting/ready/backoff/degraded/stale-credential/failed/stopped
+states. Local stdio remains explicitly on-demand rather than pretending to be a
+continuously running service.
+
+## Incremental audit verification
+
+State schema v4 stores one MAC-authenticated verification checkpoint. An
+incremental verification authenticates the checkpoint against the retained
+anchor, reloads and verifies the exact checkpoint row, validates only later
+rows, and compares the resulting tail with the authenticated chain state.
+Pruning deletes the old checkpoint before re-anchoring, forcing the next check
+to perform a full scan. Corrupt or missing checkpoint evidence never becomes a
+successful absence.
+
 ## Sanitized failure correlation
 
 Every MCP tool call runs inside a request UUID scope. Internal failures generate
