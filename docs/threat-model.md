@@ -60,6 +60,7 @@ compromised.
 | A token granted ordinary `shell:exec` silently gains AppleScript, PowerShell, or D-Bus automation | platform-native tools require the distinct `platform:exec` scope, tool discovery checks that exact scope, and consent renders an explicit operating-system automation description |
 | A malicious OAuth client claims a trusted product or publisher name in consent | claimed names are labeled unverified; consent shows a stable client-ID fingerprint, UTC registration time, current and all registered redirect origins; display-control characters are rejected and all values are context-escaped |
 | SQLite sidecars expose state | private parent directories and owner-only database, WAL, and shared-memory files |
+| A burst of MCP authorization, approval or audit work exhausts memory through the state worker | bounded 128-job SQLite queue; one-second enqueue backpressure for synchronous and asynchronous callers; rejected/high-watermark/completed metrics; dangerous paths fail closed when enqueue is unavailable; accepted jobs have no ambiguous late-commit reply timeout |
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
 | An alternate executable path spelling avoids a canonical admin policy rule | MCP authorization and helper allowlist installation share the same root/SYSTEM-owned, non-symlink canonical program identity |

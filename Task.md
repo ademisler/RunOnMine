@@ -62,7 +62,7 @@ Status markers:
 - [ ] **P2-03 — Separate desktop model/update/effects/views.** Remove direct database, secret and child-process orchestration from rendering code.
 - [ ] **P2-04 — Move desktop refresh work off the UI thread.** Use background snapshots, incremental audit verification and pagination.
 - [ ] **P2-05 — Zeroize desktop credential inputs.** Use secret wrappers and explicit clearing.
-- [ ] **P2-06 — Add StateStore backpressure.** Replace the unbounded worker queue with bounded capacity, timeout and metrics.
+- [x] **P2-06 — Add StateStore backpressure.** The serialized SQLite worker uses a bounded 128-job queue, one-second enqueue timeout, overload metrics, and no ambiguous post-acceptance result timeout.
 - [ ] **P2-07 — Replace approval polling with notifications.** Retain polling only as a recovery fallback.
 - [ ] **P2-08 — Preserve sanitized internal error diagnostics.** Keep generic remote errors while logging request/connector/audit references and categories.
 - [ ] **P2-09 — Replace silent `.ok()` fallbacks with typed degraded states.** Distinguish missing, disabled, corrupt, unavailable and permission-denied conditions.

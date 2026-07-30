@@ -7,6 +7,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Bound the serialized StateStore SQLite worker to 128 queued jobs with a one-second sync/async enqueue timeout and observable queue, active, high-watermark, rejected and completed counters. Accepted database operations are never abandoned behind a reply timeout, avoiding ambiguous late commits.
 - Enforce connector-client compatibility before setup, doctor, managed update and agent process start: stable OpenAI tunnel-client `0.0.10` and stable cloudflared releases in the supported date-version range are accepted; prerelease, old and future-incompatible clients fail before activation and leave the known-good active manifest unchanged.
 - Route connector startup, CLI loading, doctor/list trust reporting, and external pinning through one binary trust resolver: immutable managed versions require matching private receipts, pinned external binaries require canonical path/digest/ownership/metadata continuity, changed pins fail before process start, and unpinned external binaries remain visible with an explicit warning.
 - Complete `connect update-managed-binaries` for managed Cloudflare and OpenAI connectors: stage, receipt-verify, compatibility-probe and store a new immutable version, atomically rewrite only managed config paths, activate the manifest, restart the running agent, and restore both config and active version on failure. Valid legacy OpenAI binary/receipt pairs migrate into the version store without deleting the originals.

@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -18,44 +19,98 @@ use crate::audit_mac::AuditMacKey;
 pub const AUDIT_RETENTION_DAYS: i64 = 30;
 pub const AUDIT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const STATE_SCHEMA_VERSION: i64 = 3;
+const STATE_DB_QUEUE_CAPACITY: usize = 128;
+const STATE_DB_ENQUEUE_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+const STATE_DB_ENQUEUE_RETRY: StdDuration = StdDuration::from_millis(1);
 
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
 enum DbMessage {
     Run(DbJob),
-    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct StateStoreMetrics {
+    pub queue_capacity: usize,
+    pub queued: usize,
+    pub active: usize,
+    pub high_watermark: usize,
+    pub rejected: u64,
+    pub completed: u64,
+}
+
+#[derive(Debug, Default)]
+struct WorkerCounters {
+    queued: usize,
+    active: usize,
+    high_watermark: usize,
+    rejected: u64,
+    completed: u64,
 }
 
 struct SqliteWorker {
-    sender: Option<mpsc::Sender<DbMessage>>,
+    sender: Option<mpsc::SyncSender<DbMessage>>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    counters: Arc<Mutex<WorkerCounters>>,
+    queue_capacity: usize,
+    enqueue_timeout: StdDuration,
 }
 
 impl std::fmt::Debug for SqliteWorker {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SqliteWorker")
+            .field("metrics", &self.metrics())
+            .field("enqueue_timeout", &self.enqueue_timeout)
             .finish_non_exhaustive()
     }
 }
 
 impl SqliteWorker {
-    fn start(mut connection: Connection) -> Result<Self> {
-        let (sender, receiver) = mpsc::channel::<DbMessage>();
+    fn start(connection: Connection) -> Result<Self> {
+        Self::start_with_options(
+            connection,
+            STATE_DB_QUEUE_CAPACITY,
+            STATE_DB_ENQUEUE_TIMEOUT,
+        )
+    }
+
+    fn start_with_options(
+        mut connection: Connection,
+        queue_capacity: usize,
+        enqueue_timeout: StdDuration,
+    ) -> Result<Self> {
+        if queue_capacity == 0 {
+            bail!("state database worker queue capacity must be positive");
+        }
+        if enqueue_timeout.is_zero() {
+            bail!("state database worker enqueue timeout must be positive");
+        }
+        let (sender, receiver) = mpsc::sync_channel::<DbMessage>(queue_capacity);
+        let counters = Arc::new(Mutex::new(WorkerCounters::default()));
+        let worker_counters = Arc::clone(&counters);
         let thread = std::thread::Builder::new()
             .name("runonmine-state-db".to_owned())
             .spawn(move || {
-                while let Ok(message) = receiver.recv() {
-                    match message {
-                        DbMessage::Run(job) => job(&mut connection),
-                        DbMessage::Shutdown => break,
+                while let Ok(DbMessage::Run(job)) = receiver.recv() {
+                    {
+                        let mut counters = lock_counters(&worker_counters);
+                        counters.queued = counters.queued.saturating_sub(1);
+                        counters.active = counters.active.saturating_add(1);
                     }
+                    job(&mut connection);
+                    let mut counters = lock_counters(&worker_counters);
+                    counters.active = counters.active.saturating_sub(1);
+                    counters.completed = counters.completed.saturating_add(1);
                 }
             })
             .context("failed to start state database worker")?;
         Ok(Self {
             sender: Some(sender),
             thread: Mutex::new(Some(thread)),
+            counters,
+            queue_capacity,
+            enqueue_timeout,
         })
     }
 
@@ -65,13 +120,9 @@ impl SqliteWorker {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let (reply, receive) = mpsc::sync_channel(1);
-        self.sender
-            .as_ref()
-            .context("state database worker is unavailable")?
-            .send(DbMessage::Run(Box::new(move |connection| {
-                let _ignored = reply.send(operation(connection));
-            })))
-            .map_err(|_| anyhow!("state database worker is unavailable"))?;
+        self.enqueue_sync(DbMessage::Run(Box::new(move |connection| {
+            let _ignored = reply.send(operation(connection));
+        })))?;
         receive
             .recv()
             .map_err(|_| anyhow!("state database worker stopped unexpectedly"))?
@@ -83,24 +134,123 @@ impl SqliteWorker {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let (reply, receive) = oneshot::channel();
-        self.sender
-            .as_ref()
-            .context("state database worker is unavailable")?
-            .send(DbMessage::Run(Box::new(move |connection| {
-                let _ignored = reply.send(operation(connection));
-            })))
-            .map_err(|_| anyhow!("state database worker is unavailable"))?;
+        self.enqueue_async(DbMessage::Run(Box::new(move |connection| {
+            let _ignored = reply.send(operation(connection));
+        })))
+        .await?;
         receive
             .await
             .map_err(|_| anyhow!("state database worker stopped unexpectedly"))?
     }
+
+    fn enqueue_sync(&self, mut message: DbMessage) -> Result<()> {
+        let sender = self
+            .sender
+            .as_ref()
+            .context("state database worker is unavailable")?
+            .clone();
+        let deadline = Instant::now() + self.enqueue_timeout;
+        loop {
+            match self.try_enqueue(&sender, message) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    message = returned;
+                    if Instant::now() >= deadline {
+                        self.record_rejected();
+                        bail!(
+                            "state database worker queue remained full for {} ms",
+                            self.enqueue_timeout.as_millis()
+                        );
+                    }
+                    std::thread::sleep(STATE_DB_ENQUEUE_RETRY);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.record_rejected();
+                    bail!("state database worker is unavailable");
+                }
+            }
+        }
+    }
+
+    async fn enqueue_async(&self, mut message: DbMessage) -> Result<()> {
+        let sender = self
+            .sender
+            .as_ref()
+            .context("state database worker is unavailable")?
+            .clone();
+        let deadline = Instant::now() + self.enqueue_timeout;
+        loop {
+            match self.try_enqueue(&sender, message) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    message = returned;
+                    if Instant::now() >= deadline {
+                        self.record_rejected();
+                        bail!(
+                            "state database worker queue remained full for {} ms",
+                            self.enqueue_timeout.as_millis()
+                        );
+                    }
+                    tokio::time::sleep(STATE_DB_ENQUEUE_RETRY).await;
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.record_rejected();
+                    bail!("state database worker is unavailable");
+                }
+            }
+        }
+    }
+
+    fn try_enqueue(
+        &self,
+        sender: &mpsc::SyncSender<DbMessage>,
+        message: DbMessage,
+    ) -> std::result::Result<(), mpsc::TrySendError<DbMessage>> {
+        let mut counters = self.lock_counters();
+        if counters.queued >= self.queue_capacity {
+            return Err(mpsc::TrySendError::Full(message));
+        }
+        match sender.try_send(message) {
+            Ok(()) => {
+                counters.queued = counters.queued.saturating_add(1);
+                counters.high_watermark = counters.high_watermark.max(counters.queued);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn record_rejected(&self) {
+        let mut counters = self.lock_counters();
+        counters.rejected = counters.rejected.saturating_add(1);
+    }
+
+    fn metrics(&self) -> StateStoreMetrics {
+        let counters = self.lock_counters();
+        StateStoreMetrics {
+            queue_capacity: self.queue_capacity,
+            queued: counters.queued,
+            active: counters.active,
+            high_watermark: counters.high_watermark,
+            rejected: counters.rejected,
+            completed: counters.completed,
+        }
+    }
+
+    fn lock_counters(&self) -> MutexGuard<'_, WorkerCounters> {
+        lock_counters(&self.counters)
+    }
+}
+
+fn lock_counters(counters: &Mutex<WorkerCounters>) -> MutexGuard<'_, WorkerCounters> {
+    counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Drop for SqliteWorker {
     fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ignored = sender.send(DbMessage::Shutdown);
-        }
+        self.sender.take();
         if let Ok(mut thread) = self.thread.lock()
             && let Some(thread) = thread.take()
         {
@@ -190,6 +340,11 @@ impl StateStore {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         self.worker.call_async(operation).await
+    }
+
+    #[must_use]
+    pub fn worker_metrics(&self) -> StateStoreMetrics {
+        self.worker.metrics()
     }
 
     pub fn insert_approval(&self, request: &ApprovalRequest) -> Result<()> {
@@ -1582,6 +1737,70 @@ mod tests {
 
     use super::*;
     use crate::audit::{AuditEvent, AuditOutcome};
+
+    #[tokio::test]
+    async fn bounded_worker_rejects_overload_and_reports_metrics() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        let worker = Arc::new(SqliteWorker::start_with_options(
+            connection,
+            1,
+            StdDuration::from_millis(25),
+        )?);
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let first_worker = Arc::clone(&worker);
+        let first = std::thread::spawn(move || {
+            first_worker.call(move |_connection| {
+                started_sender
+                    .send(())
+                    .map_err(|_| anyhow!("failed to signal blocking database operation"))?;
+                release_receiver
+                    .recv()
+                    .map_err(|_| anyhow!("failed to release blocking database operation"))?;
+                Ok(())
+            })
+        });
+        started_receiver
+            .recv_timeout(StdDuration::from_secs(1))
+            .map_err(|_| anyhow!("database worker did not start the blocking operation"))?;
+
+        let second_worker = Arc::clone(&worker);
+        let second = std::thread::spawn(move || second_worker.call(|_connection| Ok(())));
+        let queued_deadline = Instant::now() + StdDuration::from_secs(1);
+        while worker.metrics().queued != 1 {
+            if Instant::now() >= queued_deadline {
+                bail!("second database operation was not queued");
+            }
+            std::thread::sleep(StdDuration::from_millis(1));
+        }
+
+        let sync_overload: Result<()> = worker.call(|_connection| Ok(()));
+        assert!(sync_overload.is_err());
+        let async_overload: Result<()> = worker.call_async(|_connection| Ok(())).await;
+        assert!(async_overload.is_err());
+        let overloaded = worker.metrics();
+        assert_eq!(overloaded.queue_capacity, 1);
+        assert_eq!(overloaded.queued, 1);
+        assert_eq!(overloaded.active, 1);
+        assert_eq!(overloaded.high_watermark, 1);
+        assert_eq!(overloaded.rejected, 2);
+
+        release_sender
+            .send(())
+            .map_err(|_| anyhow!("failed to release database worker"))?;
+        first
+            .join()
+            .map_err(|_| anyhow!("first database caller panicked"))??;
+        second
+            .join()
+            .map_err(|_| anyhow!("second database caller panicked"))??;
+        let completed = worker.metrics();
+        assert_eq!(completed.queued, 0);
+        assert_eq!(completed.active, 0);
+        assert_eq!(completed.completed, 2);
+        assert_eq!(completed.rejected, 2);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn async_worker_handles_authorization_state_without_blocking_connection_ownership()
