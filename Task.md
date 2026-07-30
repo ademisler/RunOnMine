@@ -41,8 +41,8 @@ Status markers:
 - [x] **P1-10 — Restrict privileged helper arguments.** Add executable-specific subcommand/argument schemas, path constraints and forbidden flags.
 - [x] **P1-11 — Reduce helper executable verification/execution TOCTOU.** Revalidate file identity or execute from a verified handle where supported.
 - [x] **P1-12 — Make helper installation transactional.** Stage binary/policy/service, restart, health-check and restore the previous installation on failure.
-- [ ] **P1-13 — Guarantee agent/helper service restart after reinstall.** Add version handshake, explicit restart, health validation and rollback.
-- [ ] **P1-14 — Clarify and strengthen audit tamper resistance.** Include all query-visible fields in the authenticated payload, add keyed integrity/checkpoints where feasible and document the same-user threat boundary.
+- [x] **P1-13 — Guarantee agent/helper service restart after reinstall.** Add version handshake, explicit restart, health validation and rollback.
+- [x] **P1-14 — Clarify and strengthen audit tamper resistance.** Include all query-visible fields in the authenticated payload, add keyed integrity/checkpoints where feasible and document the same-user threat boundary.
 - [ ] **P1-15 — Reconcile connector enable/disable/remove at runtime.** Disabling or removing a connector must immediately stop live transports and sessions without a manual agent restart.
 - [ ] **P1-16 — Make connector removal recoverable and idempotent.** Use tombstones/journaling and startup reconciliation for partial cleanup.
 - [ ] **P1-17 — Remove pre-commit OpenAI connector side effects.** Implement prepare/validate/commit/activate with rollback guards.

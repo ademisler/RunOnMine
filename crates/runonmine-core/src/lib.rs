@@ -1,5 +1,7 @@
 //! Shared security, configuration, persistence, and execution primitives.
 
+mod audit_mac;
+pub mod agent_status;
 pub mod approval;
 mod atomic;
 pub mod audit;

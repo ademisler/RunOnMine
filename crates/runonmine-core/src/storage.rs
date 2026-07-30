@@ -1640,5 +1640,87 @@ mod tests {
         )?;
         assert!(migrate(&connection).is_err());
         Ok(())
+    }    fn test_audit_event(summary: &str) -> AuditEvent {
+        AuditEvent::new(
+            "test-connector",
+            "fs_write",
+            "files_write",
+            crate::AuditOutcome::Succeeded,
+            "argument-hash",
+            summary,
+        )
     }
+
+    #[test]
+    fn audit_integrity_rejects_denormalized_column_tampering() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        store.append_audit(&test_audit_event("original summary"))?;
+        assert!(store.verify_audit_chain()?);
+        store.test_call(|connection| {
+            connection.execute(
+                "UPDATE audit_events SET summary = 'tampered summary' WHERE sequence = 1",
+                [],
+            )?;
+            Ok(())
+        })?;
+        assert!(!store.verify_audit_chain()?);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_integrity_rejects_tail_truncation() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        store.append_audit(&test_audit_event("first"))?;
+        store.append_audit(&test_audit_event("second"))?;
+        assert!(store.verify_audit_chain()?);
+        store.test_call(|connection| {
+            connection.execute(
+                "DELETE FROM audit_events WHERE sequence = (SELECT MAX(sequence) FROM audit_events)",
+                [],
+            )?;
+            Ok(())
+        })?;
+        assert!(!store.verify_audit_chain()?);
+        Ok(())
+    }
+
+    #[test]
+    fn version_three_reopen_does_not_backfill_a_truncated_tail() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state.db");
+        {
+            let store = StateStore::open(&database)?;
+            store.append_audit(&test_audit_event("first"))?;
+            store.append_audit(&test_audit_event("second"))?;
+            assert!(store.verify_audit_chain()?);
+        }
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute(
+                "DELETE FROM audit_events WHERE sequence = (SELECT MAX(sequence) FROM audit_events)",
+                [],
+            )?;
+        }
+        let reopened = StateStore::open(&database)?;
+        assert!(!reopened.verify_audit_chain()?);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_integrity_rejects_record_mac_tampering() -> Result<()> {
+        let store = StateStore::in_memory()?;
+        store.append_audit(&test_audit_event("mac protected"))?;
+        assert!(store.verify_audit_chain()?);
+        store.test_call(|connection| {
+            connection.execute(
+                "UPDATE audit_events SET record_mac = printf('%064d', 0) WHERE sequence = 1",
+                [],
+            )?;
+            Ok(())
+        })?;
+        assert!(!store.verify_audit_chain()?);
+        Ok(())
+    }
+
+
 }

@@ -137,3 +137,31 @@ activates the files, restarts the platform service and verifies authenticated
 health. A root/SYSTEM-only process lock serializes install and uninstall. Any
 handled failure restores the old artifacts and service state; an unsuccessful
 first install is fully removed.
+
+## Running-service version handshakes
+
+Service installation verifies the process that is actually running, not only the
+binary present on disk. Helper health responses include the IPC protocol version,
+workspace package version and allowlisted program count. The transactional
+helper installer accepts health only when both versions match the installer; a
+stale helper process therefore triggers the same full rollback as any other
+health failure.
+
+The HTTP agent publishes an owner-only atomic runtime marker only after its
+loopback listener has bound successfully. The marker contains the status
+protocol, package version, PID, canonical running executable, random instance
+ID and start timestamp. User and Linux system service installers delete the old
+marker, issue an explicit platform restart after installation, verify the
+service manager reports an active process, and wait for a fresh matching marker.
+A pre-existing marker, wrong package/protocol version, zero PID, invalid
+executable identity or pre-restart timestamp fails installation.
+
+## Audit integrity
+
+Audit events retain their BLAKE3 previous-hash chain and additionally use a
+per-state-database HMAC-SHA256 key stored in a separate owner-only sidecar. The
+MAC covers sequence, chain hashes and canonical payload; a keyed tail state
+binds the newest event. Verification compares every denormalized SQLite column
+to the canonical event before accepting the chain. Version-3 databases never
+silently regenerate missing MAC data. See
+[`audit-security.md`](audit-security.md) for the exact trust boundary.
