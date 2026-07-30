@@ -142,6 +142,9 @@ enum ConnectCommand {
 
     /// Download, verify and atomically select the latest managed connector binaries.
     UpdateManagedBinaries,
+
+    /// Pin configured external connector binaries to their current path, digest and ownership metadata.
+    PinExternalBinaries,
 }
 
 #[derive(Debug, Subcommand)]

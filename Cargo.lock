@@ -4438,6 +4438,7 @@ dependencies = [
  "async-trait",
  "command-group",
  "flate2",
+ "fs2",
  "hex",
  "proptest",
  "reqwest",
@@ -4449,6 +4450,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "uuid",
  "zeroize",
  "zip",
 ]

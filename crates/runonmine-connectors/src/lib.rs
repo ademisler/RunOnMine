@@ -6,6 +6,7 @@
 
 pub mod binary;
 pub mod cloudflare;
+mod external_binary;
 pub mod health;
 pub mod installer;
 pub mod openai;
@@ -27,3 +28,7 @@ pub use supervisor::{
 };
 
 pub use versioned_binary::{ManagedBinaryActivation, ManagedBinaryVersion, VersionedBinaryStore};
+
+pub use external_binary::{
+    ExternalBinaryPin, ExternalBinaryPinStore, ExternalBinaryTrust, verify_external_binary,
+};
