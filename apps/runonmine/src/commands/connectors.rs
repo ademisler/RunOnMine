@@ -719,9 +719,8 @@ pub(super) async fn prepare_latest_managed_binary(
         .prefix("binary-")
         .tempdir_in(&staging_parent)?;
     let staged_path = staging.path().join(kind.executable_name());
-    let artifact = GitHubReleaseResolver::production()?
-        .resolve(provider, &ReleaseChannel::Latest)
-        .await?;
+    let artifact =
+        SignedReleaseResolver::production()?.resolve(provider, &ReleaseChannel::Latest)?;
     let mut receipt = BinaryInstaller::production()?
         .install(&artifact, &staged_path)
         .await?;

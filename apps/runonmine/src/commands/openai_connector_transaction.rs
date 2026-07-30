@@ -725,6 +725,7 @@ mod tests {
             release_tag: "test-v0.0.10".to_owned(),
             sha256: Sha256Digest::parse(&format!("sha256:{encoded}"))?,
             installed_path: target.binary_path.clone(),
+            provenance: None,
         };
         let version = store.prepare(&source, &serde_json::to_vec_pretty(&receipt)?)?;
         fs::remove_file(source)?;
@@ -1090,6 +1091,7 @@ exit 0
                 release_tag: "v0.0.10".to_owned(),
                 sha256: Sha256Digest::parse(&format!("sha256:{hex}"))?,
                 installed_path: legacy.clone(),
+                provenance: None,
             })?,
         )?;
         fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600))?;

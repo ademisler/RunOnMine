@@ -130,6 +130,7 @@ on restart/backoff and removed on process stop.
   doctor, update and startup. Current supported stable ranges are OpenAI
   tunnel-client `0.0.10` and cloudflared `>=2025.1.0,<2027.0.0`; unsupported
   candidates cannot replace the known-good active version.
+- Managed connector downloads do not trust a live “latest release” response. RunOnMine embeds provider catalogs in 2-of-2 Ed25519 envelopes signed by a shared security root and a separate Cloudflare or OpenAI root. The signed payload binds the official source repository and commit, release tag, exact platform asset URL, SHA-256, size and archive format; new receipts retain that envelope for startup re-verification.
 - File operations use open directory capabilities and descriptor-relative traversal inside explicitly selected roots; path checks and file access are not separated by a canonicalize-then-open race.
 - The default browser profile is disposable and isolated from the user's daily
   browser profile. A browser-process-wide loopback proxy covers pages, popups,
@@ -192,6 +193,7 @@ be committed.
 
 - [Architecture](docs/architecture.md)
 - [Connection modes](docs/connections.md)
+- [Connector provenance and key rotation](docs/connector-provenance.md)
 - [Tools](docs/tools.md)
 - [Platform installation](docs/platforms/macos.md)
 - [Linux and VPS](docs/platforms/linux.md)

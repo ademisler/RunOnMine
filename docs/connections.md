@@ -195,9 +195,16 @@ and Developer Mode access. RunOnMine does not claim or bypass those permissions.
 
 ## External binary policy
 
-Managed `cloudflared` and `tunnel-client` downloads resolve through official
-GitHub releases, require HTTPS URLs on allowlisted hosts, verify release digests,
-and reject archive path traversal. New managed Cloudflare installs are stored in
+Managed `cloudflared` and `tunnel-client` downloads resolve from provenance
+catalogs embedded in the RunOnMine build, not from mutable live `latest` metadata.
+Each catalog is an Ed25519 envelope that must satisfy a 2-of-2 threshold: one
+shared RunOnMine security root plus a distinct Cloudflare or OpenAI catalog root.
+The signed payload binds the official source repository and 40-character commit,
+release tag, exact platform asset URL, SHA-256 digest, byte size and archive
+format. GitHub remains only the allowlisted HTTPS byte transport. New receipts
+retain the signed envelope and startup re-verifies it before accepting the
+managed version. Legacy digest-only receipts remain readable for migration and
+are upgraded by the next managed update. Archive path traversal is rejected. New managed Cloudflare installs are stored in
 immutable SHA-256-addressed version directories with a private receipt. Connector
 startup accepts a managed version only when its exact path shape, receipt
 provider/path, and executable digest all verify. `runonmine connect

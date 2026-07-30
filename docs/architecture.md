@@ -114,6 +114,7 @@ client-supplied name remains explicitly unverified.
 - immutable managed connector versions live below `data/managed-binaries/<executable>/versions/<sha256>/`, with an owner-only active manifest and receipt per version.
 - optional external connector pins live in an owner-only state document and contain only binary identity/metadata, never connector credentials.
 - connector compatibility ranges are code-owned release gates applied by setup, doctor, update and startup before a child process becomes active.
+- connector release provenance catalogs are compiled into the application as bounded base64 payload envelopes. A managed artifact is selectable only after strict Ed25519 verification by both the shared RunOnMine root and its provider-specific root; the payload binds repository, source commit, release tag and exact asset metadata. New installation receipts carry the envelope for startup re-verification.
 
 Cloudflare Quick Tunnel public URL discovery is runtime state rather than desired configuration. Each successful Quick process start creates a private generation-bound record below the state directory. Only the observer holding that generation may publish or clear the URL; restart/backoff clears it, process stop removes the record, startup replaces stale generations, and legacy Quick URLs are removed from `config.toml` under the configuration lock. The desktop, doctor, and support summary read this bounded state without exposing the URL through public health routes or support archives.
 

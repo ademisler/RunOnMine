@@ -12,6 +12,7 @@ pub mod installer;
 pub mod openai;
 mod output;
 pub mod process;
+mod provenance;
 pub mod supervisor;
 mod trusted_binary;
 mod versioned_binary;
@@ -22,9 +23,11 @@ pub use binary::{
 };
 pub use health::{HealthCheck, HealthCheckResult, HealthChecker};
 pub use installer::{
-    ArtifactFormat, BinaryInstaller, GitHubReleaseResolver, InstallReceipt, ReleaseChannel,
-    ReleaseProvider, Sha256Digest, VerifiedArtifact,
+    ArtifactFormat, BinaryInstaller, InstallReceipt, ReleaseChannel, ReleaseProvider, Sha256Digest,
+    SignedReleaseResolver, VerifiedArtifact,
 };
+pub use provenance::SignedProvenanceEvidence;
+
 pub use process::{
     CommandArg, CommandSpec, EnvironmentValue, OneShotOutput, SecretValue, run_once,
 };

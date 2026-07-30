@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use crate::provenance::verify_install_provenance;
 use crate::{
     BinaryKind, ExternalBinaryPinStore, ExternalBinaryTrust, InstallReceipt, InstalledBinary,
     ReleaseProvider, VersionedBinaryStore,
@@ -125,6 +126,9 @@ fn verify_receipt(
     if receipt.provider != provider {
         bail!("managed binary receipt provider does not match");
     }
+    if let Some(provenance) = &receipt.provenance {
+        verify_install_provenance(provenance, provider, &receipt.release_tag, &receipt.sha256)?;
+    }
     let expected_path = receipt
         .installed_path
         .canonicalize()
@@ -185,6 +189,7 @@ mod tests {
                 release_tag: "v-test".to_owned(),
                 sha256: Sha256Digest::parse(&digest)?,
                 installed_path: binary.to_path_buf(),
+                provenance: None,
             })?,
         )?;
         Ok(())
@@ -208,6 +213,7 @@ mod tests {
                 release_tag: "v-test".to_owned(),
                 sha256: Sha256Digest::parse(&digest)?,
                 installed_path: target.binary_path.clone(),
+                provenance: None,
             })?
         };
         let version = store.prepare(&source, &receipt_bytes)?;

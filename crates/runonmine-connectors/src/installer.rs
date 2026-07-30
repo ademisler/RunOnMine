@@ -16,8 +16,10 @@ use subtle::ConstantTimeEq;
 use url::Url;
 
 use crate::binary::BinaryKind;
+use crate::provenance::{
+    SignedProvenanceEvidence, resolve_signed_release, validate_embedded_catalogs,
+};
 
-const RELEASE_METADATA_LIMIT: usize = 4 * 1024 * 1024;
 const DEFAULT_ARTIFACT_LIMIT: usize = 128 * 1024 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -29,7 +31,7 @@ pub enum ReleaseProvider {
 }
 
 impl ReleaseProvider {
-    fn repository(self) -> (&'static str, &'static str) {
+    pub(crate) fn repository(self) -> (&'static str, &'static str) {
         match self {
             Self::Cloudflared => ("cloudflare", "cloudflared"),
             Self::OpenAiTunnelClient => ("openai", "tunnel-client"),
@@ -43,7 +45,7 @@ impl ReleaseProvider {
         }
     }
 
-    fn selected_asset(self, tag: &str) -> Result<SelectedAsset> {
+    pub(crate) fn selected_asset(self, tag: &str) -> Result<SelectedAsset> {
         let platform = PlatformTarget::current()?;
         match (self, platform.os, platform.architecture) {
             (Self::Cloudflared, "macos", "x86_64") => Ok(SelectedAsset::archive(
@@ -101,22 +103,6 @@ impl ReleaseProvider {
 pub enum ReleaseChannel {
     Latest,
     Tag(String),
-}
-
-impl ReleaseChannel {
-    fn api_url(&self, owner: &str, repository: &str) -> Result<Url> {
-        let suffix = match self {
-            Self::Latest => "latest".to_owned(),
-            Self::Tag(tag) => {
-                validate_release_tag(tag)?;
-                format!("tags/{tag}")
-            }
-        };
-        Url::parse(&format!(
-            "https://api.github.com/repos/{owner}/{repository}/releases/{suffix}"
-        ))
-        .context("failed to construct official release API URL")
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -183,19 +169,20 @@ impl fmt::Debug for Sha256Digest {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VerifiedArtifact {
-    pub provider: ReleaseProvider,
-    pub release_tag: String,
-    pub asset_name: String,
-    pub download_url: Url,
-    pub sha256: Sha256Digest,
-    pub size: usize,
-    pub format: ArtifactFormat,
-    pub archive_binary_name: Option<String>,
+    pub(crate) provider: ReleaseProvider,
+    pub(crate) release_tag: String,
+    pub(crate) asset_name: String,
+    pub(crate) download_url: Url,
+    pub(crate) sha256: Sha256Digest,
+    pub(crate) size: usize,
+    pub(crate) format: ArtifactFormat,
+    pub(crate) archive_binary_name: Option<String>,
+    pub(crate) provenance: Option<SignedProvenanceEvidence>,
 }
 
 impl VerifiedArtifact {
     #[allow(clippy::too_many_arguments)]
-    pub fn from_manifest(
+    pub(crate) fn from_verified_manifest(
         provider: ReleaseProvider,
         release_tag: String,
         asset_name: String,
@@ -204,6 +191,7 @@ impl VerifiedArtifact {
         size: usize,
         format: ArtifactFormat,
         archive_binary_name: Option<String>,
+        provenance: Option<SignedProvenanceEvidence>,
     ) -> Result<Self> {
         validate_release_tag(&release_tag)?;
         validate_asset_url(provider, &release_tag, &asset_name, &download_url)?;
@@ -226,6 +214,7 @@ impl VerifiedArtifact {
             size,
             format,
             archive_binary_name,
+            provenance,
         })
     }
 
@@ -304,42 +293,21 @@ impl ArtifactFetcher for ReqwestArtifactFetcher {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct GitHubReleaseResolver {
-    fetcher: Arc<dyn ArtifactFetcher>,
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SignedReleaseResolver;
 
-impl GitHubReleaseResolver {
+impl SignedReleaseResolver {
     pub fn production() -> Result<Self> {
-        Ok(Self {
-            fetcher: Arc::new(ReqwestArtifactFetcher::new()?),
-        })
+        validate_embedded_catalogs()?;
+        Ok(Self)
     }
 
-    pub fn with_fetcher(fetcher: Arc<dyn ArtifactFetcher>) -> Self {
-        Self { fetcher }
-    }
-
-    /// Resolves a current official release without hard-coding a version or
-    /// checksum. GitHub's release-asset `digest` field is mandatory.
-    pub async fn resolve(
+    pub fn resolve(
         &self,
         provider: ReleaseProvider,
         channel: &ReleaseChannel,
     ) -> Result<VerifiedArtifact> {
-        let (owner, repository) = provider.repository();
-        let api_url = channel.api_url(owner, repository)?;
-        let response = self
-            .fetcher
-            .fetch(&api_url, RELEASE_METADATA_LIMIT)
-            .await
-            .context("failed to retrieve official release metadata")?;
-        if response.final_url != api_url {
-            bail!("official release metadata unexpectedly redirected");
-        }
-        let release: GitHubRelease = serde_json::from_slice(&response.bytes)
-            .context("official release metadata is invalid")?;
-        resolve_release(provider, channel, release)
+        resolve_signed_release(provider, channel)
     }
 }
 
@@ -424,6 +392,7 @@ impl BinaryInstaller {
             release_tag: artifact.release_tag.clone(),
             sha256: artifact.sha256.clone(),
             installed_path: destination.to_path_buf(),
+            provenance: artifact.provenance.clone(),
         })
     }
 }
@@ -434,28 +403,14 @@ pub struct InstallReceipt {
     pub release_tag: String,
     pub sha256: Sha256Digest,
     pub installed_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SignedProvenanceEvidence>,
 }
 
-#[derive(Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    draft: bool,
-    prerelease: bool,
-    assets: Vec<GitHubAsset>,
-}
-
-#[derive(Deserialize)]
-struct GitHubAsset {
-    name: String,
-    size: usize,
-    digest: Option<String>,
-    browser_download_url: Url,
-}
-
-struct SelectedAsset {
-    name: String,
-    format: ArtifactFormat,
-    archive_binary_name: Option<String>,
+pub(crate) struct SelectedAsset {
+    pub(crate) name: String,
+    pub(crate) format: ArtifactFormat,
+    pub(crate) archive_binary_name: Option<String>,
 }
 
 impl SelectedAsset {
@@ -494,45 +449,6 @@ impl PlatformTarget {
         }
         Ok(target)
     }
-}
-
-fn resolve_release(
-    provider: ReleaseProvider,
-    channel: &ReleaseChannel,
-    release: GitHubRelease,
-) -> Result<VerifiedArtifact> {
-    if release.draft {
-        bail!("refusing to install a draft release");
-    }
-    if matches!(channel, ReleaseChannel::Latest) && release.prerelease {
-        bail!("the latest stable release endpoint returned a prerelease");
-    }
-    if let ReleaseChannel::Tag(expected) = channel
-        && &release.tag_name != expected
-    {
-        bail!("release metadata tag does not match the requested tag");
-    }
-    validate_release_tag(&release.tag_name)?;
-    let selection = provider.selected_asset(&release.tag_name)?;
-    let asset = release
-        .assets
-        .into_iter()
-        .find(|asset| asset.name == selection.name)
-        .context("official release does not contain the expected platform artifact")?;
-    let digest = asset
-        .digest
-        .as_deref()
-        .context("official release asset does not publish a SHA-256 digest")?;
-    VerifiedArtifact::from_manifest(
-        provider,
-        release.tag_name,
-        asset.name,
-        asset.browser_download_url,
-        digest,
-        asset.size,
-        selection.format,
-        selection.archive_binary_name,
-    )
 }
 
 fn validate_release_tag(tag: &str) -> Result<()> {
@@ -795,28 +711,6 @@ mod tests {
         assert!(Sha256Digest::parse(&format!("sha256:{}", "0".repeat(64))).is_ok());
     }
 
-    #[test]
-    fn resolver_refuses_metadata_without_digest() -> Result<()> {
-        let provider = ReleaseProvider::Cloudflared;
-        let selection = provider.selected_asset("2026.7.2")?;
-        let release = GitHubRelease {
-            tag_name: "2026.7.2".to_owned(),
-            draft: false,
-            prerelease: false,
-            assets: vec![GitHubAsset {
-                name: selection.name.clone(),
-                size: 10,
-                digest: None,
-                browser_download_url: Url::parse(&format!(
-                    "https://github.com/cloudflare/cloudflared/releases/download/2026.7.2/{}",
-                    selection.name
-                ))?,
-            }],
-        };
-        assert!(resolve_release(provider, &ReleaseChannel::Latest, release).is_err());
-        Ok(())
-    }
-
     #[tokio::test]
     async fn raw_install_verifies_digest_and_uses_atomic_destination() -> Result<()> {
         let bytes = b"verified executable bytes".to_vec();
@@ -824,7 +718,7 @@ mod tests {
         let url = Url::parse(
             "https://github.com/cloudflare/cloudflared/releases/download/2026.7.2/cloudflared-linux-amd64",
         )?;
-        let artifact = VerifiedArtifact::from_manifest(
+        let artifact = VerifiedArtifact::from_verified_manifest(
             ReleaseProvider::Cloudflared,
             "2026.7.2".to_owned(),
             "cloudflared-linux-amd64".to_owned(),
@@ -832,6 +726,7 @@ mod tests {
             &digest,
             bytes.len(),
             ArtifactFormat::RawExecutable,
+            None,
             None,
         )?;
         let directory = tempdir()?;
@@ -854,7 +749,7 @@ mod tests {
         let url = Url::parse(
             "https://github.com/cloudflare/cloudflared/releases/download/2026.7.2/cloudflared-linux-amd64",
         )?;
-        let artifact = VerifiedArtifact::from_manifest(
+        let artifact = VerifiedArtifact::from_verified_manifest(
             ReleaseProvider::Cloudflared,
             "2026.7.2".to_owned(),
             "cloudflared-linux-amd64".to_owned(),
@@ -862,6 +757,7 @@ mod tests {
             &format!("sha256:{}", "0".repeat(64)),
             bytes.len(),
             ArtifactFormat::RawExecutable,
+            None,
             None,
         )?;
         let directory = tempdir()?;
