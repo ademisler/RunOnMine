@@ -40,6 +40,8 @@ uuid.workspace = true
 walkdir.workspace = true
 zeroize.workspace = true
 
+notify.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
 

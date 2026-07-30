@@ -1,6 +1,7 @@
 //! Shared security, configuration, persistence, and execution primitives.
 
 pub mod approval;
+mod approval_notifications;
 mod atomic;
 pub mod audit;
 mod audit_mac;
@@ -17,6 +18,9 @@ pub mod storage;
 pub use approval::{
     ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, ApprovalTimeoutResult,
     PersistentGrant,
+};
+pub use approval_notifications::{
+    ApprovalNotificationMetrics, ApprovalNotificationSubscription, ApprovalNotifications,
 };
 pub use audit::{AuditEvent, AuditOutcome};
 pub use config::{

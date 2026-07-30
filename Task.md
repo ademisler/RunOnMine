@@ -63,7 +63,7 @@ Status markers:
 - [ ] **P2-04 — Move desktop refresh work off the UI thread.** Use background snapshots, incremental audit verification and pagination.
 - [ ] **P2-05 — Zeroize desktop credential inputs.** Use secret wrappers and explicit clearing.
 - [x] **P2-06 — Add StateStore backpressure.** The serialized SQLite worker uses a bounded 128-job queue, one-second enqueue timeout, overload metrics, and no ambiguous post-acceptance result timeout.
-- [ ] **P2-07 — Replace approval polling with notifications.** Retain polling only as a recovery fallback.
+- [x] **P2-07 — Replace approval polling with notifications.** Approval state commits publish an owner-only cross-process filesystem pulse; MCP waiters re-check SQLite immediately on native events and retain a five-second database poll only as recovery for unavailable or missed watcher events.
 - [ ] **P2-08 — Preserve sanitized internal error diagnostics.** Keep generic remote errors while logging request/connector/audit references and categories.
 - [ ] **P2-09 — Replace silent `.ok()` fallbacks with typed degraded states.** Distinguish missing, disabled, corrupt, unavailable and permission-denied conditions.
 - [x] **P2-10 — Include canonical shell working directory in authorization identity.** Grants and policy decisions bind the command plus the canonical effective `cwd`.

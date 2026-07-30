@@ -13,7 +13,7 @@ user's chosen AI service; tool calls execute on a machine the user owns.
 Shared crates isolate configuration and persistence, MCP routing, OAuth,
 connectors, Chromium automation, and operating-system adapters. Within
 `runonmine-mcp`, tool dispatch remains in the crate root, `approval_flow.rs`
-owns approval request creation, owner-decision polling, timeout/expiry transitions,
+owns approval request creation, notification-first owner-decision waits, timeout/expiry transitions,
 and the required audit handoff. `audit.rs` owns audit event construction plus
 fail-closed persistence for dangerous capabilities, `http.rs` owns the loopback
 transport, connector authentication, public Host routing, and HTTP MCP session
@@ -24,6 +24,19 @@ coordinates connector config and credential changes separately from transport se
 user interaction in `connectors.rs`. The `desktop-control` feature contains capture and input
 dependencies. Linux/VPS builds with `--no-default-features` do not include those
 dependencies.
+
+
+Approval changes use a notification-first lifecycle. After a SQLite transaction
+commits an insert, owner decision, timeout, connector cleanup, or emergency lock,
+`StateStore` atomically replaces an owner-only `approval-events` pulse in the
+state directory. Each process watches that directory through the native
+filesystem backend and fans matching events into a Tokio watch channel. MCP
+waiters subscribe before reading status and re-check immediately after an event.
+A five-second SQLite check is retained only to recover from unsupported
+filesystems, watcher startup failure, event coalescing, or a missed event.
+Notification delivery and pulse-write failures are exposed through
+`approval_notification_metrics`; notification failure never changes the result
+of an already committed owner decision.
 
 The normal agent always runs as the signed-in user. The Linux per-user unit keeps
 home and the system read-only except for RunOnMine state plus the exact canonical

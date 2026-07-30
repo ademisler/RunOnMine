@@ -30,7 +30,10 @@ always resolves to `deny`. Local stdio and loopback connectors retain the
 configured result.
 
 `deny` removes the tool from discovery and rejects direct calls. `ask` creates a
-local approval request for up to 90 seconds. `allow` runs the tool without a
+local approval request for up to 90 seconds. Owner decisions wake the pending
+MCP call through a cross-process native filesystem notification; a five-second
+state check exists only to recover from unavailable or missed watcher events.
+`allow` runs the tool without a
 prompt. A missing capability always fails closed.
 
 ## Presets

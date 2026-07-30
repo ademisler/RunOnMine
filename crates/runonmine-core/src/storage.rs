@@ -13,6 +13,9 @@ use crate::approval::{
     ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, ApprovalTimeoutResult,
     PersistentGrant,
 };
+use crate::approval_notifications::{
+    ApprovalNotificationMetrics, ApprovalNotificationSubscription, ApprovalNotifications,
+};
 use crate::audit::{AuditEvent, AuditOutcome};
 use crate::audit_mac::AuditMacKey;
 
@@ -286,6 +289,7 @@ impl ConnectorAuthorizationCleanup {
 pub struct StateStore {
     worker: Arc<SqliteWorker>,
     audit_mac: AuditMacKey,
+    approval_notifications: ApprovalNotifications,
 }
 
 impl StateStore {
@@ -309,9 +313,11 @@ impl StateStore {
         configure_connection(&connection)?;
         migrate(&connection, &audit_mac)?;
         restrict_sqlite_files(path)?;
+        let approval_notifications = ApprovalNotifications::for_state_db(path)?;
         Ok(Self {
             worker: Arc::new(SqliteWorker::start(connection)?),
             audit_mac,
+            approval_notifications,
         })
     }
 
@@ -323,6 +329,7 @@ impl StateStore {
         Ok(Self {
             worker: Arc::new(SqliteWorker::start(connection)?),
             audit_mac,
+            approval_notifications: ApprovalNotifications::in_memory(),
         })
     }
 
@@ -347,18 +354,37 @@ impl StateStore {
         self.worker.metrics()
     }
 
+    #[must_use]
+    pub fn subscribe_approval_changes(&self) -> ApprovalNotificationSubscription {
+        self.approval_notifications.subscribe()
+    }
+
+    #[must_use]
+    pub fn approval_notification_metrics(&self) -> ApprovalNotificationMetrics {
+        self.approval_notifications.metrics()
+    }
+
     pub fn insert_approval(&self, request: &ApprovalRequest) -> Result<()> {
         let request = request.clone();
-        self.call(move |connection| insert_approval_connection(connection, &request))
+        self.call(move |connection| insert_approval_connection(connection, &request))?;
+        self.approval_notifications.notify();
+        Ok(())
     }
 
     pub async fn insert_approval_async(&self, request: ApprovalRequest) -> Result<()> {
         self.call_async(move |connection| insert_approval_connection(connection, &request))
-            .await
+            .await?;
+        self.approval_notifications.notify();
+        Ok(())
     }
 
     pub fn resolve_approval(&self, id: Uuid, decision: ApprovalDecision) -> Result<bool> {
-        self.call(move |connection| resolve_approval_connection(connection, id, decision))
+        let resolved =
+            self.call(move |connection| resolve_approval_connection(connection, id, decision))?;
+        if resolved {
+            self.approval_notifications.notify();
+        }
+        Ok(resolved)
     }
 
     pub async fn resolve_approval_async(
@@ -366,8 +392,13 @@ impl StateStore {
         id: Uuid,
         decision: ApprovalDecision,
     ) -> Result<bool> {
-        self.call_async(move |connection| resolve_approval_connection(connection, id, decision))
-            .await
+        let resolved = self
+            .call_async(move |connection| resolve_approval_connection(connection, id, decision))
+            .await?;
+        if resolved {
+            self.approval_notifications.notify();
+        }
+        Ok(resolved)
     }
 
     pub fn complete_approval_timeout(
@@ -377,9 +408,13 @@ impl StateStore {
     ) -> Result<Option<ApprovalTimeoutResult>> {
         let event = event.clone();
         let audit_mac = self.audit_mac.clone();
-        self.call(move |connection| {
+        let completion = self.call(move |connection| {
             complete_approval_timeout_connection(connection, id, &event, &audit_mac)
-        })
+        })?;
+        if matches!(completion, Some(ApprovalTimeoutResult::ExpiredNow)) {
+            self.approval_notifications.notify();
+        }
+        Ok(completion)
     }
 
     pub async fn complete_approval_timeout_async(
@@ -388,10 +423,15 @@ impl StateStore {
         event: AuditEvent,
     ) -> Result<Option<ApprovalTimeoutResult>> {
         let audit_mac = self.audit_mac.clone();
-        self.call_async(move |connection| {
-            complete_approval_timeout_connection(connection, id, &event, &audit_mac)
-        })
-        .await
+        let completion = self
+            .call_async(move |connection| {
+                complete_approval_timeout_connection(connection, id, &event, &audit_mac)
+            })
+            .await?;
+        if matches!(completion, Some(ApprovalTimeoutResult::ExpiredNow)) {
+            self.approval_notifications.notify();
+        }
+        Ok(completion)
     }
 
     pub fn grant_allows(
@@ -499,7 +539,7 @@ impl StateStore {
     ) -> Result<ConnectorAuthorizationCleanup> {
         crate::connector_removal::validate_connector_id(connector_id)?;
         let connector_id = connector_id.to_owned();
-        self.call(move |connection| {
+        let cleanup = self.call(move |connection| {
             let transaction = connection.transaction()?;
             let approvals = transaction.execute(
                 "DELETE FROM approvals WHERE connector_id = ?1",
@@ -519,7 +559,11 @@ impl StateStore {
                 temporary_grants,
                 persistent_grants,
             })
-        })
+        })?;
+        if cleanup.approvals > 0 {
+            self.approval_notifications.notify();
+        }
+        Ok(cleanup)
     }
 
     pub fn approval_status(&self, id: Uuid) -> Result<Option<ApprovalRequest>> {
@@ -536,11 +580,15 @@ impl StateStore {
     }
 
     pub fn emergency_lock(&self) -> Result<(usize, usize)> {
-        self.call(|connection| {
+        let result = self.call(|connection| {
             let transaction=connection.transaction()?; let now=Utc::now().to_rfc3339();
             let denied=transaction.execute("UPDATE approvals SET status = 'denied', resolved_at = ?1, decision = 'deny' WHERE status = 'pending'", [&now])?;
             let cleared=transaction.execute("DELETE FROM temporary_grants", [])?; transaction.commit()?; Ok((denied,cleared))
-        })
+        })?;
+        if result.0 > 0 {
+            self.approval_notifications.notify();
+        }
+        Ok(result)
     }
 
     pub fn append_audit(&self, event: &AuditEvent) -> Result<String> {
@@ -1829,6 +1877,40 @@ mod tests {
                     "async-hash".to_owned(),
                 )
                 .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_resolution_wakes_another_store_process_view() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("state.db");
+        let waiting_store = StateStore::open(&database)?;
+        let resolving_store = StateStore::open(&database)?;
+        assert!(
+            waiting_store
+                .approval_notification_metrics()
+                .native_watcher_active
+        );
+        let approval = ApprovalRequest::new(
+            "local",
+            ApprovalPrincipal::LocalStdio,
+            "fs_write",
+            "write a file",
+            "cross-process-notification",
+            Utc::now() + Duration::seconds(90),
+        );
+        waiting_store.insert_approval(&approval)?;
+        let mut subscription = waiting_store.subscribe_approval_changes();
+        assert!(resolving_store.resolve_approval(approval.id, ApprovalDecision::Once)?);
+        tokio::time::timeout(StdDuration::from_secs(5), subscription.changed())
+            .await
+            .context("cross-process approval notification timed out")??;
+        assert_eq!(
+            waiting_store
+                .approval_status(approval.id)?
+                .map(|item| item.status),
+            Some(ApprovalStatus::Approved)
         );
         Ok(())
     }

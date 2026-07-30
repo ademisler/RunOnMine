@@ -1,12 +1,12 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use chrono::Utc;
 use rmcp::ErrorData as McpError;
 use runonmine_core::{
-    ApprovalDecision, ApprovalPrincipal, ApprovalRequest, ApprovalStatus, ApprovalTimeoutResult,
-    AuditEvent, AuditOutcome, Capability, StateStore,
+    ApprovalDecision, ApprovalNotificationSubscription, ApprovalPrincipal, ApprovalRequest,
+    ApprovalStatus, ApprovalTimeoutResult, AuditEvent, AuditOutcome, Capability, StateStore,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -14,10 +14,11 @@ use uuid::Uuid;
 use crate::audit::AuditRecorder;
 use crate::validation::{approval_preview, capability_name};
 
-const APPROVAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const APPROVAL_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[async_trait]
 trait ApprovalRepository: Send + Sync {
+    fn subscribe(&self) -> ApprovalNotificationSubscription;
     async fn insert(&self, request: ApprovalRequest) -> AnyResult<()>;
     async fn deny(&self, id: Uuid) -> AnyResult<()>;
     async fn complete_timeout(
@@ -30,6 +31,10 @@ trait ApprovalRepository: Send + Sync {
 
 #[async_trait]
 impl ApprovalRepository for StateStore {
+    fn subscribe(&self) -> ApprovalNotificationSubscription {
+        self.subscribe_approval_changes()
+    }
+
     async fn insert(&self, request: ApprovalRequest) -> AnyResult<()> {
         self.insert_approval_async(request).await
     }
@@ -118,7 +123,7 @@ impl ApprovalFlow {
             &self.connector_id,
             principal,
             self.timeout,
-            APPROVAL_POLL_INTERVAL,
+            APPROVAL_RECOVERY_POLL_INTERVAL,
             tool_name,
             capability,
             summary,
@@ -136,7 +141,7 @@ async fn request_with<R, A, T>(
     connector_id: &str,
     principal: &ApprovalPrincipal,
     timeout: Duration,
-    poll_interval: Duration,
+    recovery_poll_interval: Duration,
     tool_name: &str,
     capability: Capability,
     summary: &str,
@@ -182,7 +187,7 @@ where
         audit,
         &approval,
         timeout,
-        poll_interval,
+        recovery_poll_interval,
         ApprovalAuditContext {
             connector_id,
             tool_name,
@@ -208,57 +213,17 @@ async fn wait_for_approval<R, A>(
     audit: &A,
     approval: &ApprovalRequest,
     timeout: Duration,
-    poll_interval: Duration,
+    recovery_poll_interval: Duration,
     context: ApprovalAuditContext<'_>,
 ) -> Result<(), McpError>
 where
     R: ApprovalRepository,
     A: ApprovalAudit,
 {
-    let deadline = Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut notifications = repository.subscribe();
+    let mut notification_channel_active = true;
     loop {
-        let now = Instant::now();
-        if now < deadline {
-            tokio::time::sleep(poll_interval.min(deadline.saturating_duration_since(now))).await;
-        }
-        if Instant::now() >= deadline {
-            let event = AuditEvent::new(
-                context.connector_id,
-                context.tool_name,
-                capability_name(context.capability),
-                AuditOutcome::TimedOut,
-                context.argument_hash,
-                "local approval timed out",
-            );
-            let completion = repository
-                .complete_timeout(approval.id, event)
-                .await
-                .map_err(|_| {
-                    McpError::internal_error(
-                        "Could not atomically expire and audit the local approval",
-                        None,
-                    )
-                })?
-                .ok_or_else(|| {
-                    McpError::internal_error("Local approval disappeared before timeout", None)
-                })?;
-            match completion {
-                ApprovalTimeoutResult::ExpiredNow
-                | ApprovalTimeoutResult::Existing(ApprovalStatus::Expired) => {
-                    return Err(McpError::invalid_request("Local approval timed out", None));
-                }
-                ApprovalTimeoutResult::Existing(status) => {
-                    if complete_existing_status(audit, status, context).await? {
-                        return Ok(());
-                    }
-                    return Err(McpError::internal_error(
-                        "Timed-out local approval remained pending",
-                        None,
-                    ));
-                }
-            }
-        }
-
         let status = repository
             .status(approval.id)
             .await
@@ -266,6 +231,71 @@ where
             .map_or(ApprovalStatus::Expired, |request| request.status);
         if complete_existing_status(audit, status, context).await? {
             return Ok(());
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return complete_timeout(repository, audit, approval.id, context).await;
+        }
+        let wait = recovery_poll_interval.min(deadline.saturating_duration_since(now));
+        if notification_channel_active {
+            tokio::select! {
+                result = notifications.changed() => {
+                    if result.is_err() {
+                        notification_channel_active = false;
+                    }
+                }
+                () = tokio::time::sleep(wait) => {}
+            }
+        } else {
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+async fn complete_timeout<R, A>(
+    repository: &R,
+    audit: &A,
+    approval_id: Uuid,
+    context: ApprovalAuditContext<'_>,
+) -> Result<(), McpError>
+where
+    R: ApprovalRepository,
+    A: ApprovalAudit,
+{
+    let event = AuditEvent::new(
+        context.connector_id,
+        context.tool_name,
+        capability_name(context.capability),
+        AuditOutcome::TimedOut,
+        context.argument_hash,
+        "local approval timed out",
+    );
+    let completion = repository
+        .complete_timeout(approval_id, event)
+        .await
+        .map_err(|_| {
+            McpError::internal_error(
+                "Could not atomically expire and audit the local approval",
+                None,
+            )
+        })?
+        .ok_or_else(|| {
+            McpError::internal_error("Local approval disappeared before timeout", None)
+        })?;
+    match completion {
+        ApprovalTimeoutResult::ExpiredNow
+        | ApprovalTimeoutResult::Existing(ApprovalStatus::Expired) => {
+            Err(McpError::invalid_request("Local approval timed out", None))
+        }
+        ApprovalTimeoutResult::Existing(status) => {
+            if complete_existing_status(audit, status, context).await? {
+                return Ok(());
+            }
+            Err(McpError::internal_error(
+                "Timed-out local approval remained pending",
+                None,
+            ))
         }
     }
 }
@@ -321,6 +351,7 @@ mod tests {
     struct TestRepository {
         request: Arc<Mutex<Option<ApprovalRequest>>>,
         timeout_audits: Arc<Mutex<Vec<AuditEvent>>>,
+        notifications: runonmine_core::ApprovalNotifications,
     }
 
     impl TestRepository {
@@ -339,6 +370,14 @@ mod tests {
         }
 
         fn set_status(&self, status: ApprovalStatus) -> AnyResult<()> {
+            self.set_status_inner(status, true)
+        }
+
+        fn set_status_without_notification(&self, status: ApprovalStatus) -> AnyResult<()> {
+            self.set_status_inner(status, false)
+        }
+
+        fn set_status_inner(&self, status: ApprovalStatus, notify: bool) -> AnyResult<()> {
             let mut request = self
                 .request
                 .lock()
@@ -346,18 +385,28 @@ mod tests {
             if let Some(request) = request.as_mut() {
                 request.status = status;
             }
+            drop(request);
+            if notify {
+                self.notifications.notify();
+            }
             Ok(())
         }
     }
 
     #[async_trait]
     impl ApprovalRepository for TestRepository {
+        fn subscribe(&self) -> ApprovalNotificationSubscription {
+            self.notifications.subscribe()
+        }
+
         async fn insert(&self, request: ApprovalRequest) -> AnyResult<()> {
             let mut slot = self
                 .request
                 .lock()
                 .map_err(|_| anyhow!("test approval mutex was poisoned"))?;
             *slot = Some(request);
+            drop(slot);
+            self.notifications.notify();
             Ok(())
         }
 
@@ -395,6 +444,9 @@ mod tests {
             request.resolved_at = Some(event.timestamp);
             request.decision = None;
             timeout_audits.push(event);
+            drop(timeout_audits);
+            drop(request_slot);
+            self.notifications.notify();
             Ok(Some(ApprovalTimeoutResult::ExpiredNow))
         }
 
@@ -533,6 +585,69 @@ mod tests {
                 .iter()
                 .all(|record| record.summary == "write requested")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_wakes_before_the_recovery_poll() -> AnyResult<()> {
+        let repository = TestRepository::default();
+        let audit = TestAudit::default();
+        let resolver = async {
+            wait_for_request(&repository).await?;
+            repository.set_status(ApprovalStatus::Approved)?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let arguments = json!({"path": "/allowed/file.txt"});
+        let approval = request_with(
+            &repository,
+            &audit,
+            "connector-a",
+            &ApprovalPrincipal::LocalStdio,
+            Duration::from_millis(250),
+            Duration::from_secs(30),
+            "fs_write",
+            Capability::FilesWrite,
+            "write requested",
+            "notification-hash",
+            &arguments,
+        );
+        let combined = async {
+            let (result, resolver_result) = tokio::join!(approval, resolver);
+            resolver_result?;
+            result.map_err(|error| anyhow!(error.to_string()))
+        };
+        tokio::time::timeout(Duration::from_millis(100), combined)
+            .await
+            .map_err(|_| anyhow!("approval did not wake from its notification"))??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_poll_observes_a_missed_notification() -> AnyResult<()> {
+        let repository = TestRepository::default();
+        let audit = TestAudit::default();
+        let resolver = async {
+            wait_for_request(&repository).await?;
+            repository.set_status_without_notification(ApprovalStatus::Approved)?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let arguments = json!({"path": "/allowed/file.txt"});
+        let approval = request_with(
+            &repository,
+            &audit,
+            "connector-a",
+            &ApprovalPrincipal::LocalStdio,
+            Duration::from_millis(250),
+            Duration::from_millis(10),
+            "fs_write",
+            Capability::FilesWrite,
+            "write requested",
+            "recovery-hash",
+            &arguments,
+        );
+        let (result, resolver_result) = tokio::join!(approval, resolver);
+        resolver_result?;
+        assert!(result.is_ok());
         Ok(())
     }
 
