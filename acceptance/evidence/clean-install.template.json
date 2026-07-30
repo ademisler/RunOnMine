@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "platform": "linux-x86_64",
+  "artifact": "runonmine-example.tar.gz",
+  "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source_revision": "0000000000000000000000000000000000000000",
+  "tester": "REPLACE_ME",
+  "tested_at": "2026-01-01T00:00:00Z",
+  "steps": [
+    {
+      "id": "install",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    },
+    {
+      "id": "reboot",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    },
+    {
+      "id": "agent_ready",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    },
+    {
+      "id": "mcp_initialize",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    },
+    {
+      "id": "approved_tool_call",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    },
+    {
+      "id": "connector",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    },
+    {
+      "id": "uninstall",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    },
+    {
+      "id": "residue_check",
+      "status": "passed",
+      "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"
+    }
+  ],
+  "residues": []
+}

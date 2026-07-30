@@ -15,14 +15,73 @@ const MAX_LOG_EVENT_BYTES: usize = 16 * 1024;
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const STABLE_RUNTIME: Duration = Duration::from_mins(1);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorFailureCategory {
+    Spawn,
+    ProcessExit,
+    ProcessStatus,
+    Readiness,
+    Shutdown,
+    Cleanup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SupervisorFailure {
+    pub category: SupervisorFailureCategory,
+    pub retryable: bool,
+    pub detail: String,
+}
+
+impl SupervisorFailure {
+    fn new(
+        category: SupervisorFailureCategory,
+        retryable: bool,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            retryable,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CleanupState {
+    NotRequired,
+    Complete,
+    Uncertain { orphan_risk: bool },
+}
+
+impl CleanupState {
+    const fn orphan_risk(self) -> bool {
+        matches!(self, Self::Uncertain { orphan_risk: true })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ProcessState {
-    Starting { attempt: u32 },
-    Running { pid: Option<u32>, attempt: u32 },
-    Backoff { attempt: u32, delay_ms: u64 },
-    Stopped,
-    Failed { reason: String },
+    Starting {
+        attempt: u32,
+    },
+    Running {
+        pid: Option<u32>,
+        attempt: u32,
+    },
+    Backoff {
+        attempt: u32,
+        delay_ms: u64,
+    },
+    Stopped {
+        cleanup: CleanupState,
+    },
+    Failed {
+        failure: SupervisorFailure,
+        cleanup: CleanupState,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -168,7 +227,10 @@ impl SupervisorHandle {
             .context("connector supervisor has already stopped")?;
         let final_state = loop {
             let state = self.state.borrow().clone();
-            if matches!(state, ProcessState::Stopped | ProcessState::Failed { .. }) {
+            if matches!(
+                state,
+                ProcessState::Stopped { .. } | ProcessState::Failed { .. }
+            ) {
                 break state;
             }
             if self.state.changed().await.is_err() {
@@ -193,14 +255,18 @@ impl Drop for SupervisorHandle {
 }
 
 enum ChildOutcome {
-    Stopped,
+    Stopped {
+        cleanup: CleanupState,
+    },
     Exited {
         success: bool,
-        detail: String,
+        failure: Option<SupervisorFailure>,
         stable: bool,
+        cleanup: CleanupState,
     },
     Unhealthy {
         stable: bool,
+        cleanup: CleanupState,
     },
 }
 
@@ -219,7 +285,13 @@ async fn run_supervisor(
 
     loop {
         if *stop.borrow() {
-            publish_state(&state, &events, ProcessState::Stopped);
+            publish_state(
+                &state,
+                &events,
+                ProcessState::Stopped {
+                    cleanup: CleanupState::NotRequired,
+                },
+            );
             return;
         }
         publish_state(&state, &events, ProcessState::Starting { attempt });
@@ -232,13 +304,24 @@ async fn run_supervisor(
                         &state,
                         &events,
                         ProcessState::Failed {
-                            reason: "connector process could not be started".to_owned(),
+                            failure: SupervisorFailure::new(
+                                SupervisorFailureCategory::Spawn,
+                                false,
+                                "connector process could not be started",
+                            ),
+                            cleanup: CleanupState::NotRequired,
                         },
                     );
                     return;
                 }
                 if wait_backoff(restarts, &policy, &mut stop, &state, &events).await {
-                    publish_state(&state, &events, ProcessState::Stopped);
+                    publish_state(
+                        &state,
+                        &events,
+                        ProcessState::Stopped {
+                            cleanup: CleanupState::NotRequired,
+                        },
+                    );
                     return;
                 }
                 attempt = attempt.saturating_add(1);
@@ -263,52 +346,108 @@ async fn run_supervisor(
             drain_output_task(stderr_task)
         );
 
-        match outcome {
-            ChildOutcome::Stopped => {
-                publish_state(&state, &events, ProcessState::Stopped);
-                return;
-            }
-            ChildOutcome::Exited {
-                success,
-                detail,
-                stable,
-            } => {
-                if success && !policy.restart_on_clean_exit {
-                    publish_state(&state, &events, ProcessState::Stopped);
-                    return;
-                }
-                if stable {
-                    restarts = 0;
-                }
-                restarts = restarts.saturating_add(1);
-                if !policy.permits_restart(restarts) {
-                    publish_state(&state, &events, ProcessState::Failed { reason: detail });
-                    return;
-                }
-            }
-            ChildOutcome::Unhealthy { stable } => {
-                if stable {
-                    restarts = 0;
-                }
-                restarts = restarts.saturating_add(1);
-                if !policy.permits_restart(restarts) {
-                    publish_state(
-                        &state,
-                        &events,
-                        ProcessState::Failed {
-                            reason: "connector failed its readiness check".to_owned(),
-                        },
-                    );
-                    return;
-                }
-            }
+        if let Some(terminal) = decide_child_outcome(outcome, &policy, &mut restarts) {
+            publish_state(&state, &events, terminal);
+            return;
         }
 
         if wait_backoff(restarts, &policy, &mut stop, &state, &events).await {
-            publish_state(&state, &events, ProcessState::Stopped);
+            publish_state(
+                &state,
+                &events,
+                ProcessState::Stopped {
+                    cleanup: CleanupState::NotRequired,
+                },
+            );
             return;
         }
         attempt = attempt.saturating_add(1);
+    }
+}
+
+fn decide_child_outcome(
+    outcome: ChildOutcome,
+    policy: &RestartPolicy,
+    restarts: &mut u32,
+) -> Option<ProcessState> {
+    match outcome {
+        ChildOutcome::Stopped { cleanup } => Some(ProcessState::Stopped { cleanup }),
+        ChildOutcome::Exited {
+            success,
+            failure,
+            stable,
+            cleanup,
+        } => decide_exit_outcome(success, failure, stable, cleanup, policy, restarts),
+        ChildOutcome::Unhealthy { stable, cleanup } => {
+            decide_unhealthy_outcome(stable, cleanup, policy, restarts)
+        }
+    }
+}
+
+fn decide_exit_outcome(
+    success: bool,
+    failure: Option<SupervisorFailure>,
+    stable: bool,
+    cleanup: CleanupState,
+    policy: &RestartPolicy,
+    restarts: &mut u32,
+) -> Option<ProcessState> {
+    if cleanup.orphan_risk() {
+        return Some(cleanup_failure(
+            cleanup,
+            "connector cleanup could not prove process-group termination",
+        ));
+    }
+    if success && !policy.restart_on_clean_exit {
+        return Some(ProcessState::Stopped { cleanup });
+    }
+    update_restart_count(stable, restarts);
+    (!policy.permits_restart(*restarts)).then(|| ProcessState::Failed {
+        failure: failure.unwrap_or_else(|| {
+            SupervisorFailure::new(
+                SupervisorFailureCategory::ProcessExit,
+                false,
+                "connector process exited",
+            )
+        }),
+        cleanup,
+    })
+}
+
+fn decide_unhealthy_outcome(
+    stable: bool,
+    cleanup: CleanupState,
+    policy: &RestartPolicy,
+    restarts: &mut u32,
+) -> Option<ProcessState> {
+    if cleanup.orphan_risk() {
+        return Some(cleanup_failure(
+            cleanup,
+            "unhealthy connector cleanup left uncertain orphan risk",
+        ));
+    }
+    update_restart_count(stable, restarts);
+    (!policy.permits_restart(*restarts)).then(|| ProcessState::Failed {
+        failure: SupervisorFailure::new(
+            SupervisorFailureCategory::Readiness,
+            false,
+            "connector failed its readiness check",
+        ),
+        cleanup,
+    })
+}
+
+fn update_restart_count(stable: bool, restarts: &mut u32) {
+    if stable {
+        *restarts = 0;
+    }
+    *restarts = restarts.saturating_add(1);
+}
+
+fn cleanup_failure(cleanup: CleanupState, detail: &'static str) -> ProcessState {
+    ProcessState::Failed {
+        failure: SupervisorFailure::new(SupervisorFailureCategory::Cleanup, false, detail),
+        cleanup,
     }
 }
 
@@ -336,29 +475,37 @@ async fn monitor_child(
                     Ok(Some(status)) => {
                         return ChildOutcome::Exited {
                             success: status.success(),
-                            detail: if status.success() {
-                                "connector process exited".to_owned()
-                            } else {
-                                "connector process exited with an error".to_owned()
-                            },
+                            failure: (!status.success()).then(|| {
+                                SupervisorFailure::new(
+                                    SupervisorFailureCategory::ProcessExit,
+                                    true,
+                                    "connector process exited with an error",
+                                )
+                            }),
                             stable: healthy_once || started.elapsed() >= STABLE_RUNTIME,
+                            cleanup: CleanupState::NotRequired,
                         };
                     }
                     Ok(None) => {}
                     Err(_error) => {
-                        terminate_child(child, policy.shutdown_timeout).await;
+                        let cleanup = terminate_child(child, policy.shutdown_timeout).await;
                         return ChildOutcome::Exited {
                             success: false,
-                            detail: "connector process status could not be read".to_owned(),
+                            failure: Some(SupervisorFailure::new(
+                                SupervisorFailureCategory::ProcessStatus,
+                                true,
+                                "connector process status could not be read",
+                            )),
                             stable: healthy_once || started.elapsed() >= STABLE_RUNTIME,
+                            cleanup,
                         };
                     }
                 }
             }
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
-                    terminate_child(child, policy.shutdown_timeout).await;
-                    return ChildOutcome::Stopped;
+                    let cleanup = terminate_child(child, policy.shutdown_timeout).await;
+                    return ChildOutcome::Stopped { cleanup };
                 }
             }
             _ = health_interval.tick(), if !matches!(health, HealthCheck::Disabled) => {
@@ -373,9 +520,10 @@ async fn monitor_child(
                 } else {
                     failed_health_checks = failed_health_checks.saturating_add(1);
                     if failed_health_checks >= policy.unhealthy_threshold {
-                        terminate_child(child, policy.shutdown_timeout).await;
+                        let cleanup = terminate_child(child, policy.shutdown_timeout).await;
                         return ChildOutcome::Unhealthy {
                             stable: healthy_once || started.elapsed() >= STABLE_RUNTIME,
+                            cleanup,
                         };
                     }
                 }
@@ -384,15 +532,23 @@ async fn monitor_child(
     }
 }
 
-async fn terminate_child(child: &mut command_group::AsyncGroupChild, timeout: Duration) {
+async fn terminate_child(
+    child: &mut command_group::AsyncGroupChild,
+    timeout: Duration,
+) -> CleanupState {
     // `command-group` maps this to a Unix process group and a Windows Job Object,
     // so descendants are terminated as part of the same operation.
-    let _ignored = child.start_kill();
+    if child.start_kill().is_err() {
+        return CleanupState::Uncertain { orphan_risk: true };
+    }
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) if tokio::time::Instant::now() >= deadline => return,
+            Ok(Some(_)) => return CleanupState::Complete,
+            Err(_) => return CleanupState::Uncertain { orphan_risk: true },
+            Ok(None) if tokio::time::Instant::now() >= deadline => {
+                return CleanupState::Uncertain { orphan_risk: true };
+            }
             Ok(None) => tokio::time::sleep(Duration::from_millis(25)).await,
         }
     }
@@ -564,6 +720,24 @@ mod tests {
         assert!(policy.validate().is_err());
     }
 
+    #[test]
+    fn terminal_failure_serializes_category_and_orphan_risk() -> Result<()> {
+        let state = ProcessState::Failed {
+            failure: SupervisorFailure::new(
+                SupervisorFailureCategory::Cleanup,
+                false,
+                "cleanup uncertain",
+            ),
+            cleanup: CleanupState::Uncertain { orphan_risk: true },
+        };
+        let value = serde_json::to_value(state)?;
+        assert_eq!(value["failure"]["category"], "cleanup");
+        assert_eq!(value["failure"]["retryable"], false);
+        assert_eq!(value["cleanup"]["state"], "uncertain");
+        assert_eq!(value["cleanup"]["orphan_risk"], true);
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn dropping_handle_allows_supervisor_cleanup_to_finish() -> Result<()> {
@@ -603,7 +777,7 @@ mod tests {
             loop {
                 match events.recv().await {
                     Ok(ProcessEvent::StateChanged {
-                        state: ProcessState::Stopped,
+                        state: ProcessState::Stopped { .. },
                     }) => return Ok(()),
                     Ok(_) => {}
                     Err(error) => return Err(anyhow::Error::new(error)),

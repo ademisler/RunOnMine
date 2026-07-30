@@ -104,18 +104,18 @@ Status markers:
 
 ## P2 — CI, release and supply chain
 
-- [ ] **P2-R01 — Enforce branch protection and required checks.** Require PR review, Linux quality, platform matrix and security ownership; block force-push.
-- [ ] **P2-R02 — Sign and notarize release artifacts.** macOS notarization, Windows code signing and signed Linux repositories remain release blockers.
-- [ ] **P2-R03 — Complete clean-install acceptance on every artifact/OS.** Record checksum, tester, install, reboot, MCP call, approval, connector, uninstall and residue evidence.
-- [ ] **P2-R04 — Generate and validate SBOM with standard tooling.** Include schema validation, target-specific dependencies, hashes and provenance.
-- [ ] **P2-R05 — Reduce duplicate dependency versions.** Track binary size, audit surface and platform compatibility while converging direct dependencies.
-- [ ] **P2-R06 — Replace substring packaging-target selection with an exact allowlist.** Reject unsupported targets explicitly.
-- [ ] **P2-R07 — Write release rollback runbooks.** Cover application, connector binary, database migration and helper rollback.
+- [!] **P2-R01 — Enforce branch protection and required checks.** Repository includes an idempotent `gh api` apply/check script requiring review, CODEOWNERS, Linux quality, platform matrix and dependency review while blocking force-push/deletion. GitHub-side application is an owner action and must be verified after `main` is published.
+- [!] **P2-R02 — Sign and notarize release artifacts.** Public-beta workflow fails closed unless Apple certificate/notary and Windows signing material are present. Actual signing, notarization and signed Linux repository publication require external credentials and platform evidence.
+- [!] **P2-R03 — Complete clean-install acceptance on every artifact/OS.** A strict evidence schema/validator records artifact checksum, source revision, tester, install, reboot, agent, MCP, approval, connector, uninstall and residue checks. Real clean-VM evidence remains required for every produced macOS, Windows and Linux artifact.
+- [x] **P2-R04 — Generate and validate SBOM with standard tooling.** Every package receives CycloneDX 1.6 JSON with dependency graph, Cargo.lock SHA-256, exact release target, source revision and included-binary provenance; xtask validates structure and target identity before upload.
+- [!] **P2-R05 — Reduce duplicate dependency versions.** A locked metadata ratchet blocks new duplicate packages/versions and reports release artifact sizes. The current transitive baseline is recorded; deliberate convergence remains ongoing where platform compatibility permits.
+- [x] **P2-R06 — Replace substring packaging-target selection with an exact allowlist.** Packaging and packager staging use a six-value exact target enum; suffix/platform spoof strings and unsupported triples are rejected by tests.
+- [x] **P2-R07 — Write release rollback runbooks.** `docs/release-rollback.md` covers application, immutable connector binary, database/config generation and privileged-helper rollback with evidence preservation and fail-closed downgrade rules.
 
 ## P3 — Smaller accumulated debt
 
-- [ ] **P3-01 — Preserve detailed supervisor failure categories.** Distinguish process exit, readiness, stream and cleanup failures.
-- [ ] **P3-02 — Report incomplete supervisor cleanup/orphan risk.** Do not label uncertain shutdown as stopped.
+- [x] **P3-01 — Preserve detailed supervisor failure categories.** Supervisor state carries typed spawn, process-exit/status, readiness, shutdown and cleanup categories plus retryability and bounded detail.
+- [x] **P3-02 — Report incomplete supervisor cleanup/orphan risk.** Terminal state includes `not_required`, `complete`, or `uncertain` cleanup; uncertain process-group termination sets orphan risk and blocks restart instead of reporting stopped.
 - [ ] **P3-03 — Document and instrument in-memory rate/session reset behavior.** Add metrics and restart semantics.
 - [ ] **P3-04 — Partition OAuth registration limits by source.** One bad client must not consume all legitimate capacity.
 - [x] **P3-05 — Improve consent recovery after transient GitHub errors.** Completed by P2-16 with code-bound callback claims and bounded provider retry.
@@ -123,7 +123,7 @@ Status markers:
 - [ ] **P3-07 — Make approval redaction limitations explicit.** Require owner review of the complete effective action.
 - [ ] **P3-08 — Verify audit chains incrementally.** Persist the last verified sequence/checkpoint.
 - [ ] **P3-09 — Reconcile runtime connector artifacts and health in UI.** Show configured, starting, ready, degraded, failed, backoff and stale-credential states.
-- [ ] **P3-10 — Add compatibility and downgrade policy.** State supported migrations and behavior for old/new beta formats.
+- [x] **P3-10 — Add compatibility and downgrade policy.** The rollback runbook permits downgrade only when target binaries declare current config/state/OAuth schemas compatible; future/irreversible formats require complete backup restore or roll-forward.
 
 ## Final gate
 

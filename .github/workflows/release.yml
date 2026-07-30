@@ -4,12 +4,23 @@ on:
   push:
     tags:
       - "v*-beta.*"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Release profile"
+        required: true
+        type: choice
+        default: private-beta
+        options:
+          - private-beta
+          - public-beta
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_PROFILE: ${{ inputs.profile || 'private-beta' }}
 
 jobs:
   release-plan:
@@ -28,7 +39,22 @@ jobs:
           tool: cargo-dist@0.32.0
       - run: cargo run --locked -p xtask -- verify-versions
       - run: cargo run --locked -p xtask -- verify-release-tag --tag "${{ github.ref_name }}"
-      - run: cargo run --locked -p xtask -- release-readiness --profile private-beta
+      - run: cargo run --locked -p xtask -- release-readiness --profile "${RELEASE_PROFILE}"
+      - run: python3 scripts/release/check-duplicate-dependencies.py
+      - name: Fail closed when public signing material is absent
+        if: env.RELEASE_PROFILE == 'public-beta'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          test -n "$APPLE_CERTIFICATE_P12"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_NOTARY_KEY"
+          test -n "$WINDOWS_SIGNING_PFX"
+          test -n "$WINDOWS_SIGNING_PASSWORD"
       - run: dist plan --output-format=json
 
   macos-universal:
@@ -57,6 +83,8 @@ jobs:
           cargo build --release --locked --target x86_64-apple-darwin --workspace --exclude xtask
       - run: cargo run --locked -p xtask -- universal-macos
       - run: cargo run --locked -p xtask -- package --target universal-apple-darwin
+      - name: Validate macOS SBOM
+        run: cargo run --locked -p xtask -- validate-sbom --path "$(find dist -maxdepth 1 -name '*universal-apple-darwin-unsigned.sbom.json' -print -quit)" --target universal-apple-darwin
       - run: cargo run --locked -p xtask -- stage-packager --target universal-apple-darwin
       - run: ./packaging/package-macos.sh
       - run: cargo run --locked -p xtask -- checksums
@@ -100,6 +128,8 @@ jobs:
           cargo build --release --locked --target ${{ matrix.target }}
           --no-default-features -p runonmine -p runonmine-agent -p runonmine-helper
       - run: cargo run --locked -p xtask -- package --target ${{ matrix.target }}
+      - name: Validate Linux SBOM
+        run: cargo run --locked -p xtask -- validate-sbom --path "$(find dist -maxdepth 1 -name '*-${{ matrix.target }}-unsigned.sbom.json' -print -quit)" --target ${{ matrix.target }}
       - run: cargo run --locked -p xtask -- stage-packager --target ${{ matrix.target }}
       - run: cargo packager --release --config ${{ matrix.packager }}
       - run: cargo run --locked -p xtask -- checksums
@@ -131,6 +161,12 @@ jobs:
       - run: dist build --artifacts=local --target=x86_64-pc-windows-msvc
       - run: cargo build --release --locked --target x86_64-pc-windows-msvc --workspace --exclude xtask
       - run: cargo run --locked -p xtask -- package --target x86_64-pc-windows-msvc
+      - name: Validate Windows SBOM
+        shell: pwsh
+        run: |
+          $sbom = Get-ChildItem dist -Filter '*-x86_64-pc-windows-msvc-unsigned.sbom.json' | Select-Object -First 1
+          if (-not $sbom) { throw 'Windows SBOM is missing' }
+          cargo run --locked -p xtask -- validate-sbom --path $sbom.FullName --target x86_64-pc-windows-msvc
       - run: cargo run --locked -p xtask -- stage-packager --target x86_64-pc-windows-msvc
       - run: cargo packager --release --config packaging/Packager.windows.toml
       - run: cargo run --locked -p xtask -- checksums
@@ -160,7 +196,8 @@ jobs:
           fail_on_unmatched_files: true
           files: artifacts/**/*
           body: |
-            Unsigned RunOnMine public beta candidate.
+            RunOnMine ${{ env.RELEASE_PROFILE }} candidate.
+            Private-beta artifacts are intentionally unsigned. Public-beta publication remains blocked unless signing/notarization gates and clean-install evidence pass.
             Verify every artifact against its accompanying SHA-256 checksum before use.
             SBOM files are provided in CycloneDX JSON format.
             This draft does not change repository visibility.

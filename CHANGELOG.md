@@ -9,6 +9,9 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ### Security
 
+- Replace release-target substring matching with an exact six-target allowlist and validate per-target CycloneDX 1.6 SBOM provenance before upload.
+- Add clean-install evidence validation, duplicate-dependency ratcheting, branch-protection automation, public-release signing-material gates, and explicit application/connector/database/helper rollback policy.
+- Type connector supervisor failures and cleanup outcomes; uncertain process-group termination now reports orphan risk and blocks restart rather than claiming a clean stop.
 - Make config/secret updates crash-recoverable with generation journals, config snapshot digests, backend-protected secret backups, startup reconciliation, and fault tests for process loss, write failure, downgrade, corrupt SQLite/WAL, restore, and concurrent migration.
 - Install user agents from immutable per-user version directories, atomically/fsync service definitions, add Windows scheduled-task restart policy, and add macOS crash throttling plus continuously bounded private service logs.
 - Deliver the headless Linux master key through a root-owned systemd credential; environment delivery remains only a documented compatibility fallback.

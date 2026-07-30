@@ -39,6 +39,13 @@ enum XtaskCommand {
     },
     /// Create SHA-256 files for every regular artifact in dist/.
     Checksums,
+    /// Validate a generated `CycloneDX` SBOM for one exact release target.
+    ValidateSbom {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        target: String,
+    },
     /// Fail unless all package and packager versions match the workspace version.
     VerifyVersions,
     /// Update package-manager configuration versions from the workspace version.
@@ -70,6 +77,7 @@ fn main() -> Result<()> {
         XtaskCommand::UniversalMacos => universal_macos(),
         XtaskCommand::StagePackager { target } => stage_packager(&target),
         XtaskCommand::Checksums => checksums(),
+        XtaskCommand::ValidateSbom { path, target } => validate_sbom_file(&path, &target),
         XtaskCommand::VerifyVersions => verify_versions(),
         XtaskCommand::SyncVersions => sync_versions(),
         XtaskCommand::VerifyReleaseTag { tag } => verify_release_tag(&tag),
@@ -325,21 +333,83 @@ const DESKTOP_BINARIES: [&str; 4] = [
     "runonmine-helper",
 ];
 
-fn expected_binaries(target: &str) -> &'static [&'static str] {
-    if target.contains("linux") {
-        &HEADLESS_BINARIES
-    } else {
-        &DESKTOP_BINARIES
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseTarget {
+    LinuxX86_64,
+    LinuxAarch64,
+    MacosX86_64,
+    MacosAarch64,
+    MacosUniversal,
+    WindowsX86_64,
+}
+
+impl ReleaseTarget {
+    const ALL: [Self; 6] = [
+        Self::LinuxX86_64,
+        Self::LinuxAarch64,
+        Self::MacosX86_64,
+        Self::MacosAarch64,
+        Self::MacosUniversal,
+        Self::WindowsX86_64,
+    ];
+
+    fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|target| target.as_str() == value)
+            .with_context(|| format!("unsupported release target: {value}"))
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
+            Self::LinuxAarch64 => "aarch64-unknown-linux-gnu",
+            Self::MacosX86_64 => "x86_64-apple-darwin",
+            Self::MacosAarch64 => "aarch64-apple-darwin",
+            Self::MacosUniversal => "universal-apple-darwin",
+            Self::WindowsX86_64 => "x86_64-pc-windows-msvc",
+        }
+    }
+
+    const fn binaries(self) -> &'static [&'static str] {
+        match self {
+            Self::LinuxX86_64 | Self::LinuxAarch64 => &HEADLESS_BINARIES,
+            Self::MacosX86_64 | Self::MacosAarch64 | Self::MacosUniversal | Self::WindowsX86_64 => {
+                &DESKTOP_BINARIES
+            }
+        }
+    }
+
+    const fn executable_suffix(self) -> &'static str {
+        match self {
+            Self::WindowsX86_64 => ".exe",
+            _ => "",
+        }
+    }
+
+    const fn archive_extension(self) -> &'static str {
+        match self {
+            Self::WindowsX86_64 => "zip",
+            _ => "tar.gz",
+        }
     }
 }
 
+#[cfg(test)]
+fn expected_binaries(target: &str) -> Result<&'static [&'static str]> {
+    Ok(ReleaseTarget::parse(target)?.binaries())
+}
+
 fn package(target: &str) -> Result<()> {
-    validate_target(target)?;
+    let release_target = ReleaseTarget::parse(target)?;
     let root = workspace_root()?;
-    let release_dir = root.join("target").join(target).join("release");
+    let release_dir = root
+        .join("target")
+        .join(release_target.as_str())
+        .join("release");
     let dist = root.join("dist");
     fs::create_dir_all(&dist)?;
-    let package_name = format!("runonmine-{VERSION}-{target}-unsigned");
+    let package_name = format!("runonmine-{VERSION}-{}-unsigned", release_target.as_str());
     let staging = root
         .join("target")
         .join("package-staging")
@@ -349,17 +419,15 @@ fn package(target: &str) -> Result<()> {
     }
     fs::create_dir_all(&staging)?;
 
-    let suffix = if target.contains("windows") {
-        ".exe"
-    } else {
-        ""
-    };
     let mut included = Vec::new();
-    for binary in expected_binaries(target) {
-        let filename = format!("{binary}{suffix}");
+    for binary in release_target.binaries() {
+        let filename = format!("{binary}{}", release_target.executable_suffix());
         let source = release_dir.join(&filename);
         if !source.is_file() {
-            bail!("required release binary is missing for {target}: {filename}");
+            bail!(
+                "required release binary is missing for {}: {filename}",
+                release_target.as_str()
+            );
         }
         fs::copy(&source, staging.join(&filename))?;
         included.push(filename);
@@ -367,19 +435,22 @@ fn package(target: &str) -> Result<()> {
     fs::copy(root.join("LICENSE"), staging.join("LICENSE"))?;
     fs::copy(root.join("README.md"), staging.join("README.md"))?;
     let sbom_path = dist.join(format!("{package_name}.sbom.json"));
-    fs::write(
-        &sbom_path,
-        serde_json::to_vec_pretty(&cyclonedx_sbom(&root)?)?,
-    )?;
+    let sbom = cyclonedx_sbom(&root, release_target, &included)?;
+    validate_sbom(&sbom, release_target)?;
+    fs::write(&sbom_path, serde_json::to_vec_pretty(&sbom)?)?;
 
-    let archive = if target.contains("windows") {
-        let path = dist.join(format!("{package_name}.zip"));
-        write_zip(&staging, &path)?;
-        path
-    } else {
-        let path = dist.join(format!("{package_name}.tar.gz"));
-        write_tar_gz(&staging, &path, &package_name)?;
-        path
+    let archive = match release_target.archive_extension() {
+        "zip" => {
+            let path = dist.join(format!("{package_name}.zip"));
+            write_zip(&staging, &path)?;
+            path
+        }
+        "tar.gz" => {
+            let path = dist.join(format!("{package_name}.tar.gz"));
+            write_tar_gz(&staging, &path, &package_name)?;
+            path
+        }
+        _ => unreachable!("release target archive extension is exhaustive"),
     };
     write_checksum(&archive)?;
     write_checksum(&sbom_path)?;
@@ -432,23 +503,21 @@ fn universal_macos() -> Result<()> {
 }
 
 fn stage_packager(target: &str) -> Result<()> {
-    validate_target(target)?;
+    let release_target = ReleaseTarget::parse(target)?;
     let root = workspace_root()?;
-    let source = root.join("target").join(target).join("release");
+    let source = root
+        .join("target")
+        .join(release_target.as_str())
+        .join("release");
     let staging = root.join("target/packager-input");
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
     fs::create_dir_all(&staging)?;
-    let suffix = if target.contains("windows") {
-        ".exe"
-    } else {
-        ""
-    };
-    let expected = if target.contains("linux") { 3 } else { 4 };
+    let expected = release_target.binaries().len();
     let mut copied = 0_usize;
-    for binary in DESKTOP_BINARIES {
-        let filename = format!("{binary}{suffix}");
+    for binary in release_target.binaries() {
+        let filename = format!("{binary}{}", release_target.executable_suffix());
         let path = source.join(&filename);
         if path.is_file() {
             fs::copy(&path, staging.join(filename))?;
@@ -456,7 +525,10 @@ fn stage_packager(target: &str) -> Result<()> {
         }
     }
     if copied != expected {
-        bail!("expected {expected} package binaries for {target}, found {copied}");
+        bail!(
+            "expected {expected} package binaries for {}, found {copied}",
+            release_target.as_str()
+        );
     }
     println!("Staged {copied} binaries for cargo-packager");
     Ok(())
@@ -506,19 +578,11 @@ fn workspace_root() -> Result<PathBuf> {
         .context("xtask has no workspace parent")
 }
 
-fn validate_target(target: &str) -> Result<()> {
-    if target.is_empty()
-        || target.len() > 100
-        || !target
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        bail!("invalid Rust target name");
-    }
-    Ok(())
-}
-
-fn cyclonedx_sbom(root: &Path) -> Result<Value> {
+fn cyclonedx_sbom(
+    root: &Path,
+    target: ReleaseTarget,
+    included_binaries: &[String],
+) -> Result<Value> {
     let output = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--locked"])
         .current_dir(root)
@@ -530,10 +594,24 @@ fn cyclonedx_sbom(root: &Path) -> Result<Value> {
     let lock_path = root.join("Cargo.lock");
     let lock_bytes = fs::read(&lock_path)?;
     let lock: toml::Value = toml::from_slice(&lock_bytes)?;
-    build_cyclonedx_sbom(&metadata, &lock, &sha256_hex(&lock_bytes))
+    build_cyclonedx_sbom(
+        &metadata,
+        &lock,
+        &sha256_hex(&lock_bytes),
+        target,
+        included_binaries,
+        &source_revision(root)?,
+    )
 }
 
-fn build_cyclonedx_sbom(metadata: &Value, lock: &toml::Value, lock_sha256: &str) -> Result<Value> {
+fn build_cyclonedx_sbom(
+    metadata: &Value,
+    lock: &toml::Value,
+    lock_sha256: &str,
+    target: ReleaseTarget,
+    included_binaries: &[String],
+    revision: &str,
+) -> Result<Value> {
     let checksums = cargo_lock_checksums(lock)?;
     let packages = metadata["packages"]
         .as_array()
@@ -614,14 +692,115 @@ fn build_cyclonedx_sbom(metadata: &Value, lock: &toml::Value, lock_sha256: &str)
                 "name": "RunOnMine",
                 "version": VERSION
             },
-            "properties": [{
-                "name": "runonmine:cargo-lock-sha256",
-                "value": lock_sha256
-            }]
+            "properties": [
+                {
+                    "name": "runonmine:cargo-lock-sha256",
+                    "value": lock_sha256
+                },
+                {
+                    "name": "runonmine:release-target",
+                    "value": target.as_str()
+                },
+                {
+                    "name": "runonmine:source-revision",
+                    "value": revision
+                },
+                {
+                    "name": "runonmine:included-binaries",
+                    "value": included_binaries.join(",")
+                }
+            ]
         },
         "components": components,
         "dependencies": dependencies
     }))
+}
+
+fn source_revision(root: &Path) -> Result<String> {
+    if let Ok(revision) = std::env::var("GITHUB_SHA")
+        && revision.len() == 40
+        && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Ok(revision.to_ascii_lowercase());
+    }
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .context("git failed while resolving SBOM provenance")?;
+    if !output.status.success() {
+        bail!("git failed while resolving SBOM provenance");
+    }
+    let revision = String::from_utf8(output.stdout)?.trim().to_owned();
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("SBOM provenance revision is invalid");
+    }
+    Ok(revision.to_ascii_lowercase())
+}
+
+fn validate_sbom_file(path: &Path, target: &str) -> Result<()> {
+    let release_target = ReleaseTarget::parse(target)?;
+    let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+    validate_sbom(&value, release_target)
+}
+
+fn validate_sbom(value: &Value, target: ReleaseTarget) -> Result<()> {
+    if value["bomFormat"] != "CycloneDX" || value["specVersion"] != "1.6" {
+        bail!("SBOM is not CycloneDX 1.6");
+    }
+    let serial = value["serialNumber"]
+        .as_str()
+        .context("SBOM serial number is missing")?;
+    if !serial.starts_with("urn:uuid:") {
+        bail!("SBOM serial number is invalid");
+    }
+    let components = value["components"]
+        .as_array()
+        .context("SBOM components are missing")?;
+    if components.is_empty() {
+        bail!("SBOM contains no components");
+    }
+    let dependencies = value["dependencies"]
+        .as_array()
+        .context("SBOM dependencies are missing")?;
+    if dependencies.is_empty() {
+        bail!("SBOM contains no dependency graph");
+    }
+    let properties = value["metadata"]["properties"]
+        .as_array()
+        .context("SBOM provenance properties are missing")?;
+    let property = |name: &str| {
+        properties.iter().find_map(|item| {
+            (item["name"].as_str() == Some(name))
+                .then(|| item["value"].as_str())
+                .flatten()
+        })
+    };
+    if property("runonmine:release-target") != Some(target.as_str()) {
+        bail!("SBOM release target does not match the requested target");
+    }
+    let revision =
+        property("runonmine:source-revision").context("SBOM source revision is missing")?;
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("SBOM source revision is invalid");
+    }
+    let lock_hash =
+        property("runonmine:cargo-lock-sha256").context("SBOM Cargo.lock hash is missing")?;
+    if lock_hash.len() != 64 || !lock_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("SBOM Cargo.lock hash is invalid");
+    }
+    let included = property("runonmine:included-binaries")
+        .context("SBOM included-binaries property is missing")?;
+    let expected = target
+        .binaries()
+        .iter()
+        .map(|binary| format!("{binary}{}", target.executable_suffix()))
+        .collect::<Vec<_>>()
+        .join(",");
+    if included != expected {
+        bail!("SBOM binary manifest does not match the release target");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -767,7 +946,18 @@ mod tests {
                 checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             "#,
         )?;
-        let sbom = build_cyclonedx_sbom(&metadata, &lock, "lock-hash")?;
+        let sbom = build_cyclonedx_sbom(
+            &metadata,
+            &lock,
+            &"a".repeat(64),
+            ReleaseTarget::LinuxX86_64,
+            &[
+                "runonmine".to_owned(),
+                "runonmine-agent".to_owned(),
+                "runonmine-helper".to_owned(),
+            ],
+            &"b".repeat(40),
+        )?;
         assert_eq!(
             sbom["dependencies"][0]["dependsOn"]
                 .as_array()
@@ -778,7 +968,8 @@ mod tests {
             sbom["components"][1]["hashes"][0]["content"],
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert_eq!(sbom["metadata"]["properties"][0]["value"], "lock-hash");
+        assert_eq!(sbom["metadata"]["properties"][0]["value"], "a".repeat(64));
+        validate_sbom(&sbom, ReleaseTarget::LinuxX86_64)?;
         Ok(())
     }
 
@@ -831,18 +1022,27 @@ mod tests {
     }
 
     #[test]
-    fn package_manifest_is_exact_for_each_platform_family() {
+    fn package_manifest_is_exact_for_each_platform_family() -> Result<()> {
         assert_eq!(
-            expected_binaries("x86_64-unknown-linux-gnu"),
+            expected_binaries("x86_64-unknown-linux-gnu")?,
             &HEADLESS_BINARIES
         );
         assert_eq!(
-            expected_binaries("universal-apple-darwin"),
+            expected_binaries("universal-apple-darwin")?,
             &DESKTOP_BINARIES
         );
         assert_eq!(
-            expected_binaries("x86_64-pc-windows-msvc"),
+            expected_binaries("x86_64-pc-windows-msvc")?,
             &DESKTOP_BINARIES
         );
+        for spoofed in [
+            "x86_64-unknown-linux-gnu-extra",
+            "linux",
+            "windows-x86_64-pc-windows-msvc",
+            "universal-apple-darwin-debug",
+        ] {
+            assert!(ReleaseTarget::parse(spoofed).is_err(), "accepted {spoofed}");
+        }
+        Ok(())
     }
 }

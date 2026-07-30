@@ -79,3 +79,51 @@ runonmine uninstall --purge --confirm PURGE
 
 The optional privileged helper and Linux system service have separate elevated
 uninstall commands and are never silently removed by a per-user purge.
+
+## Supply-chain evidence and target allowlist
+
+`xtask package` accepts only the exact supported target triples documented in
+the workflow. Substring or suffixed targets are rejected. Every archive has a
+CycloneDX 1.6 SBOM containing the Cargo.lock SHA-256, exact target, source
+revision, included binary manifest, components and dependency graph. Run
+`cargo run -p xtask -- validate-sbom --path <file> --target <exact-target>`
+before upload.
+
+`python3 scripts/release/check-duplicate-dependencies.py` is a ratchet: new
+duplicate package names or versions fail, while intentional removals are
+accepted. Update the baseline only after reviewing platform compatibility and
+audit/binary-size impact.
+
+Public-beta publication is fail-closed when Apple signing/notary or Windows
+signing material is missing. Private-beta artifacts remain explicitly unsigned.
+Do not relabel unsigned artifacts as public candidates.
+
+## Clean-install evidence
+
+Copy `acceptance/evidence/clean-install.template.json` for each produced OS and
+artifact, fill the real SHA-256, source revision, tester, timestamp and evidence
+references, then run:
+
+```console
+python3 scripts/release/validate-clean-install-evidence.py evidence.json
+```
+
+Evidence must cover install, reboot, agent readiness, MCP initialize, an approved
+tool call, connector operation, uninstall and residue inspection. A retained
+residue must be explicitly classified as expected. Templates are never evidence.
+
+## Branch protection
+
+Repository owners apply and verify the intended `main` policy with:
+
+```console
+scripts/release/branch-protection.sh apply
+scripts/release/branch-protection.sh check
+```
+
+The policy requires strict Linux quality, platform matrix and dependency-review
+checks, one CODEOWNERS-approved review, conversation resolution and linear
+history, and disables force-push and deletion. Review the exact GitHub check names
+before applying after workflow renames.
+
+See [release-rollback.md](release-rollback.md) for rollback and downgrade rules.

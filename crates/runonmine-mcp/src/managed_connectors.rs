@@ -714,7 +714,10 @@ fn apply_openai_runtime_event(
             runtime.set_backoff(connector_id, kind, ConnectorStartupStage::Readiness);
         }
         Ok(ProcessEvent::StateChanged {
-            state: ProcessState::Stopped,
+            state:
+                ProcessState::Stopped {
+                    cleanup: runonmine_connectors::CleanupState::NotRequired,
+                },
         }) => {
             runtime.set_stopped(connector_id, kind);
             return true;
@@ -849,7 +852,7 @@ async fn wait_for_openai_readiness(
                 match events.recv().await {
                     Ok(ProcessEvent::HealthChanged { healthy: true, .. }) => return Ok(()),
                     Ok(ProcessEvent::StateChanged {
-                        state: ProcessState::Failed { .. } | ProcessState::Stopped,
+                        state: ProcessState::Failed { .. } | ProcessState::Stopped { .. },
                     }) => bail!("OpenAI connector supervisor stopped before readiness"),
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -897,7 +900,7 @@ fn spawn_quick_url_observer(
                     let _ignored = store.clear_url(&generation);
                 }
                 Ok(ProcessEvent::StateChanged {
-                    state: ProcessState::Failed { .. } | ProcessState::Stopped,
+                    state: ProcessState::Failed { .. } | ProcessState::Stopped { .. },
                 })
                 | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Ok(
@@ -1400,7 +1403,9 @@ exit 1
             connector_id,
             kind,
             &Ok(ProcessEvent::StateChanged {
-                state: ProcessState::Stopped,
+                state: ProcessState::Stopped {
+                    cleanup: runonmine_connectors::CleanupState::NotRequired
+                },
             }),
         ));
         assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Stopped)?;
@@ -1610,7 +1615,9 @@ exit 1
         assert_eq!(std::fs::read(paths.config_file())?, durable_before);
 
         sender.send(ProcessEvent::StateChanged {
-            state: ProcessState::Stopped,
+            state: ProcessState::Stopped {
+                cleanup: runonmine_connectors::CleanupState::NotRequired,
+            },
         })?;
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {

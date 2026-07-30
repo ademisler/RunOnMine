@@ -411,3 +411,11 @@ that immutable path. Reinstalling identical bytes is idempotent; different bytes
 under the same package version are rejected. Unit/plist activation uses a
 temporary file in the destination directory, file fsync, atomic persist, parent
 fsync, private permissions, and symlink rejection.
+
+## Supervisor terminal-state certainty
+
+Connector supervision distinguishes spawn, process exit/status, readiness,
+shutdown, and cleanup failures. Terminal state also records whether cleanup was
+not required, completed, or uncertain. A failed process-group/Job Object kill,
+status error, or shutdown timeout produces `uncertain` cleanup with orphan risk;
+the supervisor does not start another copy in that condition.

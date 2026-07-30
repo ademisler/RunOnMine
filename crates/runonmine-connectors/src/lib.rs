@@ -32,7 +32,8 @@ pub use process::{
     CommandArg, CommandSpec, EnvironmentValue, OneShotOutput, SecretValue, run_once,
 };
 pub use supervisor::{
-    ProcessEvent, ProcessState, ProcessSupervisor, RestartPolicy, SupervisorHandle,
+    CleanupState, ProcessEvent, ProcessState, ProcessSupervisor, RestartPolicy, SupervisorFailure,
+    SupervisorFailureCategory, SupervisorHandle,
 };
 
 pub use versioned_binary::{ManagedBinaryActivation, ManagedBinaryVersion, VersionedBinaryStore};
