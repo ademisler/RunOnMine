@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use runonmine_core::filesystem::ScopedFilesystem;
 use runonmine_core::{PolicyMode, ResourceContext};
+use runonmine_platform::helper::canonical_program_identity;
 use serde::Serialize;
 use url::Url;
 
@@ -151,14 +152,18 @@ pub(super) fn policy_resources<T: Serialize>(
             .transpose()?
             .map(|url| vec![OwnedPolicyResource::Browser(url)])
             .unwrap_or_default()
-    } else if matches!(tool_name, "shell_exec" | "admin_exec") {
-        if let Some(command) = string("command") {
-            vec![OwnedPolicyResource::Command(command.to_owned())]
-        } else if let Some(program) = string("program") {
-            vec![OwnedPolicyResource::Executable(PathBuf::from(program))]
-        } else {
-            Vec::new()
-        }
+    } else if tool_name == "shell_exec" {
+        string("command")
+            .map(|command| vec![OwnedPolicyResource::Command(command.to_owned())])
+            .unwrap_or_default()
+    } else if tool_name == "admin_exec" {
+        string("program")
+            .map(|program| {
+                canonical_program_identity(Path::new(program))
+                    .map(|path| vec![OwnedPolicyResource::Executable(path)])
+            })
+            .transpose()?
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -306,6 +311,52 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].mode, PolicyMode::Deny);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alternate_admin_path_uses_helper_canonical_policy_identity() -> Result<()> {
+        use runonmine_core::{
+            Capability, ConnectorConfig, PolicyContext, PolicyEngine, PolicyMode, PolicyRule,
+            PrincipalContext, PrincipalMatcher, ResourceMatcher,
+        };
+
+        let filesystem = ScopedFilesystem::new(&[])?;
+        let resources = policy_resources(
+            "admin_exec",
+            &json!({"program": "/usr/bin/../bin/id", "args": []}),
+            &filesystem,
+        )?;
+        let canonical = canonical_program_identity(Path::new("/usr/bin/id"))?;
+        assert!(matches!(
+            resources.contexts().next(),
+            Some(ResourceContext::Executable(path)) if path == canonical.as_path()
+        ));
+
+        let mut connector = ConnectorConfig::local_default();
+        connector.policy_rules.push(PolicyRule {
+            mode: PolicyMode::Deny,
+            principal: PrincipalMatcher::Any,
+            resource: ResourceMatcher::Executable { path: canonical },
+            tool: Some("admin_exec".to_owned()),
+            capability: Some(Capability::AdminExec),
+        });
+        let decisions = resources
+            .contexts()
+            .map(|resource| {
+                PolicyEngine.evaluate_context(
+                    &connector,
+                    "admin_exec",
+                    Capability::AdminExec,
+                    &PolicyContext {
+                        principal: PrincipalContext::Local,
+                        resource,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
         assert_eq!(decisions[0].mode, PolicyMode::Deny);
         Ok(())
     }

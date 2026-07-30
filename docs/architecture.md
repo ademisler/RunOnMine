@@ -58,6 +58,12 @@ context and the exact-action authorization identity. An inactive session uses
 `about:blank` without starting Chromium. The origin is read again after any local
 approval wait; a changed origin is re-authorized before the operation continues.
 
+Privileged executable resources use the helper's shared canonical program
+identity resolver before local policy evaluation. The resolver requires an
+absolute root/SYSTEM-owned regular non-symlink file, enforces platform ACL/mode
+rules, and returns the canonical path used by the installed allowlist. The helper
+still verifies the pinned SHA-256 immediately before execution.
+
 The loopback HTTP server supports at most 32 simultaneous MCP sessions, expires
 sessions after 30 idle minutes, and permits 120 calls per connector per minute
 by default. The server validates the connector bound to each session and

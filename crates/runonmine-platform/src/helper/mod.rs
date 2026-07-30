@@ -62,6 +62,24 @@ impl OwnerIdentity {
     }
 }
 
+/// Resolve the exact executable identity accepted by the privileged helper.
+///
+/// Policy evaluation and helper allowlist installation use this same function so
+/// alternate path spellings cannot bypass an executable resource rule.
+pub fn canonical_program_identity(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!("an admin executable must be an absolute path");
+    }
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect admin executable {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("admin executable must be a regular, non-symlink file");
+    }
+    validate_privileged_program_ownership(path, &metadata)?;
+    path.canonicalize()
+        .with_context(|| format!("failed to resolve admin executable {}", path.display()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllowedProgram {
     pub canonical_path: PathBuf,
@@ -70,18 +88,7 @@ pub struct AllowedProgram {
 
 impl AllowedProgram {
     pub fn inspect(path: &Path) -> Result<Self> {
-        if !path.is_absolute() {
-            bail!("an admin executable allowlist entry must be an absolute path");
-        }
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("failed to inspect admin executable {}", path.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("admin executable must be a regular, non-symlink file");
-        }
-        validate_privileged_program_ownership(path, &metadata)?;
-        let canonical_path = path
-            .canonicalize()
-            .with_context(|| format!("failed to resolve admin executable {}", path.display()))?;
+        let canonical_path = canonical_program_identity(path)?;
         let sha256 = sha256_file(&canonical_path)?;
         Ok(Self {
             canonical_path,
@@ -709,6 +716,18 @@ fn current_user_identity() -> Result<OwnerIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_program_identity_matches_allowlist_identity() -> Result<()> {
+        let canonical = canonical_program_identity(Path::new("/usr/bin/id"))?;
+        let alternate = canonical_program_identity(Path::new("/usr/bin/../bin/id"))?;
+        let allowed = AllowedProgram::inspect(Path::new("/usr/bin/id"))?;
+        assert_eq!(canonical, alternate);
+        assert_eq!(allowed.canonical_path, canonical);
+        assert!(canonical_program_identity(Path::new("relative/id")).is_err());
+        Ok(())
+    }
 
     #[test]
     fn protocol_rejects_relative_programs_and_unbounded_timeouts() {

@@ -107,8 +107,12 @@ to the agent's user account. A `CommandPrefix` policy rule matches only a simple
 single shell command. Shell composition, pipelines, redirection, command
 substitution, backticks, and multiline input are rejected from prefix matching;
 use `ask` for complex shell text. `admin_exec` is not a root shell: the helper accepts
-only explicitly installed, hash-pinned absolute program paths. Program
-arguments can still be security-sensitive and must be reviewed before approval.
+only explicitly installed, hash-pinned absolute program paths. Before policy
+evaluation, the requested program passes through the same root/SYSTEM ownership,
+non-symlink, regular-file, and canonical path resolver used when installing the
+helper allowlist. Alternate path spellings therefore cannot avoid an executable
+resource rule. Program arguments can still be security-sensitive and must be
+reviewed before approval.
 
 
 ## Emergency lock

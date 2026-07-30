@@ -48,6 +48,7 @@ compromised.
 | SQLite sidecars expose state | private parent directories and owner-only database, WAL, and shared-memory files |
 | A second local user reaches the privileged helper | owner-only Unix socket with peer credentials, or SID-restricted Windows pipe with token validation |
 | The helper runs an attacker-replaced executable | absolute allowlist, root/SYSTEM ownership and ACL checks, SHA-256 pinning |
+| An alternate executable path spelling avoids a canonical admin policy rule | MCP authorization and helper allowlist installation share the same root/SYSTEM-owned, non-symlink canonical program identity |
 | Browser automation reaches an unrelated daily profile or internal network | isolated profile by default; private-network destinations denied by default; expert attachment requires a credential-free loopback CDP URL; initial and final navigation destinations plus redirects/subresources are validated |
 | Audit rows are edited or reordered | BLAKE3 hash chain, retained chain anchor, startup and doctor verification |
 | A stale refresh token is replayed | one-time rotation and family-wide revocation on reuse |
