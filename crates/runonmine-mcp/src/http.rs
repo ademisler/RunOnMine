@@ -156,7 +156,7 @@ pub async fn serve_loopback() -> Result<()> {
     }
     let address = format!("{}:{}", config.bind_host, config.port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    let runtime_marker = runonmine_core::agent_status::AgentRuntimeMarker::publish()
+    let runtime_marker = runonmine_platform::agent_status::AgentRuntimeMarker::publish()
         .context("failed to publish the running agent version handshake")?;
     tracing::debug!(
         instance_id = %runtime_marker.status().instance_id,

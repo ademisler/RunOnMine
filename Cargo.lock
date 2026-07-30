@@ -4596,7 +4596,6 @@ dependencies = [
  "fs2",
  "image",
  "nix 0.31.3",
- "runonmine-core",
  "serde",
  "serde_json",
  "sha2",

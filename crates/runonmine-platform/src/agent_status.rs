@@ -4,11 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
-
-use crate::AppPaths;
 
 pub const AGENT_STATUS_PROTOCOL_VERSION: u16 = 1;
 pub const AGENT_PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -177,8 +176,12 @@ pub fn agent_status_path() -> Result<PathBuf> {
         }
         return Ok(path);
     }
-    let paths = AppPaths::discover()?;
-    Ok(paths.state_db().with_file_name(AGENT_STATUS_FILE))
+    let dirs = ProjectDirs::from("dev", "RunOnMine", "RunOnMine")
+        .context("the operating system did not provide an agent state directory")?;
+    Ok(dirs
+        .state_dir()
+        .unwrap_or_else(|| dirs.data_local_dir())
+        .join(AGENT_STATUS_FILE))
 }
 
 pub fn clear_agent_runtime_status(path: &Path) -> Result<()> {

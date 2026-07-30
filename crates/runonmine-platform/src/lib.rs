@@ -1,5 +1,6 @@
 //! Operating-system capability detection and service integration.
 
+pub mod agent_status;
 pub mod desktop;
 pub mod helper;
 pub mod native;
@@ -10,12 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
+use crate::agent_status::{AgentRestartExpectation, agent_status_path};
 use anyhow::{Context, Result, bail};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use directories::BaseDirs;
 #[cfg(target_os = "linux")]
 use directories::ProjectDirs;
-use runonmine_core::agent_status::{AgentRestartExpectation, agent_status_path};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -563,9 +564,13 @@ impl UserService {
         let installed = output.status.success();
         #[cfg(not(windows))]
         let installed = service_path.as_ref().is_some_and(|path| path.exists());
+        #[cfg(windows)]
+        let running = installed && windows_scheduled_task_running()?;
+        #[cfg(not(windows))]
+        let running = output.status.success();
         Ok(ServiceStatus {
             installed,
-            running: output.status.success(),
+            running,
             detail: sanitized_output(&output),
         })
     }
@@ -752,6 +757,27 @@ fn service_definition_path() -> Result<Option<PathBuf>> {
     return Ok(None);
     #[allow(unreachable_code)]
     Ok(None)
+}
+
+#[cfg(windows)]
+fn windows_scheduled_task_running() -> Result<bool> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[int](Get-ScheduledTask -TaskName 'RunOnMine Agent').State",
+        ])
+        .output()
+        .context("failed to query the RunOnMine scheduled task state")?;
+    if !output.status.success() {
+        bail!(
+            "failed to query the RunOnMine scheduled task state: {}",
+            sanitized_output(&output)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "4")
 }
 
 fn command_success(command: &mut Command, context: &str) -> Result<()> {

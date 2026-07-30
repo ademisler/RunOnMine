@@ -1,6 +1,5 @@
 //! Shared security, configuration, persistence, and execution primitives.
 
-pub mod agent_status;
 pub mod approval;
 mod atomic;
 pub mod audit;
