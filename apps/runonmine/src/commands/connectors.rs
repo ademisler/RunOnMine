@@ -649,32 +649,53 @@ pub(super) async fn ensure_binary(
     provider: ReleaseProvider,
     explicit_path: Option<&Path>,
 ) -> Result<InstalledBinary> {
-    let managed_directory = paths.data_dir.join("bin");
-    ensure_private_directory(&managed_directory)?;
     if let Some(path) = explicit_path {
         let binary = InstalledBinary::from_verified_path(kind, path)?;
         BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
         return Ok(binary);
     }
 
-    let destination = managed_directory.join(kind.executable_name());
-    let receipt_path = managed_receipt_path(&managed_directory, kind);
-    if let Some(binary) = existing_managed_binary(kind, provider, &destination, &receipt_path)? {
-        BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
-        return Ok(binary);
-    }
-
-    println!("Downloading the latest verified official connector binary...");
+    let store_root = paths
+        .data_dir
+        .join("managed-binaries")
+        .join(kind.executable_name());
+    let store = runonmine_connectors::VersionedBinaryStore::new(store_root);
+    let staging_parent = paths.data_dir.join("managed-binary-staging");
+    ensure_private_directory(&staging_parent)?;
+    let staging = tempfile::Builder::new()
+        .prefix("binary-")
+        .tempdir_in(&staging_parent)?;
+    let staged_path = staging.path().join(kind.executable_name());
     let artifact = GitHubReleaseResolver::production()?
         .resolve(provider, &ReleaseChannel::Latest)
         .await?;
-    let receipt = BinaryInstaller::production()?
-        .install(&artifact, &destination)
+    let mut receipt = BinaryInstaller::production()?
+        .install(&artifact, &staged_path)
         .await?;
-    write_install_receipt(&receipt_path, &receipt)?;
-    let binary = InstalledBinary::from_verified_path(kind, &destination)?;
-    verify_managed_binary(&binary, provider, &receipt_path)?;
-    BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await?;
+    let staged = InstalledBinary::from_verified_path(kind, &staged_path)?;
+    BinaryProbe::run(&staged, std::time::Duration::from_secs(10)).await?;
+
+    let version_id = store.version_id_for_file(&staged_path)?;
+    let target = store.version(&version_id);
+    receipt.installed_path.clone_from(&target.binary_path);
+    let prepared = store.prepare(&staged_path, &serde_json::to_vec_pretty(&receipt)?)?;
+    let activation = store.activate(&prepared)?;
+    let binary = InstalledBinary::from_verified_path(kind, &prepared.binary_path);
+    let verified = binary.and_then(|binary| {
+        verify_managed_binary(&binary, provider, &prepared.receipt_path)?;
+        Ok(binary)
+    });
+    let binary = match verified {
+        Ok(binary) => binary,
+        Err(error) => {
+            store.rollback(activation)?;
+            return Err(error.context("managed binary activation failed and was rolled back"));
+        }
+    };
+    if let Err(error) = BinaryProbe::run(&binary, std::time::Duration::from_secs(10)).await {
+        store.rollback(activation)?;
+        return Err(error.context("managed binary probe failed and activation was rolled back"));
+    }
     Ok(binary)
 }
 

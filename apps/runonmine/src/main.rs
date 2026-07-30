@@ -139,6 +139,9 @@ enum ConnectCommand {
         command: CloudflareCommand,
     },
     Openai(OpenAiConnectArgs),
+
+    /// Download, verify and atomically select the latest managed connector binaries.
+    UpdateManagedBinaries,
 }
 
 #[derive(Debug, Subcommand)]

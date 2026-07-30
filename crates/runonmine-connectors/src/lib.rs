@@ -11,6 +11,7 @@ pub mod installer;
 pub mod openai;
 pub mod process;
 pub mod supervisor;
+mod versioned_binary;
 
 pub use binary::{BinaryDiscovery, BinaryKind, BinaryProbe, DoctorReport, InstalledBinary};
 pub use health::{HealthCheck, HealthCheckResult, HealthChecker};
@@ -24,3 +25,5 @@ pub use process::{
 pub use supervisor::{
     ProcessEvent, ProcessState, ProcessSupervisor, RestartPolicy, SupervisorHandle,
 };
+
+pub use versioned_binary::{ManagedBinaryActivation, ManagedBinaryVersion, VersionedBinaryStore};
