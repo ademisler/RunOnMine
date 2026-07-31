@@ -1,5 +1,27 @@
 # Windows
 
+## Desktop control center and installer
+
+The Windows desktop control center contains the same Overview, Approvals,
+Connections, Permissions, OAuth, Audit, and Diagnostics screens as macOS and
+Linux. It uses the native Windows notification area with **Open RunOnMine**,
+**Lock RunOnMine**, and **Quit** actions. Closing the main window hides it while
+the tray remains active. Release builds use the Windows GUI subsystem, so
+launching the desktop application does not open a console window.
+
+The NSIS package installs for the current user without elevation, writes only
+HKCU uninstall metadata, installs the CLI, agent, desktop, and optional helper
+binary together, and creates Start Menu and desktop shortcuts with the RunOnMine
+icon. The helper binary being present does not install or activate the
+LocalSystem helper; that still requires an explicit elevated admin command.
+Installer UI is available in English, French, and Turkish.
+
+The Windows artifact preflight performs a silent install, verifies the native
+main window and all seven rendered views, delivers `WM_CLOSE` and confirms the
+process remains available from the tray, then silently uninstalls, verifies that every managed binary, registry entry, and shortcut is gone, and confirms that user data is retained by default. A GNU/Wine run may be
+used as supplemental compatibility evidence, but it does not replace the real
+Windows runner or publisher-signing acceptance.
+
 The normal agent is copied into the immutable per-user versioned service-binary
 directory and registered as a limited logon Scheduled Task:
 
@@ -29,7 +51,9 @@ PowerShell tool starts the fixed system PowerShell executable with no profile
 and non-interactive flags, then passes the script over stdin.
 
 The beta NSIS installer is unsigned. Windows may show an unrecognized publisher
-warning. Verify the accompanying SHA-256 file before running it.
+warning. Verify the accompanying SHA-256 file before running it. Public release
+remains blocked until Authenticode signing and rebooted clean-install evidence
+are recorded.
 
 Arguments are additionally restricted by the installed executable-specific command profile; an executable added with `--allow-program` alone accepts no arguments.
 

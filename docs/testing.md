@@ -77,13 +77,45 @@ notarization, or a real operating-system reboot. Unsigned local artifacts are
 expected to fail Gatekeeper assessment until the release credentials are
 provided.
 
-## Linux desktop package acceptance
+## Cross-platform desktop parity acceptance
 
-The Ubuntu 24.04 x86_64 desktop preflight builds all four binaries with desktop
-control enabled, launches the release control center under an isolated D-Bus
-session and Xvfb, creates a four-binary portable archive plus CycloneDX SBOM,
-and builds the standalone `runonmine-desktop` DEB. The job installs that DEB,
-validates its freedesktop entry, launches `/usr/bin/runonmine-desktop`, removes
-the package, and verifies that its executable and menu entry are gone. The
-headless Linux package remains a separate artifact and is not replaced by this
-acceptance path.
+`desktop-parity-smoke.sh` launches the actual desktop binary under an isolated
+D-Bus/Xvfb session. The application renders Overview, Approvals, Connections,
+Permissions, OAuth, Audit, and Diagnostics in order, keeps the final frame alive
+long enough to expose a real window, and writes a no-overwrite JSON report with
+platform, architecture, viewport bounds, application-icon state, native-shell
+availability, close behavior, and the exact Open/Lock/Quit action contract. The
+report deliberately excludes usernames, home paths, machine names, connector
+identifiers, and credentials.
+
+On a physical Ubuntu 24.04 Xfce/X11 session,
+`linux-desktop-session-smoke.sh` additionally observes a real
+StatusNotifierItem, sends the window manager's `_NET_CLOSE_WINDOW`, verifies the
+window becomes hidden while the process remains alive, activates the tray over
+D-Bus, verifies the window reappears, and confirms the tray name disappears on
+exit.
+
+The Linux x86_64 artifact preflight builds all four binaries with desktop
+control enabled, runs the seven-view parity smoke, creates a four-binary
+portable archive plus CycloneDX SBOM, and builds the standalone
+`runonmine-desktop` DEB. The job installs that DEB, validates its freedesktop
+entry, launches `/usr/bin/runonmine-desktop`, removes the package, and verifies
+that its executable and menu entry are gone. The headless Linux package remains
+a separate artifact and is not replaced by this acceptance path.
+
+## Windows desktop and NSIS acceptance
+
+The Windows smoke test starts the native desktop executable, waits for a real
+`RunOnMine` window handle, validates the same seven-view JSON contract, and
+sends `WM_CLOSE`; Win32 `IsWindowVisible` must become false while the process
+continues in the notification area. The NSIS preflight then performs a silent
+current-user install, checks HKCU uninstall metadata, all four binaries, Start
+Menu and desktop shortcuts, runs the installed desktop acceptance, silently
+uninstalls, and verifies that the registry record, install directory, and
+shortcuts are gone.
+
+A real Windows runner is authoritative for this acceptance. A Wine x86_64 run
+is useful supplemental evidence for PE launch, tray creation, seven-view
+rendering, standard Windows data paths, and GUI-subsystem compatibility, but it
+does not claim physical Windows installation, Authenticode signing, reboot, or
+release clean-install acceptance.

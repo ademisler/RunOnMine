@@ -5,6 +5,7 @@ param(
     [string]$McpClient = ""
 )
 $ErrorActionPreference = "Stop"
+. "$(Join-Path $PSScriptRoot "windows-desktop-acceptance.ps1")"
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-acceptance-" + [guid]::NewGuid())
 $home = Join-Path $root "home"
 $project = Join-Path $root "project"
@@ -18,6 +19,7 @@ $old = @{
     LOCALAPPDATA = $env:LOCALAPPDATA
     RUNONMINE_TEST_FILE_SECRETS = $env:RUNONMINE_TEST_FILE_SECRETS
     RUNONMINE_MASTER_KEY = $env:RUNONMINE_MASTER_KEY
+    RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT
 }
 try {
     $env:HOME = $home
@@ -25,7 +27,7 @@ try {
     $env:APPDATA = Join-Path $root "appdata"
     $env:LOCALAPPDATA = Join-Path $root "localappdata"
     $env:RUNONMINE_TEST_FILE_SECRETS = "1"
-    $env:RUNONMINE_MASTER_KEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    $env:RUNONMINE_MASTER_KEY = -join ((1..32 | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 }) | ForEach-Object { $_.ToString("x2") })
 
     (& $RunOnMine setup --root $project | Out-String) | Select-String -SimpleMatch "RunOnMine is initialized." | Out-Null
     (& $RunOnMine policy show | Out-String) | Select-String -SimpleMatch "AdminExec: Deny" | Out-Null
@@ -71,11 +73,7 @@ try {
     }
 
     if ($Desktop) {
-        $desktopProcess = Start-Process -FilePath $Desktop -PassThru
-        Start-Sleep -Seconds 3
-        if ($desktopProcess.HasExited) { throw "desktop application exited during launch acceptance" }
-        Stop-Process -Id $desktopProcess.Id -Force
-        $desktopProcess.WaitForExit()
+        Invoke-RunOnMineDesktopAcceptance -Desktop $Desktop -Root $root -ExpectNativeShell $true
     }
 
     (& $RunOnMine approvals list | Out-String) | Select-String -SimpleMatch "No pending approvals." | Out-Null

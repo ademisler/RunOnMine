@@ -31,10 +31,15 @@ cargo build --release --locked --target x86_64-unknown-linux-gnu \
   -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
 ```
 
-The control center is a normal Linux window and taskbar application. Tray-menu
-support remains compiled only on macOS and Windows, avoiding a GTK/AppIndicator
-dependency and its separate event-loop requirements on Linux. Install a built
-candidate and start the user service with:
+The control center is a normal Linux window and taskbar application with a
+freedesktop StatusNotifierItem tray. It does not require GTK or AppIndicator.
+The tray exposes the same **Open RunOnMine**, **Lock RunOnMine**, and **Quit**
+actions as macOS and Windows. Closing the window through the window manager
+hides it while the tray remains active; activating the tray restores and focuses
+the window. Sessions without a working StatusNotifierItem host fall back to a
+normal window whose close action exits.
+
+Install a built candidate and start the user service with:
 
 ```console
 sudo apt install ./runonmine-desktop_*_amd64.deb
@@ -45,6 +50,25 @@ runonmine-desktop
 
 The desktop emergency lock calls the current user's `runonmine lock`; it does
 not request the root-only `--system` path.
+
+The platform-independent smoke renders all seven control-center views in an
+isolated D-Bus/Xvfb session and writes a privacy-bounded JSON contract:
+
+```console
+./scripts/acceptance/desktop-parity-smoke.sh \
+  "$PWD/target/release/runonmine-desktop"
+```
+
+On a real X11 desktop, validate StatusNotifier registration, window-manager
+close-to-tray behavior, tray activation, and clean tray removal with:
+
+```console
+DISPLAY=:0 \
+XAUTHORITY="$HOME/.Xauthority" \
+DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus" \
+./scripts/acceptance/linux-desktop-session-smoke.sh \
+  "$PWD/target/release/runonmine-desktop"
+```
 
 ## Per-user service
 

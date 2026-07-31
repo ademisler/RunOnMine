@@ -57,6 +57,7 @@ flate2 = "1.1"
 getrandom = "0.3"
 image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
 keyring = { version = "4.1.5", features = ["v1"] }
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "tokio"] }
 html-escape = "0.2"
 libc = "0.2"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "user"] }

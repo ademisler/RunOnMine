@@ -6,22 +6,20 @@ use runonmine_core::{
     PersistentGrant, StateStore,
 };
 use runonmine_oauth::{OAuthSession, RegisteredClient};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use tray_icon::TrayIcon;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use tray_icon::menu::MenuId;
 use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::connector_wizard::ConnectorWizardState;
+use crate::desktop_acceptance::DesktopAcceptance;
 use crate::desktop_process::BackgroundCliTask;
+use crate::desktop_shell::DesktopShell;
 use crate::desktop_snapshot::{BackgroundDesktopSnapshot, ConnectorLifecycle};
 use crate::policy_editor::PolicyEditorState;
 use crate::theme::Icon as UiIcon;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum Tab {
+pub(crate) enum Tab {
     #[default]
     Overview,
     Approvals,
@@ -33,7 +31,7 @@ pub(super) enum Tab {
 }
 
 impl Tab {
-    pub(super) const ALL: [(Self, UiIcon, &'static str); 7] = [
+    pub(crate) const ALL: [(Self, UiIcon, &'static str); 7] = [
         (Self::Overview, UiIcon::Home, "Overview"),
         (Self::Approvals, UiIcon::Clipboard, "Approvals"),
         (Self::Connections, UiIcon::Link, "Connections"),
@@ -52,6 +50,18 @@ impl Tab {
             Self::OAuth => "OAuth access",
             Self::Audit => "Audit log",
             Self::Diagnostics => "Diagnostics",
+        }
+    }
+
+    pub(crate) const fn acceptance_name(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Approvals => "approvals",
+            Self::Connections => "connections",
+            Self::Permissions => "permissions",
+            Self::OAuth => "oauth",
+            Self::Audit => "audit",
+            Self::Diagnostics => "diagnostics",
         }
     }
 
@@ -100,12 +110,7 @@ pub(super) struct RunOnMineDesktop {
     pub(super) policy_editor: PolicyEditorState,
     pub(super) connector_wizard: ConnectorWizardState,
     pub(super) connector_rx: Option<BackgroundCliTask>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub(super) tray: Option<TrayIcon>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub(super) open_menu_id: Option<MenuId>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub(super) lock_menu_id: Option<MenuId>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub(super) quit_menu_id: Option<MenuId>,
+    pub(super) shell: DesktopShell,
+    pub(super) exit_requested: bool,
+    pub(super) acceptance: Option<DesktopAcceptance>,
 }

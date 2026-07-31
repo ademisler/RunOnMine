@@ -117,6 +117,99 @@ fn packager_string(table: &toml::Table, relative: &str, keys: &[&str]) -> Result
         .with_context(|| format!("{relative} has no {} field", keys.join("/")))
 }
 
+fn packager_string_array(table: &toml::Table, relative: &str, key: &str) -> Result<Vec<String>> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .with_context(|| format!("{relative} has no {key} array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .with_context(|| format!("{relative} {key} must contain only strings"))
+        })
+        .collect()
+}
+
+fn validate_windows_packager_config(table: &toml::Table, relative: &str) -> Result<()> {
+    if packager_string(table, relative, &["target-triple", "targetTriple"])?
+        != "x86_64-pc-windows-msvc"
+    {
+        bail!("{relative} must package the x86_64-pc-windows-msvc release target");
+    }
+    if packager_string_array(table, relative, "icons")? != ["assets/runonmine.ico"] {
+        bail!("{relative} must use the checked-in RunOnMine Windows icon");
+    }
+    let binaries = table
+        .get("binaries")
+        .and_then(toml::Value::as_array)
+        .with_context(|| format!("{relative} has no binaries array"))?;
+    let mut paths = BTreeMap::new();
+    for binary in binaries {
+        let binary = binary
+            .as_table()
+            .with_context(|| format!("{relative} binaries must be tables"))?;
+        let path = packager_string(binary, relative, &["path"])?;
+        let main = binary
+            .get("main")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false);
+        paths.insert(path, main);
+    }
+    let expected = BTreeMap::from([
+        ("runonmine".to_owned(), false),
+        ("runonmine-agent".to_owned(), false),
+        ("runonmine-desktop".to_owned(), true),
+        ("runonmine-helper".to_owned(), false),
+    ]);
+    if paths != expected {
+        bail!("{relative} must package the exact four-binary Windows desktop manifest");
+    }
+
+    let nsis = table
+        .get("nsis")
+        .and_then(toml::Value::as_table)
+        .with_context(|| format!("{relative} has no nsis table"))?;
+    for (label, keys, expected) in [
+        ("install mode", &["installMode"][..], "currentUser"),
+        (
+            "installer icon",
+            &["installer-icon"][..],
+            "assets/runonmine.ico",
+        ),
+        (
+            "header image",
+            &["header-image"][..],
+            "assets/windows-header.bmp",
+        ),
+        (
+            "sidebar image",
+            &["sidebar-image"][..],
+            "assets/windows-sidebar.bmp",
+        ),
+    ] {
+        let actual = packager_string(nsis, relative, keys)?;
+        if actual != expected {
+            bail!("{relative} {label} must be {expected:?}; received {actual:?}");
+        }
+    }
+    let languages = packager_string_array(nsis, relative, "languages")?;
+    if languages != ["English", "French", "Turkish"] {
+        bail!("{relative} must expose the English, French and Turkish NSIS languages");
+    }
+    let appdata_paths = packager_string_array(nsis, relative, "appdata-paths")?;
+    if appdata_paths
+        != [
+            r"$APPDATA\RunOnMine\RunOnMine",
+            r"$LOCALAPPDATA\RunOnMine\RunOnMine",
+        ]
+    {
+        bail!("{relative} must bind uninstall data choices to the standard RunOnMine roots");
+    }
+    Ok(())
+}
+
 fn validate_packager_config(relative: &str, content: &str) -> Result<String> {
     let parsed: toml::Value =
         toml::from_str(content).with_context(|| format!("failed to parse {relative} as TOML"))?;
@@ -157,6 +250,9 @@ fn validate_packager_config(relative: &str, content: &str) -> Result<String> {
         .any(|resource| resource.as_str() == Some("../README.md"))
     {
         bail!("{relative} must package ../README.md relative to packaging/");
+    }
+    if relative == "packaging/Packager.windows.toml" {
+        validate_windows_packager_config(table, relative)?;
     }
     Ok(version)
 }
@@ -1010,6 +1106,52 @@ resources = ["../README.md"]
             validate_packager_config(
                 "packaging/test.toml",
                 &valid.replace("../target/packager-input", "target/packager-input"),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn windows_packager_contract_rejects_schema_drift() -> Result<()> {
+        let valid = r#"
+name = "runonmine"
+version = "1.2.3"
+license-file = "../LICENSE"
+binaries-dir = "../target/packager-input"
+out-dir = "../dist"
+target-triple = "x86_64-pc-windows-msvc"
+resources = ["../README.md"]
+icons = ["assets/runonmine.ico"]
+binaries = [
+  { path = "runonmine-desktop", main = true },
+  { path = "runonmine", main = false },
+  { path = "runonmine-agent", main = false },
+  { path = "runonmine-helper", main = false },
+]
+
+[nsis]
+installMode = "currentUser"
+installer-icon = "assets/runonmine.ico"
+header-image = "assets/windows-header.bmp"
+sidebar-image = "assets/windows-sidebar.bmp"
+languages = ["English", "French", "Turkish"]
+appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnMine']
+"#;
+        let relative = "packaging/Packager.windows.toml";
+        assert_eq!(validate_packager_config(relative, valid)?, "1.2.3");
+        assert!(
+            validate_packager_config(relative, &valid.replace("installMode", "install-mode"))
+                .is_err()
+        );
+        assert!(
+            validate_packager_config(relative, &valid.replace("currentUser", "perMachine"))
+                .is_err()
+        );
+        assert!(
+            validate_packager_config(
+                relative,
+                &valid.replace("assets/runonmine.ico", "assets/other.ico"),
             )
             .is_err()
         );

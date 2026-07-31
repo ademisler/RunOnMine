@@ -1,9 +1,17 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 #[cfg(feature = "desktop-ui")]
 mod connector_wizard;
 #[cfg(feature = "desktop-ui")]
 mod credential_update;
 #[cfg(feature = "desktop-ui")]
+mod desktop_acceptance;
+#[cfg(feature = "desktop-ui")]
+mod desktop_icon;
+#[cfg(feature = "desktop-ui")]
 mod desktop_process;
+#[cfg(feature = "desktop-ui")]
+mod desktop_shell;
 #[cfg(feature = "desktop-ui")]
 mod desktop_snapshot;
 #[cfg(feature = "desktop-ui")]

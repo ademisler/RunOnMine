@@ -5,6 +5,9 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Bring the Linux and Windows control centers to the macOS desktop contract: one seven-screen UI, native Open/Lock/Quit tray actions, dynamic tray status, application icons, close-to-tray behavior, and an in-app Diagnostics integration card. Linux uses freedesktop StatusNotifierItem without GTK/AppIndicator; Windows release binaries use the GUI subsystem.
+- Add deterministic cross-platform desktop reports, isolated seven-view Xvfb acceptance, physical Xfce StatusNotifier close/reopen acceptance, real-window/WM_CLOSE Windows acceptance, and current-user NSIS install/uninstall residue checks. GNU/Wine remains explicit supplemental Windows compatibility evidence.
+- Add Windows application and installer artwork, English/French/Turkish NSIS UI, HKCU current-user installation, Start Menu/desktop shortcuts, and explicit cleanup of standard RunOnMine roaming/local application-data roots when the user elects to remove app data.
 - Make MCP HTTP acceptance own and terminate the real agent PID, with bounded TERM/KILL cleanup, so successful smoke runs cannot orphan listeners or deleted temporary state.
 - Add a standalone Linux x86_64 desktop DEB with all four RunOnMine binaries, a freedesktop menu entry and icon, four-binary SBOM/archive provenance, Xvfb launch acceptance, and real install/remove preflight coverage.
 - Compile tray integration only on macOS and Windows so the Linux control center builds without GTK/AppIndicator, and keep Linux emergency lock scoped to the current user service.

@@ -1,5 +1,5 @@
 #[path = "desktop_model.rs"]
-mod model;
+pub(crate) mod model;
 #[path = "desktop_views.rs"]
 mod views;
 
@@ -27,17 +27,14 @@ use crate::policy_editor::{PolicyEditorAction, PolicyEditorState};
 use crate::theme::{self, Icon as UiIcon, StatusTone};
 use runonmine_oauth::SqliteOAuthStore;
 use runonmine_platform::UserService;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use tray_icon::{Icon, TrayIconBuilder};
 use uuid::Uuid;
 
 pub fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(layout::DEFAULT_VIEWPORT)
-            .with_min_inner_size(layout::MINIMUM_VIEWPORT),
+            .with_min_inner_size(layout::MINIMUM_VIEWPORT)
+            .with_icon(crate::desktop_icon::egui_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -45,7 +42,7 @@ pub fn run() -> Result<()> {
         options,
         Box::new(|context| {
             theme::apply(&context.egui_ctx);
-            Ok(Box::new(RunOnMineDesktop::new()))
+            Ok(Box::new(RunOnMineDesktop::new()?))
         }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
@@ -54,7 +51,7 @@ pub fn run() -> Result<()> {
 use model::{RunOnMineDesktop, Tab};
 
 impl RunOnMineDesktop {
-    fn new() -> Self {
+    fn new() -> Result<Self> {
         let now = Instant::now();
         let mut app = Self {
             paths: None,
@@ -88,20 +85,15 @@ impl RunOnMineDesktop {
             policy_editor: PolicyEditorState::default(),
             connector_wizard: ConnectorWizardState::default(),
             connector_rx: None,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            tray: None,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            open_menu_id: None,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            lock_menu_id: None,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            quit_menu_id: None,
+            shell: crate::desktop_shell::DesktopShell::new(),
+            exit_requested: false,
+            acceptance: crate::desktop_acceptance::DesktopAcceptance::from_environment()?,
         };
         if let Err(error) = app.initialize() {
             app.error = Some(error.to_string());
             "Setup required".clone_into(&mut app.status);
         }
-        app
+        Ok(app)
     }
 
     fn initialize(&mut self) -> Result<()> {
@@ -114,37 +106,8 @@ impl RunOnMineDesktop {
         let store = StateStore::open(&paths.state_db())?;
         self.config = Some(config);
         self.store = Some(store);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        self.create_tray();
         self.start_refresh()?;
         Ok(())
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn create_tray(&mut self) {
-        let menu = Menu::new();
-        let open = MenuItem::new("Open RunOnMine", true, None);
-        let lock = MenuItem::new("Lock RunOnMine", true, None);
-        let quit = MenuItem::new("Quit", true, None);
-        if menu.append(&open).is_err() || menu.append(&lock).is_err() || menu.append(&quit).is_err()
-        {
-            return;
-        }
-        let Ok(icon) = app_icon() else {
-            return;
-        };
-        let Ok(tray) = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("RunOnMine")
-            .with_icon(icon)
-            .build()
-        else {
-            return;
-        };
-        self.open_menu_id = Some(open.id().clone());
-        self.lock_menu_id = Some(lock.id().clone());
-        self.quit_menu_id = Some(quit.id().clone());
-        self.tray = Some(tray);
     }
 
     fn start_refresh(&mut self) -> Result<()> {
@@ -201,10 +164,8 @@ impl RunOnMineDesktop {
             "Agent stopped".to_owned()
         };
         self.config = Some(snapshot.config);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(tray) = &self.tray {
-            let _result = tray.set_tooltip(Some(&format!("RunOnMine — {}", self.status)));
-        }
+        self.shell
+            .set_status(&self.status, !self.pending.is_empty());
     }
 
     fn resolve(&mut self, id: Uuid, decision: ApprovalDecision) -> Result<()> {
@@ -227,10 +188,7 @@ impl RunOnMineDesktop {
         self.diagnostics = output;
         self.start_refresh()?;
         "Locked — restart explicitly to restore access".clone_into(&mut self.status);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(tray) = &self.tray {
-            let _result = tray.set_tooltip(Some("RunOnMine — locked"));
-        }
+        self.shell.set_status("locked", true);
         Ok(())
     }
 
@@ -545,21 +503,58 @@ impl RunOnMineDesktop {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn process_menu(&mut self, context: &egui::Context) {
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if self.open_menu_id.as_ref() == Some(&event.id) {
-                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                context.send_viewport_cmd(egui::ViewportCommand::Focus);
-            } else if self.lock_menu_id.as_ref() == Some(&event.id) {
-                if let Err(error) = self.emergency_lock() {
-                    self.error = Some(error.to_string());
+    fn process_shell(&mut self, context: &egui::Context) {
+        while let Some(command) = self.shell.try_command() {
+            match command {
+                crate::desktop_shell::DesktopCommand::Show => show_window(context),
+                crate::desktop_shell::DesktopCommand::Lock => {
+                    if let Err(error) = self.emergency_lock() {
+                        self.error = Some(error.to_string());
+                    }
+                    show_window(context);
                 }
-                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                context.send_viewport_cmd(egui::ViewportCommand::Focus);
-            } else if self.quit_menu_id.as_ref() == Some(&event.id) {
+                crate::desktop_shell::DesktopCommand::Quit => {
+                    self.exit_requested = true;
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn process_close_request(&mut self, context: &egui::Context) {
+        let close_requested = context.input(|input| input.viewport().close_requested());
+        if close_requested
+            && !self.exit_requested
+            && self.acceptance.is_none()
+            && self.shell.is_available()
+        {
+            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+    }
+
+    fn process_acceptance(&mut self, context: &egui::Context) {
+        let next_tab = self
+            .acceptance
+            .as_ref()
+            .and_then(crate::desktop_acceptance::DesktopAcceptance::next_tab);
+        if let Some(tab) = next_tab {
+            self.selected_tab = tab;
+            context.request_repaint();
+            return;
+        }
+        let Some(acceptance) = self.acceptance.as_mut() else {
+            return;
+        };
+        if !acceptance.ready_to_report() {
+            return;
+        }
+        match acceptance.write_report(self.shell.is_available()) {
+            Ok(()) => {
+                self.exit_requested = true;
                 context.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
 
@@ -573,8 +568,9 @@ impl RunOnMineDesktop {
 
 impl eframe::App for RunOnMineDesktop {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        self.process_menu(context);
+        self.process_shell(context);
+        self.process_close_request(context);
+        self.process_acceptance(context);
         self.poll_doctor();
         self.poll_connector_command();
         self.poll_refresh();
@@ -582,11 +578,15 @@ impl eframe::App for RunOnMineDesktop {
             let result = self.start_refresh();
             self.apply_result(result);
         }
-        context.request_repaint_after(Duration::from_millis(500));
+        let interval = if self.acceptance.is_some() { 50 } else { 500 };
+        context.request_repaint_after(Duration::from_millis(interval));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.render_ui(ui, frame);
+        if let Some(acceptance) = self.acceptance.as_mut() {
+            acceptance.record_render(self.selected_tab, ui.max_rect().size());
+        }
     }
 }
 
@@ -637,6 +637,11 @@ fn activity_row(
     ui.add_space(4.0);
 }
 
+fn show_window(context: &egui::Context) {
+    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+}
+
 fn sibling_cli() -> Result<PathBuf> {
     let current = std::env::current_exe().context("Could not locate RunOnMine Desktop")?;
     let directory = current
@@ -658,22 +663,4 @@ fn sibling_cli() -> Result<PathBuf> {
 
 fn run_cli_capture(arguments: &[String]) -> Result<String> {
     run_cli(&sibling_cli()?, arguments, None)
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn app_icon() -> Result<Icon> {
-    const SIZE: usize = 32;
-    let mut rgba = vec![0_u8; SIZE * SIZE * 4];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let offset = (y * SIZE + x) * 4;
-            let inside = (4..28).contains(&x) && (4..28).contains(&y);
-            rgba[offset] = if inside { 38 } else { 0 };
-            rgba[offset + 1] = if inside { 155 } else { 0 };
-            rgba[offset + 2] = if inside { 111 } else { 0 };
-            rgba[offset + 3] = if inside { 255 } else { 0 };
-        }
-    }
-    let size = u32::try_from(SIZE).context("tray icon size is invalid")?;
-    Icon::from_rgba(rgba, size, size).map_err(|error| anyhow::anyhow!(error.to_string()))
 }

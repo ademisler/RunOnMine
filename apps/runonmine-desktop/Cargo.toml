@@ -11,7 +11,7 @@ publish.workspace = true
 
 [features]
 default = ["desktop-ui"]
-desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon"]
+desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon", "dep:ksni"]
 
 [dependencies]
 anyhow.workspace = true
@@ -31,8 +31,21 @@ secrecy.workspace = true
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tray-icon = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { workspace = true, optional = true }
+
+[build-dependencies]
+winresource = "0.1.31"
+
 [lints]
 workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[package.metadata.winresource]
+ProductName = "RunOnMine"
+FileDescription = "RunOnMine security control center"
+OriginalFilename = "runonmine-desktop.exe"
+CompanyName = "RunOnMine contributors"
+LegalCopyright = "Copyright RunOnMine contributors"

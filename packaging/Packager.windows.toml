@@ -11,6 +11,7 @@ binaries-dir = "../target/packager-input"
 out-dir = "../dist"
 target-triple = "x86_64-pc-windows-msvc"
 formats = ["nsis"]
+icons = ["assets/runonmine.ico"]
 resources = ["../README.md"]
 binaries = [
   { path = "runonmine-desktop", main = true },
@@ -18,3 +19,11 @@ binaries = [
   { path = "runonmine-agent", main = false },
   { path = "runonmine-helper", main = false },
 ]
+
+[nsis]
+installMode = "currentUser"
+installer-icon = "assets/runonmine.ico"
+header-image = "assets/windows-header.bmp"
+sidebar-image = "assets/windows-sidebar.bmp"
+languages = ["English", "French", "Turkish"]
+appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnMine']

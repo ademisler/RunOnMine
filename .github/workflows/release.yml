@@ -164,11 +164,10 @@ jobs:
         run: >-
           cargo build --release --locked --target x86_64-unknown-linux-gnu
           -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
-      - name: Launch Linux desktop under Xvfb
+      - name: Render and validate all Linux desktop views
         run: >-
-          RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a
-          ./scripts/acceptance/desktop-launch-smoke.sh
-          target/x86_64-unknown-linux-gnu/release/runonmine-desktop
+          ./scripts/acceptance/desktop-parity-smoke.sh
+          "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
       - run: cargo run --locked -p xtask -- package --target x86_64-unknown-linux-gnu --desktop
       - name: Validate Linux desktop SBOM and archive
         run: |
@@ -202,6 +201,9 @@ jobs:
       - run: choco install nsis --yes --no-progress
       - run: dist build --artifacts=local --target=x86_64-pc-windows-msvc
       - run: cargo build --release --locked --target x86_64-pc-windows-msvc --workspace --exclude xtask
+      - name: Validate Windows executable resources
+        shell: pwsh
+        run: ./scripts/acceptance/windows-pe-resources.ps1 -Desktop target/x86_64-pc-windows-msvc/release/runonmine-desktop.exe
       - run: cargo run --locked -p xtask -- package --target x86_64-pc-windows-msvc
       - name: Validate Windows SBOM
         shell: pwsh
@@ -211,6 +213,12 @@ jobs:
           cargo run --locked -p xtask -- validate-sbom --path $sbom.FullName --target x86_64-pc-windows-msvc
       - run: cargo run --locked -p xtask -- stage-packager --target x86_64-pc-windows-msvc
       - run: cargo packager --release --config packaging/Packager.windows.toml
+      - name: Install and remove Windows desktop package
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter 'runonmine-desktop_*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Windows NSIS installer is missing' }
+          ./scripts/acceptance/windows-installer-smoke.ps1 -Installer $installer.FullName
       - run: cargo run --locked -p xtask -- checksums
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

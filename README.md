@@ -229,18 +229,30 @@ cargo build --release --no-default-features \
   -p runonmine -p runonmine-agent -p runonmine-helper
 ```
 
+The desktop control center uses the same seven security screens on macOS,
+Linux, and Windows. Every supported desktop exposes native **Open**, **Lock**,
+and **Quit** actions, updates its tray status, and hides the window instead of
+exiting when the native tray is available. Linux uses the freedesktop
+StatusNotifierItem protocol without a GTK/AppIndicator dependency; Windows and
+macOS use their native tray implementations. The Diagnostics screen reports the
+active desktop integration and close behavior.
+
 On Linux x86_64, the standalone `runonmine-desktop` DEB includes the control
-center plus the CLI, agent, and helper. The Linux window is a normal taskbar
-application; the macOS/Windows tray integration is not compiled on Linux, so no
-GTK/AppIndicator runtime is required. Build and smoke-test it under X11 with:
+center plus the CLI, agent, and helper. Build it and run the isolated seven-view
+acceptance with:
 
 ```console
-cargo build --release --target x86_64-unknown-linux-gnu \
+cargo build --release --locked --target x86_64-unknown-linux-gnu \
   -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
-RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a \
-  ./scripts/acceptance/desktop-launch-smoke.sh \
-  target/x86_64-unknown-linux-gnu/release/runonmine-desktop
+./scripts/acceptance/desktop-parity-smoke.sh \
+  "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
 ```
+
+The Windows NSIS package is a current-user installation. It includes the same
+four binaries, native tray integration, application/installer icons, Start Menu
+and desktop shortcuts, and a no-console GUI executable. Its Windows preflight
+performs silent install, real-window and seven-view acceptance, close-to-tray
+validation, silent uninstall, and residue checks.
 
 Release candidates are unsigned. The release workflow creates portable `cargo-dist` archives, native `cargo-packager` installers, CycloneDX SBOMs with dependency edges and Cargo.lock checksums, and SHA-256 artifact checksum files, then opens a draft GitHub prerelease. It never changes repository visibility.
 

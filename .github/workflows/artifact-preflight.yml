@@ -89,11 +89,10 @@ jobs:
         run: >-
           cargo build --release --locked --target x86_64-unknown-linux-gnu
           -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
-      - name: Launch release desktop under Xvfb
+      - name: Render and validate all Linux desktop views
         run: >-
-          RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a
-          ./scripts/acceptance/desktop-launch-smoke.sh
-          target/x86_64-unknown-linux-gnu/release/runonmine-desktop
+          ./scripts/acceptance/desktop-parity-smoke.sh
+          "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
       - run: cargo run --locked -p xtask -- package --target x86_64-unknown-linux-gnu --desktop
       - name: Validate desktop SBOM and portable artifact
         run: |
@@ -116,8 +115,7 @@ jobs:
           desktop-file-validate /usr/share/applications/runonmine-desktop.desktop
           grep -Fx 'Exec=runonmine-desktop ' /usr/share/applications/runonmine-desktop.desktop
           grep -Fx 'Icon=runonmine-desktop' /usr/share/applications/runonmine-desktop.desktop
-          RUNONMINE_DESKTOP_SOAK_SECONDS=10 dbus-run-session -- xvfb-run -a \
-            ./scripts/acceptance/desktop-launch-smoke.sh /usr/bin/runonmine-desktop
+          ./scripts/acceptance/desktop-parity-smoke.sh /usr/bin/runonmine-desktop
           sudo dpkg --remove runonmine-desktop
           test ! -e /usr/bin/runonmine-desktop
           test ! -e /usr/share/applications/runonmine-desktop.desktop
@@ -127,7 +125,7 @@ jobs:
           python3 scripts/acceptance/write-artifact-preflight.py \
             --platform linux-desktop-x86_64 --artifact "$archive" \
             --output dist/linux-desktop-x86_64-preflight.json \
-            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,deb_install,uninstall,residue_check
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,native_shell,deb_install,uninstall,residue_check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runonmine-linux-desktop-x86_64-preflight
@@ -179,10 +177,15 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-pc-windows-msvc
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-packager@0.11.8
+      - run: choco install nsis --yes --no-progress
       - name: Build native debug and run isolated acceptance
         shell: pwsh
         run: |
           cargo build --locked -p runonmine -p runonmine-agent -p runonmine-desktop
+          ./scripts/acceptance/windows-pe-resources.ps1 -Desktop target/debug/runonmine-desktop.exe
           ./scripts/acceptance/windows-smoke.ps1 `
             -RunOnMine target/debug/runonmine.exe `
             -Agent target/debug/runonmine-agent.exe `
@@ -193,6 +196,16 @@ jobs:
         run: cargo build --release --locked --target x86_64-pc-windows-msvc --workspace --exclude xtask
       - shell: pwsh
         run: cargo run --locked -p xtask -- package --target x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: cargo run --locked -p xtask -- stage-packager --target x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: cargo packager --release --config packaging/Packager.windows.toml
+      - name: Install and remove Windows desktop package
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter 'runonmine-desktop_*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Windows NSIS installer is missing' }
+          ./scripts/acceptance/windows-installer-smoke.ps1 -Installer $installer.FullName
       - name: Validate SBOM and artifact
         shell: bash
         run: |
