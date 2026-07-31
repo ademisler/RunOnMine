@@ -43,15 +43,22 @@ of an already committed owner decision.
 
 The desktop executable is a thin bootstrap. `desktop_model.rs` owns durable UI
 state, `desktop_app.rs` owns update/orchestration, `desktop_snapshot.rs` owns
-blocking effects, and `desktop_views.rs` owns the shared shell. Overview,
-approval, connector, permission, OAuth, audit and diagnostic rendering live in
-separate per-screen modules below `desktop_views/`; screen code does not perform
-blocking state refreshes. A single background snapshot performs config/secret
-recovery, SQLite and OAuth reads, incremental
-audit verification, Quick runtime discovery and a 250 ms/256 KiB-bounded
-loopback connector-health request. Snapshots never overlap; the UI only applies
-a completed value. Audit history starts at 100 records and doubles on explicit
-owner requests up to 10,000.
+blocking effects, `desktop_views.rs` owns the shared visual shell, and
+`desktop_shell.rs` owns native tray/window lifecycle. `desktop_icon.rs` supplies
+one application icon contract and `desktop_acceptance.rs` drives the isolated
+seven-view report used by all desktop platforms. macOS and Windows use
+`tray-icon`; Linux uses a freedesktop StatusNotifierItem through `ksni`, avoiding
+a GTK/AppIndicator runtime dependency. When no native tray host is available,
+the application remains a normal window whose close action exits.
+
+Overview, approval, connector, permission, OAuth, audit and diagnostic rendering
+live in separate per-screen modules below `desktop_views/`; screen code does not
+perform blocking state refreshes. A single background snapshot performs
+config/secret recovery, SQLite and OAuth reads, incremental audit verification,
+Quick runtime discovery and a 250 ms/256 KiB-bounded loopback connector-health
+request. Snapshots never overlap; the UI only applies a completed value. Audit
+history starts at 100 records and doubles on explicit owner requests up to
+10,000.
 
 Connector lifecycle from the direct-loopback endpoint is rendered as typed
 configured/starting/ready/backoff/degraded/stale-credential/failed/stopped

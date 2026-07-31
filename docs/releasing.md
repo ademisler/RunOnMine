@@ -9,8 +9,8 @@ Before creating a tag:
 
 1. run `cargo run --locked -p xtask -- verify` without skipping the secret scan;
 2. keep headless line coverage at or above the enforced baseline and review the latest scheduled fuzz run;
-3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, and Windows x86_64 builds;
-4. complete install, restart, connect, tool-call, lock, and uninstall acceptance on a Mac, clean Linux VPS, and Windows VM;
+3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, Linux x86_64 desktop, and Windows x86_64 builds;
+4. complete install, restart, connect, tool-call, lock, and uninstall acceptance on a Mac, clean Linux VPS, clean Linux desktop, and Windows VM;
 5. confirm no MacMCP service, file, or port was changed;
 6. record evidence in `acceptance/release-gates.toml` and pass `cargo run --locked -p xtask -- release-readiness --profile private-beta`;
 7. present remaining risks and the secret-scan result to the repository owner.
@@ -33,7 +33,8 @@ It produces:
 
 - cargo-dist portable archives for supported target triples;
 - a universal macOS DMG;
-- Linux x86_64 and aarch64 DEB packages;
+- Linux x86_64 and aarch64 headless DEB packages;
+- a standalone Linux x86_64 desktop DEB containing all four binaries;
 - a Windows x86_64 NSIS installer;
 - combined unsigned portable archives with an exact target-specific binary manifest;
 - CycloneDX JSON SBOMs containing component references, dependency edges, Cargo.lock package checksums where available, and the Cargo.lock integrity hash;
@@ -45,7 +46,17 @@ The workflow opens a draft prerelease only. Artifacts are deliberately unsigned 
 
 `CI` runs one consolidated Linux quality job on the hardened self-hosted runner. It executes `xtask verify --headless` (formatting, version consistency, headless Clippy/tests, both dependency audits, dependency policy, and the complete-history Gitleaks scan), the desktop crate's no-UI contract, and the enforced coverage baseline in one checkout. The job uses an ephemeral Cargo target directory and removes it even after failure, avoiding repeated clean builds and stale runner disk growth. Independent `Security` and `Coverage` workflows remain available for manual dispatch and scheduled sweeps.
 
-`Platform CI` is separate from the self-hosted quality path. The full desktop-enabled macOS/Windows and ARM headless matrix runs for manual dispatches, or on pull requests when the repository variable `ENABLE_GITHUB_HOSTED_PLATFORM_CI` is set to `true`. This guard prevents account billing or spending-limit failures from appearing as product failures while keeping the full matrix ready to enable without changing workflow code. Linux desktop UI dependencies are intentionally not part of the product's headless Linux target.
+`Platform CI` is separate from the self-hosted quality path. Its macOS
+arm64/x86_64, Windows x86_64, and Linux ARM64 jobs run on every pull request and
+on manual dispatch; there is no repository-variable skip guard. `Artifact
+preflight` runs on every push to `main` and on manual dispatch, adding hosted
+Linux x86/ARM, Linux desktop, macOS universal, and Windows package validation.
+Linux desktop UI dependencies remain outside the headless Linux target.
+
+A hosted job that ends before checkout with no runner name and an empty step list
+is an infrastructure-allocation failure, not product acceptance evidence. Do not
+record it as a passed or failed application test, and do not infer a billing
+cause unless GitHub reports that cause explicitly.
 
 ## Local packaging helpers
 
@@ -53,15 +64,15 @@ The workflow opens a draft prerelease only. Artifacts are deliberately unsigned 
 cargo run --locked -p xtask -- verify
 cargo run --locked -p xtask -- release-readiness --profile private-beta
 cargo run --locked -p xtask -- sync-versions
-cargo run -p xtask -- package --target <rust-target>
-cargo run -p xtask -- stage-packager --target <rust-target>
-cargo run -p xtask -- checksums
+cargo run --locked -p xtask -- package --target <rust-target>
+cargo run --locked -p xtask -- stage-packager --target <rust-target>
+cargo run --locked -p xtask -- checksums
 ```
 
 On macOS, after building both architectures:
 
 ```console
-cargo run -p xtask -- universal-macos
+cargo run --locked -p xtask -- universal-macos
 ```
 
 The packaging helpers accept only validated target names and operate below the
@@ -86,7 +97,7 @@ uninstall commands and are never silently removed by a per-user purge.
 the workflow. Substring or suffixed targets are rejected. Every archive has a
 CycloneDX 1.6 SBOM containing the Cargo.lock SHA-256, exact target, source
 revision, included binary manifest, components and dependency graph. Run
-`cargo run -p xtask -- validate-sbom --path <file> --target <exact-target>`
+`cargo run --locked -p xtask -- validate-sbom --path <file> --target <exact-target>`
 before upload.
 
 `python3 scripts/release/check-duplicate-dependencies.py` is a ratchet: new
@@ -94,13 +105,16 @@ duplicate package names or versions fail, while intentional removals are
 accepted. Update the baseline only after reviewing platform compatibility and
 audit/binary-size impact.
 
-Public-beta publication is fail-closed when Apple signing/notary or Windows
-signing material is missing. Private-beta artifacts remain explicitly unsigned.
+Private-beta artifacts remain explicitly unsigned. Public-beta packaging is
+hard-blocked until checked-in Apple signing/notarization and Windows Authenticode
+steps exist; merely supplying secret values is not accepted as signing evidence.
 Do not relabel unsigned artifacts as public candidates.
 
 ## Clean-install evidence
 
-Copy `acceptance/evidence/clean-install.template.json` for each produced OS and
+Copy `acceptance/evidence/clean-install.template.json` for headless artifacts
+or `acceptance/evidence/clean-install.desktop.template.json` for desktop
+artifacts, then
 artifact, fill the real SHA-256, source revision, tester, timestamp and evidence
 references, then run:
 
@@ -124,15 +138,19 @@ scripts/release/branch-protection.sh check
 The policy requires strict Linux quality, platform matrix and dependency-review
 checks, one CODEOWNERS-approved review, conversation resolution and linear
 history, and disables force-push and deletion. Review the exact GitHub check names
-before applying after workflow renames.
+before applying after workflow renames. On private repositories where the current
+GitHub plan returns HTTP 403 for branch protection, leave the machine-readable
+gate blocked rather than claiming the policy is active.
 
 See [release-rollback.md](release-rollback.md) for rollback and downgrade rules.
 
 ## Artifact preflight versus release acceptance
 
-The `Artifact preflight` workflow runs on fresh hosted Linux x86/ARM, macOS and
-Windows runners and records build, checksum/SBOM, setup, agent, MCP, owner-approved
-tool call, desktop launch where applicable, uninstall and residue checks. Its
+When GitHub assigns its hosted runners, the `Artifact preflight` workflow runs
+on fresh Linux x86/ARM, Linux desktop, macOS, and Windows images and records
+build, checksum/SBOM, setup, agent, MCP, owner-approved tool call, desktop launch
+where applicable, uninstall, and residue checks. A job with no assigned runner
+or executed steps produces no acceptance evidence. Its
 report type is `artifact_preflight_not_release_acceptance` and explicitly does
 not claim an operating-system reboot, publisher signature or notarization.
 Those items remain required evidence for the release clean-install gate.

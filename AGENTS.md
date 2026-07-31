@@ -18,6 +18,7 @@ Use Rust `1.95.0` from `rust-toolchain.toml` and keep `Cargo.lock` committed.
 Before opening a pull request, run:
 
 ```console
+python3 scripts/ci/check-docs.py
 cargo run --locked -p xtask -- verify
 ```
 
@@ -35,4 +36,4 @@ Dependency advisories are release blockers. Do not add an advisory exception wit
 - Update `README.md`, `CHANGELOG.md`, and the relevant file under `docs/` when behavior changes.
 - Do not commit generated `target/`, local state databases, credentials, browser profiles, release artifacts, or machine-specific configuration.
 - Keep the repository private unless the owner explicitly changes that decision.
-- Do not change the current CI runner strategy without an explicit owner request; migration to GitHub-hosted runners is planned separately.
+- Do not change the consolidated self-hosted Linux quality and scheduled-job runner strategy without an explicit owner request; migration of those Linux jobs is planned separately.

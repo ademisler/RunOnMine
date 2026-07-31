@@ -10,8 +10,11 @@ REQUIRED_STEPS = {
     "connector", "uninstall", "residue_check"
 }
 SUPPORTED = {
-    "macos-universal", "linux-x86_64", "linux-aarch64", "windows-x86_64"
+    "macos-universal", "linux-x86_64", "linux-aarch64",
+    "linux-desktop-x86_64", "windows-x86_64"
 }
+DESKTOP_REQUIRED_STEPS = {"desktop_launch", "desktop_views", "native_shell"}
+MACOS_REQUIRED_STEPS = {"native_slice_launch", "rosetta_slice_launch"}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
@@ -21,7 +24,12 @@ def fail(message):
 def main(path):
     data=json.loads(pathlib.Path(path).read_text())
     if data.get("schema_version") != 1: fail("schema_version must be 1")
-    if data.get("platform") not in SUPPORTED: fail("unsupported platform")
+    platform=data.get("platform")
+    if platform not in SUPPORTED: fail("unsupported platform")
+    artifact=data.get("artifact")
+    if (not isinstance(artifact,str) or not artifact.strip()
+            or pathlib.Path(artifact).name != artifact):
+        fail("artifact must be a non-empty basename")
     if not HEX64.fullmatch(data.get("artifact_sha256", "")): fail("artifact_sha256")
     if not HEX40.fullmatch(data.get("source_revision", "")): fail("source_revision")
     if not isinstance(data.get("tester"), str) or len(data["tester"].strip()) < 2: fail("tester")
@@ -36,7 +44,12 @@ def main(path):
         if step.get("status") != "passed": fail(f"{step_id} is not passed")
         evidence=step.get("evidence")
         if not isinstance(evidence,str) or not evidence.strip(): fail(f"{step_id} evidence missing")
-    missing=REQUIRED_STEPS-set(ids)
+    required=set(REQUIRED_STEPS)
+    if platform in {"macos-universal", "linux-desktop-x86_64", "windows-x86_64"}:
+        required.update(DESKTOP_REQUIRED_STEPS)
+    if platform == "macos-universal":
+        required.update(MACOS_REQUIRED_STEPS)
+    missing=required-set(ids)
     if missing: fail(f"missing steps: {sorted(missing)}")
     if len(ids) != len(set(ids)): fail("duplicate step IDs")
     residues=data.get("residues")

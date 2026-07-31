@@ -7,6 +7,7 @@ profiles, logs, or generated MCP URLs to the repository.
 Before opening a pull request, run:
 
 ```console
+python3 scripts/ci/check-docs.py
 cargo run --locked -p xtask -- verify
 ```
 
@@ -24,7 +25,9 @@ approval, audit, lock, uninstall, secret, or path behavior:
 
 Changes to authentication, policy evaluation, privileged IPC, process
 execution, filesystem boundaries, or browser profile handling must include a
-security regression test and an update to the threat model.
+security regression test and an update to the threat model. Changes to CLI
+syntax, package ownership, platform behavior, CI matrices, coverage thresholds,
+or release gates must update the relevant document and the documentation index.
 
 Application logic must remain Rust. JavaScript, TypeScript, Python, and shell
 scripts are not accepted as runtime components. YAML, Markdown, and TOML are

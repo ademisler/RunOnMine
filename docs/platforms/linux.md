@@ -22,7 +22,7 @@ capture:
 
 ```console
 sudo apt-get install --yes --no-install-recommends \
-  dbus-x11 pkg-config xvfb \
+  dbus-x11 desktop-file-utils pkg-config xvfb \
   libdrm-dev libegl1-mesa-dev libgbm-dev \
   libpipewire-0.3-dev libspa-0.2-dev \
   libwayland-dev libx11-dev libxcb1-dev \
@@ -49,25 +49,48 @@ runonmine-desktop
 ```
 
 The desktop emergency lock calls the current user's `runonmine lock`; it does
-not request the root-only `--system` path.
+not request the root-only `--system` path. Although the package contains
+`runonmine-helper`, it does not install, register, or activate the privileged
+helper service.
+
+Package removal and application-data removal are separate operations:
+
+Choose one service/data lifecycle, then remove any separately installed helper
+and finally remove the package:
+
+```console
+runonmine uninstall
+# Alternative: runonmine uninstall --purge --confirm PURGE
+# If applicable: sudo runonmine admin uninstall
+sudo apt remove runonmine-desktop
+```
+
+The package manager removes package-owned binaries, the menu entry, the icon,
+and packaged resources. It does not own or delete per-user XDG configuration,
+state, logs, browser profiles, or credential-store entries. `runonmine
+uninstall` removes the per-user service while retaining those data; the explicit
+purge command removes application data and connector secrets but still does not
+silently uninstall the separately elevated helper or Linux system service.
 
 The platform-independent smoke renders all seven control-center views in an
 isolated D-Bus/Xvfb session and writes a privacy-bounded JSON contract:
 
 ```console
 ./scripts/acceptance/desktop-parity-smoke.sh \
-  "$PWD/target/release/runonmine-desktop"
+  "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
 ```
 
-On a real X11 desktop, validate StatusNotifier registration, window-manager
-close-to-tray behavior, tray activation, and clean tray removal with:
+On a real X11 desktop, install `wmctrl`, `xdotool`, `libglib2.0-bin`, and the
+normal systemd/D-Bus tools, then validate StatusNotifier registration,
+window-manager close-to-tray behavior, tray activation, and clean tray removal
+with:
 
 ```console
 DISPLAY=:0 \
 XAUTHORITY="$HOME/.Xauthority" \
 DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus" \
 ./scripts/acceptance/linux-desktop-session-smoke.sh \
-  "$PWD/target/release/runonmine-desktop"
+  "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
 ```
 
 ## Per-user service

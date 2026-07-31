@@ -161,7 +161,7 @@ jobs:
           python3 scripts/acceptance/write-artifact-preflight.py \
             --platform macos-universal --artifact "$archive" \
             --output dist/macos-universal-preflight.json \
-            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,uninstall,residue_check
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,uninstall,residue_check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runonmine-macos-universal-preflight
@@ -216,7 +216,7 @@ jobs:
           python scripts/acceptance/write-artifact-preflight.py \
             --platform windows-x86_64 --artifact "$archive" \
             --output dist/windows-x86_64-preflight.json \
-            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,uninstall,residue_check
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,native_shell,nsis_install,uninstall,residue_check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runonmine-windows-x86_64-preflight

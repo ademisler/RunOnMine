@@ -26,16 +26,40 @@ It exercises setup, policy display, connector listing, approval and audit reads,
 emergency lock, destructive confirmation, and purge without touching the real
 user configuration or credential store.
 
-Windows has the equivalent harness:
+Windows has the equivalent CLI/MCP harness:
 
 ```powershell
-.\scripts\acceptance\windows-smoke.ps1 -RunOnMine .\target\debug\runonmine.exe
+.\scripts\acceptance\windows-smoke.ps1 `
+  -RunOnMine .\target\debug\runonmine.exe `
+  -Agent .\target\debug\runonmine-agent.exe `
+  -Desktop .\target\debug\runonmine-desktop.exe `
+  -McpClient .\scripts\acceptance\mcp-http-smoke.py
 ```
+
+Desktop binaries have a separate seven-view parity contract. On Linux, build to
+an explicit target directory and run:
+
+```console
+cargo build --release --locked --target x86_64-unknown-linux-gnu \
+  -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
+./scripts/acceptance/desktop-parity-smoke.sh \
+  "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
+```
+
+The physical X11 tray lifecycle and Windows native-window/NSIS procedures are
+specified in [testing](testing.md) and the platform documents. Wine is
+supplemental Windows compatibility evidence, not physical Windows acceptance.
 
 ## Clean-machine acceptance
 
 For each release artifact, record the exact artifact SHA-256, operating system,
-architecture, install command, and tester. Use a disposable machine or VM.
+architecture, install command, and tester. Use a disposable machine or VM. Start
+from `acceptance/evidence/clean-install.template.json` for headless packages or
+`acceptance/evidence/clean-install.desktop.template.json` for desktop packages,
+then validate the completed file with
+`scripts/release/validate-clean-install-evidence.py`. Desktop platforms require
+explicit launch, seven-view, and native-shell evidence; universal macOS evidence
+also requires native and Rosetta slice launches.
 
 1. Verify the artifact and SBOM checksums.
 2. Install the package and launch both CLI and desktop application where supported.
@@ -49,7 +73,9 @@ architecture, install command, and tester. Use a disposable machine or VM.
    removed or deliberately retained according to the documented mode.
 9. Confirm the existing MacMCP port, services, files, and configuration were not changed.
 
-Inspect a portable archive and SBOM with:
+Inspect a portable archive and SBOM with the matching package prefix. The
+standalone Linux desktop files use `runonmine-desktop-...`; headless and
+macOS/Windows portable archives use `runonmine-...`:
 
 ```console
 ./scripts/acceptance/package-inspect.sh \
@@ -74,9 +100,11 @@ The fuzz harness has its own committed lockfile and is scanned by the security w
 
 ## Artifact preflight versus release acceptance
 
-The `Artifact preflight` workflow runs on fresh hosted Linux x86/ARM, macOS and
-Windows runners and records build, checksum/SBOM, setup, agent, MCP, owner-approved
-tool call, desktop launch where applicable, uninstall and residue checks. Its
+When GitHub assigns its hosted runners, the `Artifact preflight` workflow runs
+on fresh Linux x86/ARM, Linux desktop, macOS, and Windows images and records
+build, checksum/SBOM, setup, agent, MCP, owner-approved tool call, desktop launch
+where applicable, uninstall, and residue checks. A job that ends before checkout
+with no assigned runner and no executed steps is not acceptance evidence. Its
 report type is `artifact_preflight_not_release_acceptance` and explicitly does
 not claim an operating-system reboot, publisher signature or notarization.
 Those items remain required evidence for the release clean-install gate.

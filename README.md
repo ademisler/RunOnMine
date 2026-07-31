@@ -2,8 +2,9 @@
 
 **Let AI work on the machines you own.**
 
-RunOnMine is an open-source, local-first MCP agent that lets AI assistants use
-files, terminals, browsers, and desktop applications on machines you own. The
+RunOnMine is a local-first MCP agent intended for an open-source release. It lets
+AI assistants use files, terminals, browsers, and desktop applications on
+machines you own. The
 AI model stays in the chosen AI service; approved tool calls run on your macOS,
 Linux, or Windows machine.
 
@@ -206,16 +207,24 @@ execution capabilities.
 
 Requirements:
 
-- Stable Rust, selected by `rust-toolchain.toml` (MSRV 1.95 documented in `Cargo.toml`);
-- the platform C/C++ toolchain required by bundled SQLite and desktop crates.
+- Rust 1.95.0 selected by `rust-toolchain.toml`, including `rustfmt` and `clippy`;
+- the platform C/C++ toolchain required by bundled SQLite and desktop crates;
+- `cargo-audit`, `cargo-deny`, and Gitleaks for the complete local verification;
+- Python 3 for documentation, acceptance-evidence, and coverage validation scripts.
+
+A headless Linux build uses `--no-default-features` and does not need desktop
+libraries. A Linux desktop build needs the packages listed in
+[`docs/platforms/linux.md`](docs/platforms/linux.md).
 
 ```console
 cargo run --locked -p xtask -- verify
 ```
 
 Use `--headless` on a Linux/VPS development host and `--skip-secret-scan` only
-when Gitleaks is unavailable locally. CI separately enforces a 45% headless line
-coverage floor and runs scheduled parser/policy fuzz targets. The isolated CLI
+when Gitleaks is unavailable locally. CI separately enforces 70% global headless
+line coverage, 90% coverage in policy/auth/storage/approval-critical modules,
+and 80% of changed executable lines. It also runs scheduled fuzz and mutation
+targets. The isolated CLI
 acceptance smoke test is available as:
 
 ```console
@@ -261,17 +270,25 @@ be committed.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Connection modes](docs/connections.md)
-- [Connector provenance and key rotation](docs/connector-provenance.md)
-- [Tools](docs/tools.md)
-- [Platform installation](docs/platforms/macos.md)
-- [Linux and VPS](docs/platforms/linux.md)
-- [Windows](docs/platforms/windows.md)
-- [Release process](docs/releasing.md)
-- [Release acceptance](docs/acceptance.md)
-- [Self-hosted CI runner](docs/ci-runner.md)
-- [Troubleshooting](docs/troubleshooting.md)
+Start with the [complete documentation index](docs/README.md).
+
+- Product internals: [architecture](docs/architecture.md),
+  [connection modes](docs/connections.md), and [MCP tools](docs/tools.md).
+- Security: [permissions](docs/permissions.md),
+  [threat model](docs/threat-model.md),
+  [browser security](docs/browser-security.md),
+  [audit integrity](docs/audit-security.md),
+  [privileged helper](docs/admin-helper.md), and
+  [connector provenance](docs/connector-provenance.md).
+- Platforms: [macOS](docs/platforms/macos.md),
+  [Linux and VPS](docs/platforms/linux.md), and
+  [Windows](docs/platforms/windows.md).
+- Quality and release: [testing](docs/testing.md),
+  [release acceptance](docs/acceptance.md),
+  [release process](docs/releasing.md),
+  [rollback](docs/release-rollback.md), and
+  [self-hosted CI runner](docs/ci-runner.md).
+- Operations: [troubleshooting](docs/troubleshooting.md).
 
 ## License
 

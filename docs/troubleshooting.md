@@ -123,3 +123,38 @@ account.
 
 RunOnMine never uses port `45799` and does not own `com.idemasler.macmcp.*`.
 A problem with the separate MacMCP service must be diagnosed independently.
+
+
+## Desktop window or tray integration
+
+Open the Diagnostics screen first. It reports the platform, native shell
+availability, close behavior, application icon state, and Open/Lock/Quit action
+contract. A Linux session without a StatusNotifierItem host intentionally falls
+back to a normal window that exits on close; this is different from a tray
+registration failure in a supported Xfce/KDE-style session.
+
+For an isolated Linux render check, use the target-specific binary path:
+
+```console
+./scripts/acceptance/desktop-parity-smoke.sh \
+  "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
+```
+
+For a real X11 tray lifecycle, ensure `DISPLAY`, `XAUTHORITY`,
+`XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS` belong to the same logged-in
+user, and install `wmctrl`, `xdotool`, and `libglib2.0-bin` before running
+`linux-desktop-session-smoke.sh`. Do not point an acceptance run at another
+user's real RunOnMine data; the scripts create isolated XDG directories.
+
+On Windows, use `windows-pe-resources.ps1` to distinguish a missing icon,
+manifest, version resource, or GUI subsystem from a runtime tray problem. Use
+`windows-installer-smoke.ps1` only on a disposable account without an existing
+RunOnMine installation or user-data root.
+
+## Hosted workflow failed before checkout
+
+Inspect the job's runner name and step list. If the job completed with no runner
+assigned and no steps executed, no source was checked out and no RunOnMine test
+ran. Keep release acceptance blocked, retry after hosted capacity/account access
+is restored, and avoid attributing the cause to billing or product code unless
+GitHub provides that diagnosis explicitly.

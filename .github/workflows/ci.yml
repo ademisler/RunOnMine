@@ -35,6 +35,12 @@ jobs:
           persist-credentials: false
       - name: Verify isolated runner environment
         run: ./scripts/ci/verify-runner-environment.sh
+      - name: Validate repository documentation
+        run: python3 scripts/ci/check-docs.py
+      - name: Validate clean-install evidence templates
+        run: |
+          python3 scripts/release/validate-clean-install-evidence.py acceptance/evidence/clean-install.template.json
+          python3 scripts/release/validate-clean-install-evidence.py acceptance/evidence/clean-install.desktop.template.json
       - name: Configure ephemeral Cargo target
         run: |
           target="${RUNNER_TEMP}/runonmine-quality-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

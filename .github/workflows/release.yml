@@ -40,7 +40,7 @@ jobs:
       - run: cargo run --locked -p xtask -- verify-release-tag --tag "${{ github.ref_name }}"
       - run: cargo run --locked -p xtask -- release-readiness --profile "${RELEASE_PROFILE}"
       - run: python3 scripts/release/check-duplicate-dependencies.py
-      - name: Fail closed when public signing material is absent
+      - name: Verify configured public signing inputs
         if: env.RELEASE_PROFILE == 'public-beta'
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
@@ -54,6 +54,11 @@ jobs:
           test -n "$APPLE_NOTARY_KEY"
           test -n "$WINDOWS_SIGNING_PFX"
           test -n "$WINDOWS_SIGNING_PASSWORD"
+      - name: Block public beta until signing is implemented
+        if: env.RELEASE_PROFILE == 'public-beta'
+        run: |
+          echo "Public beta is blocked: checked-in Apple signing/notarization and Windows Authenticode steps are not implemented." >&2
+          exit 1
       - run: dist plan --output-format=json
 
   macos-universal:

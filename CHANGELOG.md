@@ -5,12 +5,14 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Audit the complete documentation set against CLI help, package manifests, acceptance scripts, and workflows; add a comprehensive documentation index plus automated relative-link, anchor, index-coverage, stale-claim, MCP-tool-inventory, and headless/desktop clean-install evidence-template validation to Linux CI.
+- Correct platform build paths, coverage thresholds, unconditional hosted-platform CI semantics, Windows retained-data uninstall wording, and hosted-runner pre-start evidence handling. Hard-block public-beta packaging until checked-in Apple and Windows signing steps exist instead of treating secret presence as signing evidence.
 - Bring the Linux and Windows control centers to the macOS desktop contract: one seven-screen UI, native Open/Lock/Quit tray actions, dynamic tray status, application icons, close-to-tray behavior, and an in-app Diagnostics integration card. Linux uses freedesktop StatusNotifierItem without GTK/AppIndicator; Windows release binaries use the GUI subsystem.
 - Add deterministic cross-platform desktop reports, isolated seven-view Xvfb acceptance, physical Xfce StatusNotifier close/reopen acceptance, real-window/WM_CLOSE Windows acceptance, and current-user NSIS install/uninstall residue checks. GNU/Wine remains explicit supplemental Windows compatibility evidence.
 - Add Windows application and installer artwork, English/French/Turkish NSIS UI, HKCU current-user installation, Start Menu/desktop shortcuts, and explicit cleanup of standard RunOnMine roaming/local application-data roots when the user elects to remove app data.
 - Make MCP HTTP acceptance own and terminate the real agent PID, with bounded TERM/KILL cleanup, so successful smoke runs cannot orphan listeners or deleted temporary state.
 - Add a standalone Linux x86_64 desktop DEB with all four RunOnMine binaries, a freedesktop menu entry and icon, four-binary SBOM/archive provenance, Xvfb launch acceptance, and real install/remove preflight coverage.
-- Compile tray integration only on macOS and Windows so the Linux control center builds without GTK/AppIndicator, and keep Linux emergency lock scoped to the current user service.
+- Keep `tray-icon` target-specific to macOS/Windows, use `ksni` StatusNotifierItem integration on Linux without GTK/AppIndicator, and keep Linux emergency lock scoped to the current user service.
 
 - Restore macOS desktop compilation by declaring its direct Serde dependency and remove platform-only warning regressions exposed by full-feature Clippy.
 - Make every cargo-packager 0.11.8 configuration self-identifying and resolve license, binary, output, and resource paths from the configuration directory; add an xtask regression gate for this contract.
@@ -114,7 +116,7 @@ pre-release development and does not yet provide compatibility guarantees.
 - Deny private and non-routable browser destinations by default, with an explicit local-network opt-in.
 - Rate-limit dynamic OAuth client registration, cap registered clients, and prune expired OAuth state.
 - Add an emergency lock that stops access, denies pending approvals, clears temporary grants, revokes OAuth state, rotates Quick Tunnel secrets, and removes OpenAI runtime keys.
-- Harden the temporary self-hosted CI runner with a dedicated unprivileged account; migration to GitHub-hosted runners remains planned.
+- Harden the dedicated self-hosted Linux quality runner with an unprivileged account while keeping macOS, Windows, ARM, and artifact preflight on GitHub-hosted runners.
 
 ### User experience
 
@@ -135,7 +137,7 @@ pre-release development and does not yet provide compatibility guarantees.
 - Extract Cloudflare/OpenAI connector process supervision, Quick Tunnel runtime discovery, and private connector artifact handling into a dedicated module with permission and symlink regression tests.
 - Extract loopback HTTP transport, connector authentication, OAuth host routing, and MCP session bindings from the MCP tool implementation into a dedicated module with direct boundary tests.
 - Pin and verify the isolated self-hosted runner account, HOME, Cargo homes, captured environment files, and cross-user PATH boundaries in every self-hosted workflow.
-- Consolidate pull-request Linux quality gates into one ephemeral self-hosted job while retaining scheduled security/coverage sweeps and the opt-in hosted platform matrix.
+- Consolidate pull-request Linux quality gates into one ephemeral self-hosted job while retaining scheduled security/coverage sweeps and the unconditional hosted platform matrix.
 - Extract per-principal MCP rate limiting into a dedicated module with deterministic limit, isolation, expiry, and fail-closed regression tests.
 - Extract MCP session limits, idle expiry, and protocol session tracking into a dedicated lifecycle module with direct permit-release regression coverage.
 - Add a unified `xtask verify` command, machine-readable release acceptance gates, clean-machine smoke scripts, enforced coverage, scheduled fuzzing, and tested desktop layout breakpoints.

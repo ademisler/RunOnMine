@@ -2,7 +2,7 @@ schema = 1
 
 [[gate]]
 id = "macos-clean-install"
-description = "Install, restart, connect, execute an approved tool call, uninstall, and verify cleanup on a clean supported macOS machine."
+description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, retained-data uninstall, full purge, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
 evidence = "Attach the completed acceptance report and artifact SHA-256."
@@ -14,19 +14,27 @@ status = "pending"
 required_for = ["private-beta", "public-beta"]
 evidence = "Attach systemd status, smoke-test output, and cleanup verification."
 
+
+[[gate]]
+id = "linux-desktop-clean-install"
+description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
+status = "pending"
+required_for = ["private-beta", "public-beta"]
+evidence = "Attach the exact DEB/SBOM checksums, desktop-session report, MCP acceptance, uninstall output, and rebooted clean-host evidence."
+
 [[gate]]
 id = "windows-clean-install"
-description = "Install on a clean Windows x86_64 VM, validate Scheduled Task and optional helper boundaries, execute an approved tool call, and uninstall."
+description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
 evidence = "Attach the Windows acceptance report and installer checksum."
 
 [[gate]]
 id = "hosted-platform-matrix"
-description = "Run the macOS ARM64/Intel, Windows x86_64, and Linux ARM64 hosted CI matrix for the release commit."
+description = "Run the macOS ARM64/Intel, Windows x86_64, Linux ARM64, and clean-image artifact-preflight matrix including Linux desktop for the release commit."
 status = "blocked"
 required_for = ["private-beta", "public-beta"]
-evidence = "Blocked by the current GitHub hosted-runner billing/spending limit."
+evidence = "Recent jobs ended before checkout with no assigned runner and no executed steps. Retry after hosted runner allocation is restored; do not infer a billing cause without an explicit GitHub diagnosis."
 
 [[gate]]
 id = "windows-helper-security-review"
@@ -61,4 +69,4 @@ id = "protected-main"
 description = "Enforce pull requests, required checks, and review rules on main."
 status = "blocked"
 required_for = ["public-beta"]
-evidence = "The current private-repository GitHub plan does not expose branch protection or rulesets."
+evidence = "The branch-protection check currently returns HTTP 403 requiring GitHub Pro or a public repository. Keep this gate blocked until the policy can be applied and verified."

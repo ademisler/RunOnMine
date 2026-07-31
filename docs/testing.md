@@ -1,5 +1,21 @@
 # Testing
 
+## Documentation validation
+
+Run the repository documentation contract after changing Markdown, workflows,
+package manifests, acceptance commands, or release gates:
+
+```console
+python3 scripts/ci/check-docs.py
+```
+
+The checker validates relative links, Markdown anchors, and referenced repository
+script/package/evidence paths; requires the complete document index to cover
+every file below `docs/`; and rejects known stale claims
+about coverage, hosted-platform guards, target-specific desktop paths, and hosted
+runner failure causes. It also requires `docs/tools.md` to match every MCP tool
+declaration in source. The Linux quality workflow runs the same check before the
+Rust quality gates.
 
 ## CI platform and coverage contracts
 
@@ -111,8 +127,9 @@ sends `WM_CLOSE`; Win32 `IsWindowVisible` must become false while the process
 continues in the notification area. The NSIS preflight then performs a silent
 current-user install, checks HKCU uninstall metadata, all four binaries, Start
 Menu and desktop shortcuts, runs the installed desktop acceptance, silently
-uninstalls, and verifies that the registry record, install directory, and
-shortcuts are gone.
+uninstalls, and verifies that the registry record, package-owned binaries,
+uninstaller, and shortcuts are gone. Per-user application data must remain by
+default, so the parent RunOnMine directory is not required to disappear.
 
 A real Windows runner is authoritative for this acceptance. A Wine x86_64 run
 is useful supplemental evidence for PE launch, tray creation, seven-view
