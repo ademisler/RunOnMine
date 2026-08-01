@@ -702,6 +702,14 @@ fn copy_capped(reader: &mut impl Read, writer: &mut impl Write, limit: usize) ->
     Ok(())
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        clippy::unnecessary_wraps,
+        reason = "executable mode changes are Unix-only while connector installation keeps one fallible interface"
+    )
+)]
 fn make_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

@@ -418,6 +418,10 @@ mod tests {
     }
 
     #[cfg(not(unix))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Unix test-directory mode hardening is intentionally a no-op on Windows"
+    )]
     fn restrict_test_directory(_path: &Path) -> Result<()> {
         Ok(())
     }
