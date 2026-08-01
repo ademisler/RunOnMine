@@ -32,6 +32,8 @@ secrecy.workspace = true
 # control center on Direct3D 12 only, including the system WARP fallback.
 eframe = { workspace = true, optional = true, features = ["wgpu_no_default_features"] }
 tray-icon = { workspace = true, optional = true }
+# `gpu-allocator` accepts several incompatible pre-1.0 `windows` releases.
+# Cargo.lock pins its edge to the same 0.62 line used by wgpu-hal.
 wgpu = { workspace = true, optional = true, features = ["dx12"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
