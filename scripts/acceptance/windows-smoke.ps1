@@ -7,26 +7,22 @@ param(
 $ErrorActionPreference = "Stop"
 . "$(Join-Path $PSScriptRoot "windows-desktop-acceptance.ps1")"
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-acceptance-" + [guid]::NewGuid())
-$sandboxHome = Join-Path $root "home"
+$pathsRoot = Join-Path $root "runonmine"
 $project = Join-Path $root "project"
 $agentProcess = $null
-New-Item -ItemType Directory -Force -Path $sandboxHome, $project | Out-Null
+New-Item -ItemType Directory -Force -Path $pathsRoot, $project | Out-Null
 
 $old = @{
-    HOME = $env:HOME
-    USERPROFILE = $env:USERPROFILE
-    APPDATA = $env:APPDATA
-    LOCALAPPDATA = $env:LOCALAPPDATA
     RUNONMINE_TEST_FILE_SECRETS = $env:RUNONMINE_TEST_FILE_SECRETS
+    RUNONMINE_TEST_PATHS_ROOT = $env:RUNONMINE_TEST_PATHS_ROOT
+    RUNONMINE_AGENT_STATUS_FILE = $env:RUNONMINE_AGENT_STATUS_FILE
     RUNONMINE_MASTER_KEY = $env:RUNONMINE_MASTER_KEY
     RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT
 }
 try {
-    $env:HOME = $sandboxHome
-    $env:USERPROFILE = $sandboxHome
-    $env:APPDATA = Join-Path $root "appdata"
-    $env:LOCALAPPDATA = Join-Path $root "localappdata"
     $env:RUNONMINE_TEST_FILE_SECRETS = "1"
+    $env:RUNONMINE_TEST_PATHS_ROOT = $pathsRoot
+    $env:RUNONMINE_AGENT_STATUS_FILE = Join-Path $root "agent-runtime.json"
     $env:RUNONMINE_MASTER_KEY = -join ((1..32 | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 }) | ForEach-Object { $_.ToString("x2") })
 
     (& $RunOnMine setup --root $project | Out-String) | Select-String -SimpleMatch "RunOnMine is initialized." | Out-Null

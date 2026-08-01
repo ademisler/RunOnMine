@@ -44,10 +44,10 @@ impl IsolatedCli {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_runonmine"));
         command
-            .env("HOME", &self.home)
-            .env("USERPROFILE", &self.home)
-            .env("APPDATA", self.root.path().join("appdata"))
-            .env("LOCALAPPDATA", self.root.path().join("localappdata"))
+            .env(
+                "RUNONMINE_TEST_PATHS_ROOT",
+                self.root.path().join("runonmine"),
+            )
             .env("XDG_CONFIG_HOME", self.root.path().join("xdg-config"))
             .env("XDG_STATE_HOME", self.root.path().join("xdg-state"))
             .env("XDG_DATA_HOME", self.root.path().join("xdg-data"))
@@ -55,6 +55,12 @@ impl IsolatedCli {
             .env("RUNONMINE_MASTER_KEY", TEST_MASTER_KEY)
             .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("XDG_RUNTIME_DIR");
+        #[cfg(not(windows))]
+        command
+            .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("APPDATA", self.root.path().join("appdata"))
+            .env("LOCALAPPDATA", self.root.path().join("localappdata"));
         command
     }
 
