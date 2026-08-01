@@ -32,8 +32,13 @@ using System;
 using System.Runtime.InteropServices;
 namespace RunOnMine {
     public static class PeIcon {
-        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        public static extern IntPtr LoadImage(IntPtr instance, string name, uint type, int width, int height, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr LoadLibraryEx(string path, IntPtr file, uint flags);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool FreeLibrary(IntPtr module);
+        [DllImport("user32.dll", EntryPoint = "LoadImageW", SetLastError = true)]
+        public static extern IntPtr LoadImage(IntPtr instance, IntPtr name, uint type, int width, int height, uint flags);
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool DestroyIcon(IntPtr icon);
@@ -41,9 +46,16 @@ namespace RunOnMine {
 }
 "@
 }
-$icon = [RunOnMine.PeIcon]::LoadImage([IntPtr]::Zero, $desktopPath, 1, 32, 32, 0x10)
-if ($icon -eq [IntPtr]::Zero) { throw "PE application icon resource is missing" }
-[RunOnMine.PeIcon]::DestroyIcon($icon) | Out-Null
+$module = [RunOnMine.PeIcon]::LoadLibraryEx($desktopPath, [IntPtr]::Zero, 0x22)
+if ($module -eq [IntPtr]::Zero) { throw "PE resources could not be mapped" }
+try {
+    $icon = [RunOnMine.PeIcon]::LoadImage($module, [IntPtr]1, 1, 32, 32, 0)
+    if ($icon -eq [IntPtr]::Zero) { throw "PE application icon resource ID 1 is missing" }
+    [RunOnMine.PeIcon]::DestroyIcon($icon) | Out-Null
+}
+finally {
+    [RunOnMine.PeIcon]::FreeLibrary($module) | Out-Null
+}
 
 $mt = Get-Command mt.exe -ErrorAction SilentlyContinue
 if (-not $mt) {
