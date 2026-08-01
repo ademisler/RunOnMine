@@ -217,6 +217,10 @@ fn restrict_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shared key-creation flow is fallible on Unix and intentionally a no-op elsewhere"
+)]
 fn restrict_directory(_path: &Path) -> Result<()> {
     Ok(())
 }

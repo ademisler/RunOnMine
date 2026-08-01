@@ -344,6 +344,10 @@ fn restrict_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Unix mode hardening is a no-op on Windows while runtime persistence keeps one fallible interface"
+)]
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -355,6 +359,10 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "directory fsync is Unix-only while runtime persistence keeps one fallible interface"
+)]
 fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }

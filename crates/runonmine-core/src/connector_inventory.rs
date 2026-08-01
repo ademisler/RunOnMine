@@ -210,6 +210,13 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory fsync is Unix-only while the quarantine transaction keeps one fallible interface"
+    )
+)]
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;
