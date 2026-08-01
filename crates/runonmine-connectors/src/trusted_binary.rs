@@ -166,6 +166,7 @@ fn is_legacy_managed_binary(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
     use sha2::{Digest as _, Sha256};
