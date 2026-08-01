@@ -69,10 +69,16 @@ function Assert-RunOnMineDesktopReport {
     if (($report.native_shell_actions -join ",") -ne "show,lock,quit") {
         throw "desktop native shell action contract is incomplete"
     }
-    if (($report.default_viewport -join ",") -ne "1320,860") {
+    $defaultViewport = @($report.default_viewport)
+    if ($defaultViewport.Count -ne 2 -or
+        [double]$defaultViewport[0] -ne 1320.0 -or
+        [double]$defaultViewport[1] -ne 860.0) {
         throw "desktop default viewport contract changed"
     }
-    if (($report.minimum_viewport -join ",") -ne "1040,680") {
+    $minimumViewport = @($report.minimum_viewport)
+    if ($minimumViewport.Count -ne 2 -or
+        [double]$minimumViewport[0] -ne 1040.0 -or
+        [double]$minimumViewport[1] -ne 680.0) {
         throw "desktop minimum viewport contract changed"
     }
     if (-not $report.application_icon) {
