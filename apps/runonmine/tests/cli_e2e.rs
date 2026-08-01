@@ -16,6 +16,7 @@ const TEST_MASTER_KEY: &str = "000102030405060708090a0b0c0d0e0f10111213141516171
 
 struct IsolatedCli {
     root: TempDir,
+    #[cfg(not(windows))]
     home: PathBuf,
     project: PathBuf,
 }
@@ -36,6 +37,7 @@ impl IsolatedCli {
         }
         Ok(Self {
             root,
+            #[cfg(not(windows))]
             home,
             project,
         })
