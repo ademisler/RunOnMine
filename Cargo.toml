@@ -46,7 +46,8 @@ clap = { version = "4.5", features = ["derive", "env"] }
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 directories = "6.0"
 ed25519-dalek = "2.2"
-eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts"] }
+wgpu = { version = "29.0.4", default-features = false }
 egui = "0.35.0"
 hex = "0.4"
 hmac = "0.12"

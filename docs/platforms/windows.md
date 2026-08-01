@@ -8,9 +8,10 @@ and optional helper binary are distributed in one current-user NSIS installer.
 The Windows control center contains Overview, Approvals, Connections,
 Permissions, OAuth, Audit, and Diagnostics. It uses the native Windows
 notification area with **Open RunOnMine**, **Lock RunOnMine**, and **Quit**.
-Closing the main window hides it while the tray remains active. Release builds
-use the Windows GUI subsystem, so launching `runonmine-desktop.exe` does not open
-a console window.
+Closing the main window hides it while the tray remains active. The control
+center renders through WGPU on the native Direct3D backend, so it does not
+require an OpenGL driver. Release builds use the Windows GUI subsystem, so
+launching `runonmine-desktop.exe` does not open a console window.
 
 The executable carries the RunOnMine icon, version metadata, an `asInvoker`
 manifest, Per-Monitor V2 DPI awareness, and long-path awareness. The NSIS package:

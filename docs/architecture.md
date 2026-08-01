@@ -48,8 +48,10 @@ blocking effects, `desktop_views.rs` owns the shared visual shell, and
 one application icon contract and `desktop_acceptance.rs` drives the isolated
 seven-view report used by all desktop platforms. macOS and Windows use
 `tray-icon`; Linux uses a freedesktop StatusNotifierItem through `ksni`, avoiding
-a GTK/AppIndicator runtime dependency. When no native tray host is available,
-the application remains a normal window whose close action exits.
+a GTK/AppIndicator runtime dependency. Windows selects eframe's WGPU renderer so
+the control center uses Direct3D without depending on OpenGL; macOS and Linux
+retain Glow. When no native tray host is available, the application remains a
+normal window whose close action exits.
 
 Overview, approval, connector, permission, OAuth, audit and diagnostic rendering
 live in separate per-screen modules below `desktop_views/`; screen code does not

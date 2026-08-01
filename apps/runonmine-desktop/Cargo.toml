@@ -11,12 +11,11 @@ publish.workspace = true
 
 [features]
 default = ["desktop-ui"]
-desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon", "dep:ksni"]
+desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon", "dep:ksni", "dep:wgpu"]
 
 [dependencies]
 anyhow.workspace = true
 command-group.workspace = true
-eframe = { workspace = true, optional = true }
 egui = { workspace = true, optional = true }
 runonmine-core.workspace = true
 runonmine-oauth.workspace = true
@@ -28,10 +27,19 @@ url.workspace = true
 zeroize.workspace = true
 secrecy.workspace = true
 
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+[target.'cfg(target_os = "windows")'.dependencies]
+# eframe's full `wgpu` feature enables every graphics backend. Keep the Windows
+# control center on Direct3D 12 only, including the system WARP fallback.
+eframe = { workspace = true, optional = true, features = ["wgpu_no_default_features"] }
+tray-icon = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true, features = ["dx12"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+eframe = { workspace = true, optional = true, features = ["glow"] }
 tray-icon = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, optional = true, features = ["glow", "x11", "wayland"] }
 ksni = { workspace = true, optional = true }
 
 [build-dependencies]

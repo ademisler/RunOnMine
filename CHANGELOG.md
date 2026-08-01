@@ -5,6 +5,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Render the Windows control center through eframe WGPU/Direct3D instead of requiring OpenGL, while retaining Glow on macOS and Linux; add a platform renderer regression test.
+- Update `event-listener` to 5.4.2 so the dependency graph is no longer affected by RUSTSEC-2026-0221.
 - Audit the complete documentation set against CLI help, package manifests, acceptance scripts, and workflows; add a comprehensive documentation index plus automated relative-link, anchor, index-coverage, stale-claim, MCP-tool-inventory, and headless/desktop clean-install evidence-template validation to Linux CI.
 - Correct platform build paths, coverage thresholds, unconditional hosted-platform CI semantics, Windows retained-data uninstall wording, and hosted-runner pre-start evidence handling. Hard-block public-beta packaging until checked-in Apple and Windows signing steps exist instead of treating secret presence as signing evidence.
 - Bring the Linux and Windows control centers to the macOS desktop contract: one seven-screen UI, native Open/Lock/Quit tray actions, dynamic tray status, application icons, close-to-tray behavior, and an in-app Diagnostics integration card. Linux uses freedesktop StatusNotifierItem without GTK/AppIndicator; Windows release binaries use the GUI subsystem.

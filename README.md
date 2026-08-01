@@ -243,8 +243,9 @@ Linux, and Windows. Every supported desktop exposes native **Open**, **Lock**,
 and **Quit** actions, updates its tray status, and hides the window instead of
 exiting when the native tray is available. Linux uses the freedesktop
 StatusNotifierItem protocol without a GTK/AppIndicator dependency; Windows and
-macOS use their native tray implementations. The Diagnostics screen reports the
-active desktop integration and close behavior.
+macOS use their native tray implementations. Windows renders through WGPU and
+Direct3D rather than requiring an OpenGL driver. The Diagnostics screen reports
+the active desktop integration and close behavior.
 
 On Linux x86_64, the standalone `runonmine-desktop` DEB includes the control
 center plus the CLI, agent, and helper. Build it and run the isolated seven-view
