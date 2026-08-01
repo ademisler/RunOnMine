@@ -2,11 +2,43 @@ if (-not ("RunOnMine.NativeWindow" -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 namespace RunOnMine {
     public static class NativeWindow {
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maximum);
+
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        public static IntPtr FindVisibleWindow(uint processId, string expectedTitle) {
+            IntPtr found = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+                uint owner;
+                GetWindowThreadProcessId(hWnd, out owner);
+                if (owner != processId || !IsWindowVisible(hWnd)) {
+                    return true;
+                }
+                var title = new StringBuilder(256);
+                GetWindowText(hWnd, title, title.Capacity);
+                if (String.Equals(title.ToString(), expectedTitle, StringComparison.Ordinal)) {
+                    found = hWnd;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
     }
 }
 "@
@@ -65,6 +97,10 @@ function Wait-RunOnMineMainWindow {
         $Process.Refresh()
         if ($Process.HasExited) {
             return [IntPtr]::Zero
+        }
+        $window = [RunOnMine.NativeWindow]::FindVisibleWindow([uint32]$Process.Id, "RunOnMine")
+        if ($window -ne [IntPtr]::Zero) {
+            return $window
         }
         if ($Process.MainWindowHandle -ne [IntPtr]::Zero -and $Process.MainWindowTitle -eq "RunOnMine") {
             return $Process.MainWindowHandle

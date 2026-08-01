@@ -104,7 +104,7 @@ impl DesktopAcceptance {
             return false;
         }
         let completed_at = self.completed_at.get_or_insert_with(Instant::now);
-        completed_at.elapsed() >= Duration::from_millis(750)
+        completed_at.elapsed() >= Duration::from_millis(2_500)
     }
 
     pub(crate) fn write_report(&mut self, native_shell_available: bool) -> Result<()> {

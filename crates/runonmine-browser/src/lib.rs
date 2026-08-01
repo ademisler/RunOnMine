@@ -1243,6 +1243,8 @@ fn inspect_browser_executable_classified(
             "browser executable must resolve to a real regular file",
         ));
     }
+    #[cfg(windows)]
+    validate_windows_pe_executable(&resolved)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1264,6 +1266,65 @@ fn inspect_browser_executable_classified(
         product,
         path: resolved,
     })
+}
+
+#[cfg(windows)]
+fn validate_windows_pe_executable(
+    path: &Path,
+) -> std::result::Result<(), BrowserExecutableFailure> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| BrowserExecutableFailure::from_io(&error, path))?;
+    let length = file
+        .metadata()
+        .map_err(|error| BrowserExecutableFailure::from_io(&error, path))?
+        .len();
+    let mut dos_header = [0_u8; 64];
+    file.read_exact(&mut dos_header).map_err(|_| {
+        BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable does not contain a complete DOS header",
+        )
+    })?;
+    if &dos_header[..2] != b"MZ" {
+        return Err(BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable does not contain a Windows MZ header",
+        ));
+    }
+    let pe_offset = u64::from(u32::from_le_bytes([
+        dos_header[60],
+        dos_header[61],
+        dos_header[62],
+        dos_header[63],
+    ]));
+    if pe_offset > length.saturating_sub(4) {
+        return Err(BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable contains an invalid PE header offset",
+        ));
+    }
+    file.seek(SeekFrom::Start(pe_offset)).map_err(|_| {
+        BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable PE header is unreadable",
+        )
+    })?;
+    let mut signature = [0_u8; 4];
+    file.read_exact(&mut signature).map_err(|_| {
+        BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable PE signature is incomplete",
+        )
+    })?;
+    if signature != *b"PE\0\0" {
+        return Err(BrowserExecutableFailure::new(
+            BrowserExecutableFailureKind::Corrupt,
+            "browser executable does not contain a valid PE signature",
+        ));
+    }
+    Ok(())
 }
 
 fn inspect_resolved_browser_executable(

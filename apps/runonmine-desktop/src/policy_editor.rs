@@ -394,13 +394,14 @@ mod tests {
 
     #[test]
     fn builds_scoped_oauth_filesystem_rule() -> Result<()> {
+        let filesystem_path = std::env::temp_dir().join("runonmine-safe-project");
         let editor = PolicyEditorState {
             connector_id: "connector".to_owned(),
             mode: PolicyMode::Allow,
             principal_kind: PrincipalKind::OAuthClient,
             principal_value: "trusted-client".to_owned(),
             resource_kind: ResourceKind::FilesystemPrefix,
-            resource_value: "/safe/project".to_owned(),
+            resource_value: filesystem_path.to_string_lossy().into_owned(),
             tool: "fs_read".to_owned(),
             capability: Some(Capability::FilesRead),
         };
@@ -415,7 +416,7 @@ mod tests {
         assert_eq!(
             rule.resource,
             ResourceMatcher::FilesystemPrefix {
-                path: PathBuf::from("/safe/project")
+                path: filesystem_path
             }
         );
         assert_eq!(rule.tool.as_deref(), Some("fs_read"));
