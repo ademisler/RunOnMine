@@ -7,10 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 . "$(Join-Path $PSScriptRoot "windows-desktop-acceptance.ps1")"
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-acceptance-" + [guid]::NewGuid())
-$home = Join-Path $root "home"
+$sandboxHome = Join-Path $root "home"
 $project = Join-Path $root "project"
 $agentProcess = $null
-New-Item -ItemType Directory -Force -Path $home, $project | Out-Null
+New-Item -ItemType Directory -Force -Path $sandboxHome, $project | Out-Null
 
 $old = @{
     HOME = $env:HOME
@@ -22,8 +22,8 @@ $old = @{
     RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT
 }
 try {
-    $env:HOME = $home
-    $env:USERPROFILE = $home
+    $env:HOME = $sandboxHome
+    $env:USERPROFILE = $sandboxHome
     $env:APPDATA = Join-Path $root "appdata"
     $env:LOCALAPPDATA = Join-Path $root "localappdata"
     $env:RUNONMINE_TEST_FILE_SECRETS = "1"
