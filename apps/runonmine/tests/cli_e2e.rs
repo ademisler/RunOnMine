@@ -99,11 +99,15 @@ impl IsolatedCli {
         Ok(String::from_utf8(output.stdout)?)
     }
 
-    fn configure_doctor_browser(&self) -> Result<()> {
+    fn prepare_doctor_environment(&self) -> Result<()> {
         #[cfg(unix)]
         {
             let browser = self.browser.to_string_lossy().into_owned();
             self.run_ok(&["browser", "executable", "set", &browser])?;
+        }
+        #[cfg(windows)]
+        {
+            self.project.canonicalize()?;
         }
         Ok(())
     }
@@ -139,7 +143,7 @@ fn setup_policy_lock_and_purge_run_as_an_isolated_user_flow() -> Result<()> {
     let config_path = config_path_from_setup(&setup)?;
     assert_below(&config_path, cli.root.path())?;
     assert!(config_path.is_file());
-    cli.configure_doctor_browser()?;
+    cli.prepare_doctor_environment()?;
 
     let policy = cli.run_ok(&["policy", "show"])?;
     assert!(policy.contains("Local stdio"));
@@ -206,7 +210,7 @@ fn doctor_reports_and_repairs_indexed_orphan_connector_credentials() -> Result<(
     let project = cli.project.to_string_lossy().into_owned();
     let setup = cli.run_ok(&["setup", "--root", &project])?;
     let config_path = config_path_from_setup(&setup)?;
-    cli.configure_doctor_browser()?;
+    cli.prepare_doctor_environment()?;
     cli.run_ok(&["connect", "local-http", "enable"])?;
 
     AppConfig::update(&config_path, |config| {
