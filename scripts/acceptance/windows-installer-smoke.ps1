@@ -1,5 +1,6 @@
 param(
-    [Parameter(Mandatory = $true)] [string]$Installer
+    [Parameter(Mandatory = $true)] [string]$Installer,
+    [switch]$SkipInteractiveDesktop
 )
 $ErrorActionPreference = "Stop"
 . "$(Join-Path $PSScriptRoot "windows-desktop-acceptance.ps1")"
@@ -43,7 +44,8 @@ try {
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "RunOnMine.lnk"
     if (-not $startMenu) { throw "RunOnMine Start Menu shortcut is missing" }
     if (-not (Test-Path -LiteralPath $desktopShortcut)) { throw "RunOnMine desktop shortcut is missing" }
-    Invoke-RunOnMineDesktopAcceptance -Desktop (Join-Path $installLocation "runonmine-desktop.exe") -Root $root -ExpectNativeShell $true
+    Invoke-RunOnMineDesktopAcceptance -Desktop (Join-Path $installLocation "runonmine-desktop.exe") `
+        -Root $root -ExpectNativeShell $true -RequireInteractiveWindow (-not $SkipInteractiveDesktop.IsPresent)
 
     $uninstaller = Join-Path $installLocation "uninstall.exe"
     if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw "NSIS uninstaller is missing" }
@@ -70,7 +72,11 @@ try {
     if ($unexpectedFiles.Count -ne 0) {
         throw "NSIS uninstall left unexpected managed files: $($unexpectedFiles.FullName -join ', ')"
     }
-    Write-Host "RunOnMine Windows NSIS install, desktop acceptance, retained-data uninstall and managed-file residue test passed."
+    if ($SkipInteractiveDesktop) {
+        Write-Host "RunOnMine Windows NSIS install, desktop render/report, retained-data uninstall and managed-file residue test passed; interactive HWND/tray lifecycle was not claimed."
+    } else {
+        Write-Host "RunOnMine Windows NSIS install, interactive desktop acceptance, retained-data uninstall and managed-file residue test passed."
+    }
 }
 finally {
     if ($uninstaller -and (Test-Path -LiteralPath $uninstaller)) {

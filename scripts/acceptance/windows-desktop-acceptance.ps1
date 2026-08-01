@@ -114,7 +114,8 @@ function Invoke-RunOnMineDesktopAcceptance {
     param(
         [Parameter(Mandatory = $true)] [string]$Desktop,
         [Parameter(Mandatory = $true)] [string]$Root,
-        [bool]$ExpectNativeShell = $true
+        [bool]$ExpectNativeShell = $true,
+        [bool]$RequireInteractiveWindow = $true
     )
     $reportPath = Join-Path $Root "desktop-acceptance.json"
     if (Test-Path -LiteralPath $reportPath) {
@@ -125,9 +126,11 @@ function Invoke-RunOnMineDesktopAcceptance {
     try {
         $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $reportPath
         $desktopProcess = Start-Process -FilePath $Desktop -PassThru
-        $window = Wait-RunOnMineMainWindow -Process $desktopProcess
-        if ($window -eq [IntPtr]::Zero) {
-            throw "RunOnMine desktop did not expose its native main window"
+        if ($RequireInteractiveWindow) {
+            $window = Wait-RunOnMineMainWindow -Process $desktopProcess
+            if ($window -eq [IntPtr]::Zero) {
+                throw "RunOnMine desktop did not expose its native main window"
+            }
         }
         if (-not $desktopProcess.WaitForExit(30000)) {
             throw "RunOnMine desktop acceptance did not finish"
@@ -146,7 +149,7 @@ function Invoke-RunOnMineDesktopAcceptance {
         $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $previousReport
     }
 
-    if (-not $ExpectNativeShell) {
+    if (-not $ExpectNativeShell -or -not $RequireInteractiveWindow) {
         return
     }
     $desktopProcess = $null

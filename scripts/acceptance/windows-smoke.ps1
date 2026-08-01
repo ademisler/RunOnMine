@@ -2,7 +2,8 @@ param(
     [string]$RunOnMine = "runonmine.exe",
     [string]$Agent = "runonmine-agent.exe",
     [string]$Desktop = "",
-    [string]$McpClient = ""
+    [string]$McpClient = "",
+    [switch]$SkipInteractiveDesktop
 )
 $ErrorActionPreference = "Stop"
 . "$(Join-Path $PSScriptRoot "windows-desktop-acceptance.ps1")"
@@ -69,7 +70,8 @@ try {
     }
 
     if ($Desktop) {
-        Invoke-RunOnMineDesktopAcceptance -Desktop $Desktop -Root $root -ExpectNativeShell $true
+        Invoke-RunOnMineDesktopAcceptance -Desktop $Desktop -Root $root -ExpectNativeShell $true `
+            -RequireInteractiveWindow (-not $SkipInteractiveDesktop.IsPresent)
     }
 
     (& $RunOnMine approvals list | Out-String) | Select-String -SimpleMatch "No pending approvals." | Out-Null
@@ -82,7 +84,11 @@ try {
         $agentProcess = $null
     }
     (& $RunOnMine uninstall --purge --confirm PURGE | Out-String) | Select-String -SimpleMatch "permanently removed" | Out-Null
-    Write-Host "RunOnMine isolated Windows CLI, agent, MCP, desktop and purge smoke test passed."
+    if ($SkipInteractiveDesktop) {
+        Write-Host "RunOnMine isolated Windows CLI, agent, MCP, desktop render/report and purge smoke test passed; interactive HWND/tray lifecycle was not claimed."
+    } else {
+        Write-Host "RunOnMine isolated Windows CLI, agent, MCP, interactive desktop and purge smoke test passed."
+    }
 }
 finally {
     if ($agentProcess -and -not $agentProcess.HasExited) {
