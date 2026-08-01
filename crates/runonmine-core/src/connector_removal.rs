@@ -470,18 +470,22 @@ fn sync_parent(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     use secrecy::SecretString;
 
     use super::*;
     use crate::PolicyPreset;
 
+    #[cfg(unix)]
     #[derive(Default)]
     struct MemorySecretStore {
         values: Mutex<BTreeMap<String, SecretString>>,
     }
 
+    #[cfg(unix)]
     impl SecretStore for MemorySecretStore {
         fn get(&self, name: &str) -> Result<Option<SecretString>> {
             Ok(self
