@@ -1056,7 +1056,7 @@ fn parse_decision(value: &str) -> Result<ApprovalDecision> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);

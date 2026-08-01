@@ -281,10 +281,10 @@ mod tests {
         let first = AuditMacKey::load_or_create(&database)?;
         let second = AuditMacKey::load_or_create(&database)?;
         assert_eq!(first.0, second.0);
-        let path = key_path(&database);
         #[cfg(unix)]
         {
             use std::os::unix::fs::{PermissionsExt as _, symlink};
+            let path = key_path(&database);
             assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
             fs::remove_file(&path)?;
             symlink("missing", &path)?;
