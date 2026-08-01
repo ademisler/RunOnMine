@@ -19,6 +19,8 @@ struct IsolatedCli {
     #[cfg(not(windows))]
     home: PathBuf,
     project: PathBuf,
+    #[cfg(unix)]
+    browser: PathBuf,
 }
 
 impl IsolatedCli {
@@ -35,11 +37,22 @@ impl IsolatedCli {
         ] {
             fs::create_dir_all(directory)?;
         }
+        #[cfg(unix)]
+        let browser = {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let browser = root.path().join("chromium");
+            fs::write(&browser, b"#!/bin/sh\nexit 0\n")?;
+            fs::set_permissions(&browser, fs::Permissions::from_mode(0o700))?;
+            browser
+        };
         Ok(Self {
             root,
             #[cfg(not(windows))]
             home,
             project,
+            #[cfg(unix)]
+            browser,
         })
     }
 
@@ -85,6 +98,15 @@ impl IsolatedCli {
         }
         Ok(String::from_utf8(output.stdout)?)
     }
+
+    fn configure_doctor_browser(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let browser = self.browser.to_string_lossy().into_owned();
+            self.run_ok(&["browser", "executable", "set", &browser])?;
+        }
+        Ok(())
+    }
 }
 
 fn config_path_from_setup(output: &str) -> Result<PathBuf> {
@@ -117,6 +139,7 @@ fn setup_policy_lock_and_purge_run_as_an_isolated_user_flow() -> Result<()> {
     let config_path = config_path_from_setup(&setup)?;
     assert_below(&config_path, cli.root.path())?;
     assert!(config_path.is_file());
+    cli.configure_doctor_browser()?;
 
     let policy = cli.run_ok(&["policy", "show"])?;
     assert!(policy.contains("Local stdio"));
@@ -183,6 +206,7 @@ fn doctor_reports_and_repairs_indexed_orphan_connector_credentials() -> Result<(
     let project = cli.project.to_string_lossy().into_owned();
     let setup = cli.run_ok(&["setup", "--root", &project])?;
     let config_path = config_path_from_setup(&setup)?;
+    cli.configure_doctor_browser()?;
     cli.run_ok(&["connect", "local-http", "enable"])?;
 
     AppConfig::update(&config_path, |config| {

@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned Rust toolchain
-        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "clippy" ""
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "clippy" "${{ matrix.target }}"
       - name: Lint headless workspace
         run: >-
           cargo clippy --workspace --exclude runonmine-desktop
