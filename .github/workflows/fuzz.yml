@@ -49,7 +49,7 @@ jobs:
         run: ./scripts/ci/verify-runner-environment.sh
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh nightly-2026-07-18
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
         with:
           tool: cargo-fuzz@0.13.2
       - name: Build ${{ matrix.target }} fuzz target
