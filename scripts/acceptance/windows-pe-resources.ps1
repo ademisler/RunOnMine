@@ -64,9 +64,11 @@ if (-not $mt) {
         Sort-Object FullName -Descending | Select-Object -First 1
 }
 if (-not $mt) { throw "Windows SDK mt.exe is unavailable" }
+$mtPath = if ($mt.Path) { $mt.Path } else { $mt.FullName }
+if (-not $mtPath) { throw "Windows SDK mt.exe path is unavailable" }
 $manifest = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-manifest-" + [guid]::NewGuid() + ".xml")
 try {
-    & $mt.FullName -nologo "-inputresource:$desktopPath;#1" "-out:$manifest"
+    & $mtPath -nologo "-inputresource:$desktopPath;#1" "-out:$manifest"
     if ($LASTEXITCODE -ne 0) { throw "mt.exe could not extract the desktop manifest" }
     $manifestText = Get-Content -Raw -LiteralPath $manifest
     foreach ($required in @('level="asInvoker"', '>PerMonitorV2<', '>true</longPathAware>')) {

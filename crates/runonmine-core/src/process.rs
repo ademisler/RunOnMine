@@ -215,8 +215,12 @@ mod tests {
 
     #[tokio::test]
     async fn captures_output() -> Result<()> {
+        #[cfg(windows)]
+        let command = "[Console]::Out.Write('hello')";
+        #[cfg(not(windows))]
+        let command = "printf hello";
         let result = execute_shell(&ProcessRequest {
-            command: "printf hello".to_owned(),
+            command: command.to_owned(),
             cwd: None,
             timeout: Duration::from_secs(5),
             max_output_bytes: 1_024,
@@ -244,14 +248,18 @@ mod tests {
 
     #[tokio::test]
     async fn output_below_the_combined_budget_is_not_truncated() -> Result<()> {
+        #[cfg(windows)]
+        let command = "Write-Output 'out'; [Console]::Error.Write('err')";
+        #[cfg(not(windows))]
+        let command = "printf out; printf err >&2";
         let result = execute_shell(&ProcessRequest {
-            command: "printf out; printf err >&2".to_owned(),
+            command: command.to_owned(),
             cwd: None,
             timeout: Duration::from_secs(5),
             max_output_bytes: 1_024,
         })
         .await?;
-        assert_eq!(result.stdout, "out");
+        assert_eq!(result.stdout.trim(), "out");
         assert_eq!(result.stderr, "err");
         assert!(!result.truncated);
         Ok(())

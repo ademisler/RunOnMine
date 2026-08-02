@@ -293,7 +293,10 @@ mod tests {
         let binary = legacy.join(BinaryKind::Cloudflared.executable_name());
         executable(&binary, b"legacy")?;
         receipt(
-            &legacy.join("cloudflared.receipt.json"),
+            &legacy.join(format!(
+                "{}.receipt.json",
+                BinaryKind::Cloudflared.executable_name()
+            )),
             ReleaseProvider::Cloudflared,
             &binary,
             b"legacy",

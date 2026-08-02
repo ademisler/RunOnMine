@@ -998,7 +998,7 @@ fn systemd_escape(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn harden_windows_file_acl(path: &Path, _executable: bool) -> Result<()> {
     command_success(
         Command::new("icacls.exe").args([
@@ -1010,6 +1010,15 @@ fn harden_windows_file_acl(path: &Path, _executable: bool) -> Result<()> {
         ]),
         "failed to restrict a helper system file ACL",
     )
+}
+
+#[cfg(all(windows, test))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "unit tests exercise transactional file replacement without mutating host ACLs"
+)]
+fn harden_windows_file_acl(_path: &Path, _executable: bool) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

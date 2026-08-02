@@ -410,6 +410,10 @@ mod tests {
         (1_u16..=u16::MAX).prop_filter("reserved MacMCP port", |port| *port != LEGACY_MACMCP_PORT)
     }
 
+    fn test_executable() -> Result<PathBuf> {
+        Ok(std::env::current_exe()?)
+    }
+
     #[cfg(unix)]
     fn restrict_test_directory(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
@@ -466,7 +470,7 @@ mod tests {
             "local-stdio",
             "tunnel_0123456789abcdef0123456789abcdef",
             OpenAiMcpTarget::Stdio {
-                executable: PathBuf::from("/opt/runonmine/bin/runonmine"),
+                executable: test_executable()?,
                 args: vec!["mcp".to_owned(), "stdio".to_owned()],
             },
         )
