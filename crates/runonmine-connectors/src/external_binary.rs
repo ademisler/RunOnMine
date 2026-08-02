@@ -335,6 +335,10 @@ fn restrict_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Unix mode hardening is a no-op on Windows while binary pinning keeps one fallible interface"
+)]
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }

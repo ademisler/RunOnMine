@@ -5,10 +5,14 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Render the Windows control center through eframe WGPU/Direct3D instead of requiring OpenGL, while retaining Glow on macOS and Linux; add a platform renderer regression test.
+- Update `event-listener` to 5.4.2 so the dependency graph is no longer affected by RUSTSEC-2026-0221.
+- Remove the unused `trash` dependency; RunOnMine uses its own descriptor-relative managed trash, and the stale crate also forced an incompatible Windows bindings version into the Direct3D graph.
+- Make Windows desktop viewport acceptance numeric instead of string-based so Windows PowerShell 5.1 decimal formatting cannot reject the correct 1320×860 and 1040×680 contracts.
 - Audit the complete documentation set against CLI help, package manifests, acceptance scripts, and workflows; add a comprehensive documentation index plus automated relative-link, anchor, index-coverage, stale-claim, MCP-tool-inventory, and headless/desktop clean-install evidence-template validation to Linux CI.
 - Correct platform build paths, coverage thresholds, unconditional hosted-platform CI semantics, Windows retained-data uninstall wording, and hosted-runner pre-start evidence handling. Hard-block public-beta packaging until checked-in Apple and Windows signing steps exist instead of treating secret presence as signing evidence.
 - Bring the Linux and Windows control centers to the macOS desktop contract: one seven-screen UI, native Open/Lock/Quit tray actions, dynamic tray status, application icons, close-to-tray behavior, and an in-app Diagnostics integration card. Linux uses freedesktop StatusNotifierItem without GTK/AppIndicator; Windows release binaries use the GUI subsystem.
-- Add deterministic cross-platform desktop reports, isolated seven-view Xvfb acceptance, physical Xfce StatusNotifier close/reopen acceptance, real-window/WM_CLOSE Windows acceptance, and current-user NSIS install/uninstall residue checks. GNU/Wine remains explicit supplemental Windows compatibility evidence.
+- Add deterministic cross-platform desktop reports, isolated seven-view Xvfb acceptance, physical Xfce StatusNotifier close/reopen acceptance, real-window/WM_CLOSE Windows acceptance, and current-user NSIS install/uninstall residue checks. Hosted Windows preflight verifies render/report and package lifecycle without claiming an interactive HWND/tray result; GNU/Wine remains explicit supplemental Windows compatibility evidence.
 - Add Windows application and installer artwork, English/French/Turkish NSIS UI, HKCU current-user installation, Start Menu/desktop shortcuts, and explicit cleanup of standard RunOnMine roaming/local application-data roots when the user elects to remove app data.
 - Make MCP HTTP acceptance own and terminate the real agent PID, with bounded TERM/KILL cleanup, so successful smoke runs cannot orphan listeners or deleted temporary state.
 - Add a standalone Linux x86_64 desktop DEB with all four RunOnMine binaries, a freedesktop menu entry and icon, four-binary SBOM/archive provenance, Xvfb launch acceptance, and real install/remove preflight coverage.

@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+
+const TEST_PATHS_ROOT_ENV: &str = "RUNONMINE_TEST_PATHS_ROOT";
+const TEST_FILE_SECRETS_ENV: &str = "RUNONMINE_TEST_FILE_SECRETS";
 use directories::ProjectDirs;
 
 /// Platform-native locations for non-secret configuration, state, logs, and browser data.
@@ -16,6 +19,9 @@ pub struct AppPaths {
 impl AppPaths {
     /// Resolve paths using the operating system's standard per-user locations.
     pub fn discover() -> Result<Self> {
+        if let Some(root) = test_paths_root()? {
+            return Ok(Self::under(root));
+        }
         let dirs = ProjectDirs::from("dev", "RunOnMine", "RunOnMine")
             .context("the operating system did not provide a user data directory")?;
         Ok(Self {
@@ -79,6 +85,20 @@ impl AppPaths {
         }
         Ok(())
     }
+}
+
+fn test_paths_root() -> Result<Option<PathBuf>> {
+    let Some(value) = std::env::var_os(TEST_PATHS_ROOT_ENV) else {
+        return Ok(None);
+    };
+    if std::env::var(TEST_FILE_SECRETS_ENV).as_deref() != Ok("1") {
+        bail!("{TEST_PATHS_ROOT_ENV} is available only in explicit test mode");
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        bail!("{TEST_PATHS_ROOT_ENV} must be an absolute path");
+    }
+    Ok(Some(path))
 }
 
 #[cfg(unix)]

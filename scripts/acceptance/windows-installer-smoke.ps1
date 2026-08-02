@@ -1,8 +1,16 @@
 param(
-    [Parameter(Mandatory = $true)] [string]$Installer
+    [Parameter(Mandatory = $true)] [string]$Installer,
+    [switch]$SkipInteractiveDesktop
 )
 $ErrorActionPreference = "Stop"
 . "$(Join-Path $PSScriptRoot "windows-desktop-acceptance.ps1")"
+
+function Test-RunOnMineFullyQualifiedWindowsPath {
+    param([AllowEmptyString()] [string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    return ($Path -match '^[A-Za-z]:[\\/]') -or
+        ($Path -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$)')
+}
 
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-installer-" + [guid]::NewGuid())
@@ -24,11 +32,14 @@ try {
     if ($install.ExitCode -ne 0) { throw "NSIS installer exited with code $($install.ExitCode)" }
     if (-not (Test-Path -LiteralPath $registryPath)) { throw "NSIS installer did not create the current-user uninstall record" }
     $entry = Get-ItemProperty -LiteralPath $registryPath
+    $installLocation = ([string]$entry.InstallLocation).Trim('"')
+    $uninstaller = ([string]$entry.UninstallString).Trim('"')
     if ($entry.DisplayName -ne "RunOnMine" -or $entry.Publisher -ne "RunOnMine contributors") {
         throw "NSIS uninstall metadata is incorrect"
     }
-    $installLocation = $entry.InstallLocation.Trim('"')
-    if (-not [System.IO.Path]::IsPathFullyQualified($installLocation)) { throw "NSIS install location is not absolute" }
+    if (-not (Test-RunOnMineFullyQualifiedWindowsPath -Path $installLocation)) {
+        throw "NSIS install location is not absolute"
+    }
     foreach ($binary in @("runonmine.exe", "runonmine-agent.exe", "runonmine-desktop.exe", "runonmine-helper.exe")) {
         if (-not (Test-Path -LiteralPath (Join-Path $installLocation $binary) -PathType Leaf)) {
             throw "installed binary is missing: $binary"
@@ -43,13 +54,16 @@ try {
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "RunOnMine.lnk"
     if (-not $startMenu) { throw "RunOnMine Start Menu shortcut is missing" }
     if (-not (Test-Path -LiteralPath $desktopShortcut)) { throw "RunOnMine desktop shortcut is missing" }
-    Invoke-RunOnMineDesktopAcceptance -Desktop (Join-Path $installLocation "runonmine-desktop.exe") -Root $root -ExpectNativeShell $true
+    Invoke-RunOnMineDesktopAcceptance -Desktop (Join-Path $installLocation "runonmine-desktop.exe") `
+        -Root $root -ExpectNativeShell $true -RequireInteractiveWindow (-not $SkipInteractiveDesktop.IsPresent)
 
-    $uninstaller = Join-Path $installLocation "uninstall.exe"
+    $expectedUninstaller = Join-Path $installLocation "uninstall.exe"
+    if (-not [string]::Equals($uninstaller, $expectedUninstaller, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "NSIS uninstall command is incorrect"
+    }
     if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw "NSIS uninstaller is missing" }
     $remove = Start-Process -FilePath $uninstaller -ArgumentList "/S" -PassThru -Wait
     if ($remove.ExitCode -ne 0) { throw "NSIS uninstaller exited with code $($remove.ExitCode)" }
-    $uninstaller = $null
     for ($attempt = 0; $attempt -lt 100 -and (Test-Path -LiteralPath $installLocation); $attempt++) {
         Start-Sleep -Milliseconds 100
     }
@@ -70,11 +84,30 @@ try {
     if ($unexpectedFiles.Count -ne 0) {
         throw "NSIS uninstall left unexpected managed files: $($unexpectedFiles.FullName -join ', ')"
     }
-    Write-Host "RunOnMine Windows NSIS install, desktop acceptance, retained-data uninstall and managed-file residue test passed."
+    if ($SkipInteractiveDesktop) {
+        Write-Host "RunOnMine Windows NSIS install, desktop render/report, retained-data uninstall and managed-file residue test passed; interactive HWND/tray lifecycle was not claimed."
+    } else {
+        Write-Host "RunOnMine Windows NSIS install, interactive desktop acceptance, retained-data uninstall and managed-file residue test passed."
+    }
 }
 finally {
+    if (-not $uninstaller -and (Test-Path -LiteralPath $registryPath)) {
+        $cleanupEntry = Get-ItemProperty -LiteralPath $registryPath -ErrorAction SilentlyContinue
+        if ($cleanupEntry) {
+            $uninstaller = ([string]$cleanupEntry.UninstallString).Trim('"')
+            if (-not $installLocation) {
+                $installLocation = ([string]$cleanupEntry.InstallLocation).Trim('"')
+            }
+        }
+    }
     if ($uninstaller -and (Test-Path -LiteralPath $uninstaller)) {
         Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -ErrorAction SilentlyContinue
+        for ($attempt = 0; $attempt -lt 100; $attempt++) {
+            $registryRemains = Test-Path -LiteralPath $registryPath
+            $installRemains = $installLocation -and (Test-Path -LiteralPath $installLocation)
+            if (-not $registryRemains -and -not $installRemains) { break }
+            Start-Sleep -Milliseconds 100
+        }
     }
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $localDataRoot
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $roamingDataRoot

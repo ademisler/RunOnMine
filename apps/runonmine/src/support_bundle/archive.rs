@@ -128,6 +128,10 @@ fn restrict_private_file(file: &File) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Unix mode hardening is a no-op on Windows while support bundle creation keeps one fallible interface"
+)]
 fn restrict_private_file(_file: &File) -> Result<()> {
     Ok(())
 }
@@ -140,6 +144,10 @@ fn restrict_private_path(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Unix mode hardening is a no-op on Windows while support bundle persistence keeps one fallible interface"
+)]
 fn restrict_private_path(_path: &Path) -> Result<()> {
     Ok(())
 }

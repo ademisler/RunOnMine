@@ -1492,12 +1492,21 @@ fn from_timestamp(value: i64) -> Result<DateTime<Utc>, StoreError> {
     DateTime::from_timestamp(value, 0).ok_or(StoreError::Corrupt("invalid persisted timestamp"))
 }
 
+#[cfg(unix)]
 fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     std::path::PathBuf::from(value)
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        clippy::unnecessary_wraps,
+        reason = "database mode hardening is Unix-only while store initialization keeps one fallible interface"
+    )
+)]
 fn restrict_database_directory(path: &Path) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
@@ -1507,6 +1516,14 @@ fn restrict_database_directory(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        clippy::unnecessary_wraps,
+        reason = "SQLite mode hardening is Unix-only while store initialization keeps one fallible interface"
+    )
+)]
 fn restrict_database_files(path: &Path) -> Result<(), StoreError> {
     #[cfg(unix)]
     {

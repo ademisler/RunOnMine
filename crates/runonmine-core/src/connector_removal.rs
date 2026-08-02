@@ -459,6 +459,10 @@ fn sync_parent(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "parent directory fsync is Unix-only while connector removal keeps one fallible interface"
+)]
 fn sync_parent(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -466,18 +470,22 @@ fn sync_parent(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     use secrecy::SecretString;
 
     use super::*;
     use crate::PolicyPreset;
 
+    #[cfg(unix)]
     #[derive(Default)]
     struct MemorySecretStore {
         values: Mutex<BTreeMap<String, SecretString>>,
     }
 
+    #[cfg(unix)]
     impl SecretStore for MemorySecretStore {
         fn get(&self, name: &str) -> Result<Option<SecretString>> {
             Ok(self

@@ -442,9 +442,15 @@ fn append_shared(output: &mut Vec<u8>, value: &[u8], budget: &SharedOutputBudget
 mod tests {
     use super::*;
 
+    fn test_executable() -> Result<PathBuf> {
+        Ok(std::env::current_exe()?)
+    }
+
     #[test]
     fn debug_and_command_line_redact_secrets() -> Result<()> {
-        let spec = CommandSpec::new("test", PathBuf::from("/bin/test"))?
+        let executable = test_executable()?;
+        let expected_executable = executable.to_string_lossy().into_owned();
+        let spec = CommandSpec::new("test", executable)?
             .arg("--token")?
             .secret_arg(SecretValue::new("top-secret-token")?)
             .secret_env("API_KEY", SecretValue::new("environment-secret")?)?;
@@ -453,14 +459,18 @@ mod tests {
         assert!(!debug.contains("environment-secret"));
         assert_eq!(
             spec.redacted_command_line(),
-            vec!["/bin/test", "--token", "[REDACTED]"]
+            vec![
+                expected_executable,
+                "--token".to_owned(),
+                "[REDACTED]".to_owned(),
+            ]
         );
         Ok(())
     }
 
     #[test]
     fn output_redactor_handles_overlapping_values() -> Result<()> {
-        let spec = CommandSpec::new("test", PathBuf::from("/bin/test"))?
+        let spec = CommandSpec::new("test", test_executable()?)?
             .secret_arg(SecretValue::new("abc")?)
             .secret_arg(SecretValue::new("abcdef")?);
         assert_eq!(
@@ -472,7 +482,7 @@ mod tests {
 
     #[test]
     fn streaming_redactor_hides_secrets_across_chunk_boundaries() -> Result<()> {
-        let spec = CommandSpec::new("test", PathBuf::from("/bin/test"))?
+        let spec = CommandSpec::new("test", test_executable()?)?
             .secret_arg(SecretValue::new("cross-boundary-secret")?);
         let redactor = spec.redactor();
         let input = b"prefix cross-boundary-secret suffix";

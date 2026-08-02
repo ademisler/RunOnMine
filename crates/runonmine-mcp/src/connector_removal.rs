@@ -115,6 +115,7 @@ pub fn reconcile_connector_removal(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::fs;
     use std::sync::Mutex;
 

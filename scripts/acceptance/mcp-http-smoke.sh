@@ -15,6 +15,7 @@ elif [ ! -x "$cli" ] || [ ! -x "$agent" ]; then
 fi
 
 sandbox=$(mktemp -d)
+sandbox=$(CDPATH= cd -- "$sandbox" && pwd -P)
 agent_pid=""
 stop_agent() {
   [ -n "$agent_pid" ] || return 0

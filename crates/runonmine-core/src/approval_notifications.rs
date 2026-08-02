@@ -203,9 +203,11 @@ fn deliver(inner: &ApprovalNotificationsInner) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::fs;
     use std::time::Duration;
 
+    #[cfg(unix)]
     use tempfile::tempdir;
 
     use super::*;

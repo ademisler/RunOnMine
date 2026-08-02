@@ -513,6 +513,10 @@ fn set_private_permissions(file: &cap_std::fs::File) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Unix mode hardening is a no-op on Windows while secure writes keep one fallible interface"
+)]
 fn set_private_permissions(_file: &cap_std::fs::File) -> Result<()> {
     Ok(())
 }

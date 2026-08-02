@@ -449,6 +449,7 @@ impl ProcessFileLock {
         #[cfg(not(unix))]
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)?;

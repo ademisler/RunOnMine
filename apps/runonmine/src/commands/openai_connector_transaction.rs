@@ -617,6 +617,10 @@ fn sync_parent(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "parent directory fsync is Unix-only while connector activation keeps one fallible interface"
+)]
 fn sync_parent(_path: &Path) -> Result<()> {
     Ok(())
 }

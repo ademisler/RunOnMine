@@ -121,18 +121,28 @@ a separate artifact and is not replaced by this acceptance path.
 
 ## Windows desktop and NSIS acceptance
 
-The Windows smoke test starts the native desktop executable, waits for a real
-`RunOnMine` window handle, validates the same seven-view JSON contract, and
-sends `WM_CLOSE`; Win32 `IsWindowVisible` must become false while the process
-continues in the notification area. The NSIS preflight then performs a silent
-current-user install, checks HKCU uninstall metadata, all four binaries, Start
-Menu and desktop shortcuts, runs the installed desktop acceptance, silently
-uninstalls, and verifies that the registry record, package-owned binaries,
-uninstaller, and shortcuts are gone. Per-user application data must remain by
-default, so the parent RunOnMine directory is not required to disappear.
+The Windows smoke test defaults to interactive acceptance: it starts the native
+desktop executable, waits for a real `RunOnMine` window handle, validates the
+same seven-view JSON contract, and sends `WM_CLOSE`; Win32 `IsWindowVisible`
+must become false while the process continues in the notification area. The
+NSIS smoke test then performs a silent current-user install, checks HKCU
+uninstall metadata, all four binaries, Start Menu and desktop shortcuts, runs
+the installed desktop acceptance, silently uninstalls, and verifies that the
+registry record, package-owned binaries, uninstaller, and shortcuts are gone.
+Per-user application data must remain by default, so the parent RunOnMine
+directory is not required to disappear.
 
-A real Windows runner is authoritative for this acceptance. A Wine x86_64 run
-is useful supplemental evidence for PE launch, tray creation, seven-view
-rendering, standard Windows data paths, and GUI-subsystem compatibility, but it
-does not claim physical Windows installation, Authenticode signing, reboot, or
-release clean-install acceptance.
+GitHub-hosted Windows jobs do not provide an authoritative interactive desktop
+session. Artifact preflight therefore passes `-SkipInteractiveDesktop`: the real
+binary must still launch, render all seven views, keep the final frame alive,
+write the native-shell contract report, install, and uninstall, but the report
+does not claim visible-HWND or `WM_CLOSE`-to-tray behavior. The default local
+command omits that switch and remains the required interactive Windows VM or
+physical-machine gate.
+
+An interactive Windows VM or physical Windows machine is authoritative for the
+native-window and tray lifecycle. A Wine x86_64 run is useful supplemental
+evidence for PE launch, tray creation, seven-view rendering, standard Windows
+data paths, and GUI-subsystem compatibility, but it does not claim physical
+Windows installation, Authenticode signing, reboot, or release clean-install
+acceptance.

@@ -645,6 +645,10 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "directory fsync is Unix-only while orphan cleanup keeps one fallible interface"
+)]
 fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }

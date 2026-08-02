@@ -5,7 +5,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 binary=${RUNONMINE_BIN:-"$repo_root/target/debug/runonmine"}
 
 if [ ! -x "$binary" ]; then
-  (cd "$repo_root" && cargo build --locked -p runonmine)
+  (cd "$repo_root" && cargo build --locked --no-default-features -p runonmine)
 fi
 
 sandbox=$(mktemp -d)

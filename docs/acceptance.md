@@ -36,6 +36,11 @@ Windows has the equivalent CLI/MCP harness:
   -McpClient .\scripts\acceptance\mcp-http-smoke.py
 ```
 
+The default Windows invocation requires a visible native window and verifies
+`WM_CLOSE` hides it to the tray. `-SkipInteractiveDesktop` is reserved for
+non-interactive hosted preflight and must not be used as native-shell release
+evidence.
+
 Desktop binaries have a separate seven-view parity contract. On Linux, build to
 an explicit target directory and run:
 

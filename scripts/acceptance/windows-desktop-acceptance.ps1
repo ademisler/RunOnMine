@@ -2,11 +2,43 @@ if (-not ("RunOnMine.NativeWindow" -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 namespace RunOnMine {
     public static class NativeWindow {
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maximum);
+
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        public static IntPtr FindVisibleWindow(uint processId, string expectedTitle) {
+            IntPtr found = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+                uint owner;
+                GetWindowThreadProcessId(hWnd, out owner);
+                if (owner != processId || !IsWindowVisible(hWnd)) {
+                    return true;
+                }
+                var title = new StringBuilder(256);
+                GetWindowText(hWnd, title, title.Capacity);
+                if (String.Equals(title.ToString(), expectedTitle, StringComparison.Ordinal)) {
+                    found = hWnd;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
     }
 }
 "@
@@ -37,10 +69,16 @@ function Assert-RunOnMineDesktopReport {
     if (($report.native_shell_actions -join ",") -ne "show,lock,quit") {
         throw "desktop native shell action contract is incomplete"
     }
-    if (($report.default_viewport -join ",") -ne "1320,860") {
+    $defaultViewport = @($report.default_viewport)
+    if ($defaultViewport.Count -ne 2 -or
+        [double]$defaultViewport[0] -ne 1320.0 -or
+        [double]$defaultViewport[1] -ne 860.0) {
         throw "desktop default viewport contract changed"
     }
-    if (($report.minimum_viewport -join ",") -ne "1040,680") {
+    $minimumViewport = @($report.minimum_viewport)
+    if ($minimumViewport.Count -ne 2 -or
+        [double]$minimumViewport[0] -ne 1040.0 -or
+        [double]$minimumViewport[1] -ne 680.0) {
         throw "desktop minimum viewport contract changed"
     }
     if (-not $report.application_icon) {
@@ -66,6 +104,10 @@ function Wait-RunOnMineMainWindow {
         if ($Process.HasExited) {
             return [IntPtr]::Zero
         }
+        $window = [RunOnMine.NativeWindow]::FindVisibleWindow([uint32]$Process.Id, "RunOnMine")
+        if ($window -ne [IntPtr]::Zero) {
+            return $window
+        }
         if ($Process.MainWindowHandle -ne [IntPtr]::Zero -and $Process.MainWindowTitle -eq "RunOnMine") {
             return $Process.MainWindowHandle
         }
@@ -78,7 +120,8 @@ function Invoke-RunOnMineDesktopAcceptance {
     param(
         [Parameter(Mandatory = $true)] [string]$Desktop,
         [Parameter(Mandatory = $true)] [string]$Root,
-        [bool]$ExpectNativeShell = $true
+        [bool]$ExpectNativeShell = $true,
+        [bool]$RequireInteractiveWindow = $true
     )
     $reportPath = Join-Path $Root "desktop-acceptance.json"
     if (Test-Path -LiteralPath $reportPath) {
@@ -89,9 +132,11 @@ function Invoke-RunOnMineDesktopAcceptance {
     try {
         $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $reportPath
         $desktopProcess = Start-Process -FilePath $Desktop -PassThru
-        $window = Wait-RunOnMineMainWindow -Process $desktopProcess
-        if ($window -eq [IntPtr]::Zero) {
-            throw "RunOnMine desktop did not expose its native main window"
+        if ($RequireInteractiveWindow) {
+            $window = Wait-RunOnMineMainWindow -Process $desktopProcess
+            if ($window -eq [IntPtr]::Zero) {
+                throw "RunOnMine desktop did not expose its native main window"
+            }
         }
         if (-not $desktopProcess.WaitForExit(30000)) {
             throw "RunOnMine desktop acceptance did not finish"
@@ -110,7 +155,7 @@ function Invoke-RunOnMineDesktopAcceptance {
         $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $previousReport
     }
 
-    if (-not $ExpectNativeShell) {
+    if (-not $ExpectNativeShell -or -not $RequireInteractiveWindow) {
         return
     }
     $desktopProcess = $null

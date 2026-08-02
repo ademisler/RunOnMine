@@ -420,10 +420,21 @@ fn restrict_private_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Unix mode hardening is a no-op on Windows while binary activation keeps one fallible interface"
+)]
 fn restrict_private_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "the executable bit controls Unix file mode and is intentionally unused on Windows"
+    )
+)]
 fn copy_new_private_file(source: &Path, destination: &Path, executable: bool) -> Result<()> {
     let mut input = File::open(source)?;
     let mut options = OpenOptions::new();
@@ -439,6 +450,13 @@ fn copy_new_private_file(source: &Path, destination: &Path, executable: bool) ->
     Ok(())
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "the executable bit controls Unix file mode and is intentionally unused on Windows"
+    )
+)]
 fn write_new_private_file(path: &Path, bytes: &[u8], executable: bool) -> Result<()> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -501,6 +519,10 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "directory fsync is Unix-only while binary activation keeps one fallible interface"
+)]
 fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }

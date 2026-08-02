@@ -29,12 +29,23 @@ use runonmine_oauth::SqliteOAuthStore;
 use runonmine_platform::UserService;
 use uuid::Uuid;
 
+#[cfg(target_os = "windows")]
+const fn native_renderer() -> eframe::Renderer {
+    eframe::Renderer::Wgpu
+}
+
+#[cfg(not(target_os = "windows"))]
+const fn native_renderer() -> eframe::Renderer {
+    eframe::Renderer::Glow
+}
+
 pub fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(layout::DEFAULT_VIEWPORT)
             .with_min_inner_size(layout::MINIMUM_VIEWPORT)
             .with_icon(crate::desktop_icon::egui_icon()),
+        renderer: native_renderer(),
         ..Default::default()
     };
     eframe::run_native(
@@ -663,4 +674,18 @@ fn sibling_cli() -> Result<PathBuf> {
 
 fn run_cli_capture(arguments: &[String]) -> Result<String> {
     run_cli(&sibling_cli()?, arguments, None)
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use super::*;
+
+    #[test]
+    fn native_renderer_matches_platform_contract() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(native_renderer(), eframe::Renderer::Wgpu);
+
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(native_renderer(), eframe::Renderer::Glow);
+    }
 }

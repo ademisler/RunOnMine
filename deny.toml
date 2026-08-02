@@ -19,6 +19,7 @@ exceptions = [
   { crate = "clipboard-win", allow = ["BSL-1.0"] },
   { crate = "error-code", allow = ["BSL-1.0"] },
   { crate = "epaint_default_fonts", allow = ["Apache-2.0", "MIT", "OFL-1.1", "Ubuntu-font-1.0"] },
+  { crate = "hexf-parse", allow = ["CC0-1.0"] },
   { crate = "option-ext", allow = ["MPL-2.0"] },
   { crate = "notify", allow = ["CC0-1.0"] },
   { crate = "ksni", allow = ["Unlicense"] },

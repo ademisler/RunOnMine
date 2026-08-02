@@ -175,7 +175,9 @@ impl StagedArtifact {
                 )
             })?;
         apply_artifact_permissions(&self.destination, self.kind.executable(), self.kind.mode())?;
-        sync_parent(&self.destination)
+        #[cfg(unix)]
+        sync_parent(&self.destination)?;
+        Ok(())
     }
 }
 
@@ -265,7 +267,9 @@ impl ArtifactSnapshot {
         match self {
             Self::Missing { destination } => {
                 remove_regular_file_if_present(destination)?;
-                sync_parent(destination)
+                #[cfg(unix)]
+                sync_parent(destination)?;
+                Ok(())
             }
             Self::File {
                 destination,
@@ -293,7 +297,9 @@ impl ArtifactSnapshot {
                     .map_err(|error| error.error)
                     .context("failed to restore a helper artifact")?;
                 apply_artifact_permissions(destination, kind.executable(), restore_mode)?;
-                sync_parent(destination)
+                #[cfg(unix)]
+                sync_parent(destination)?;
+                Ok(())
             }
         }
     }
@@ -469,16 +475,12 @@ async fn rollback_installation(
     }
 }
 
+#[cfg(unix)]
 fn sync_parent(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let parent = path
-            .parent()
-            .context("helper artifact has no parent directory")?;
-        fs::File::open(parent)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+    let parent = path
+        .parent()
+        .context("helper artifact has no parent directory")?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

@@ -166,6 +166,7 @@ fn is_legacy_managed_binary(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
     use sha2::{Digest as _, Sha256};
@@ -292,7 +293,10 @@ mod tests {
         let binary = legacy.join(BinaryKind::Cloudflared.executable_name());
         executable(&binary, b"legacy")?;
         receipt(
-            &legacy.join("cloudflared.receipt.json"),
+            &legacy.join(format!(
+                "{}.receipt.json",
+                BinaryKind::Cloudflared.executable_name()
+            )),
             ReleaseProvider::Cloudflared,
             &binary,
             b"legacy",
