@@ -123,7 +123,7 @@ impl ConnectorRemovalLock {
 
 fn connector_fingerprint(connector: &ConnectorConfig) -> Result<String> {
     let bytes = serde_json::to_vec(connector)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 #[derive(Clone, Debug)]
