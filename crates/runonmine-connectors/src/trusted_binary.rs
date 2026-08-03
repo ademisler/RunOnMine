@@ -182,7 +182,7 @@ mod tests {
     }
 
     fn receipt(path: &Path, provider: ReleaseProvider, binary: &Path, bytes: &[u8]) -> Result<()> {
-        let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         fs::write(
             path,
             serde_json::to_vec(&InstallReceipt {
@@ -208,7 +208,7 @@ mod tests {
         let version_id = store.version_id_for_file(&source)?;
         let target: ManagedBinaryVersion = store.version(&version_id)?;
         let receipt_bytes = {
-            let digest = format!("sha256:{:x}", Sha256::digest(b"managed"));
+            let digest = format!("sha256:{}", hex::encode(Sha256::digest(b"managed")));
             serde_json::to_vec(&InstallReceipt {
                 provider: ReleaseProvider::Cloudflared,
                 release_tag: "v-test".to_owned(),

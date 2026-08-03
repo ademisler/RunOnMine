@@ -23,6 +23,7 @@ fs2.workspace = true
 image = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 tempfile.workspace = true

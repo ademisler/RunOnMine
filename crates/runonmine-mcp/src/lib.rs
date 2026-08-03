@@ -10,7 +10,8 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
@@ -1287,7 +1288,7 @@ impl ServerHandler for RunOnMineServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         diagnostics::scope_request(async {
             if !self.request_allows_tool(&request.name, &context)
                 || (request.name == "admin_exec" && !self.admin_available().await)
@@ -1315,11 +1316,7 @@ impl ServerHandler for RunOnMineServer {
                     && (tool.name != "admin_exec" || admin_available)
             })
             .collect();
-        Ok(ListToolsResult {
-            tools,
-            meta: None,
-            next_cursor: None,
-        })
+        Ok(ListToolsResult::with_all_items(tools))
     }
 }
 

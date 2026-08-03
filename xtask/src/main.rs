@@ -1024,7 +1024,7 @@ fn cargo_lock_checksums(lock: &toml::Value) -> Result<BTreeMap<CargoPackageKey, 
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn write_tar_gz(staging: &Path, output: &Path, package_name: &str) -> Result<()> {
@@ -1069,7 +1069,7 @@ fn write_checksum(path: &Path) -> Result<()> {
         .file_name()
         .context("artifact has no file name")?
         .to_string_lossy();
-    let checksum = format!("{:x}  {filename}\n", digest.finalize());
+    let checksum = format!("{}  {filename}\n", hex::encode(digest.finalize()));
     let checksum_path = path.with_file_name(format!("{filename}.sha256"));
     let mut output = File::create(checksum_path)?;
     output.write_all(checksum.as_bytes())?;

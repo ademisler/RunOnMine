@@ -117,7 +117,7 @@ pub(super) fn write_zip_atomically(
 }
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(unix)]
