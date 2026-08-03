@@ -104,6 +104,8 @@ impl RunOnMineDesktop {
             shell: crate::desktop_shell::DesktopShell::new(),
             exit_requested: false,
             acceptance: crate::desktop_acceptance::DesktopAcceptance::from_environment()?,
+            lifecycle_acceptance:
+                crate::desktop_lifecycle_acceptance::DesktopLifecycleAcceptance::from_environment()?,
         };
         if let Err(error) = app.initialize() {
             app.error = Some(error.to_string());
@@ -526,7 +528,14 @@ impl RunOnMineDesktop {
             .or_else(|| self.instance.try_command())
         {
             match command {
-                crate::desktop_shell::DesktopCommand::Show => show_window(context),
+                crate::desktop_shell::DesktopCommand::Show => {
+                    if let Some(acceptance) = self.lifecycle_acceptance.as_mut()
+                        && let Err(error) = acceptance.mark_restored_by_instance()
+                    {
+                        self.error = Some(error.to_string());
+                    }
+                    show_window(context);
+                }
                 crate::desktop_shell::DesktopCommand::Lock => {
                     if let Err(error) = self.emergency_lock() {
                         self.error = Some(error.to_string());
@@ -550,6 +559,25 @@ impl RunOnMineDesktop {
         {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if let Some(acceptance) = self.lifecycle_acceptance.as_mut()
+                && let Err(error) = acceptance.mark_close_intercepted()
+            {
+                self.error = Some(error.to_string());
+            }
+        }
+    }
+
+    fn process_lifecycle_acceptance(&mut self, context: &egui::Context) {
+        let Some(acceptance) = self.lifecycle_acceptance.as_mut() else {
+            return;
+        };
+        match acceptance.process(context, self.shell.is_available()) {
+            Ok(true) => {
+                self.exit_requested = true;
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Ok(false) => {}
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
 
@@ -598,6 +626,7 @@ impl RunOnMineDesktop {
 
 impl eframe::App for RunOnMineDesktop {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_lifecycle_acceptance(context);
         self.process_shell(context);
         self.process_close_request(context);
         self.process_acceptance(context);

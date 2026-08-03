@@ -128,51 +128,6 @@ PY
   fail "Cloudflare Quick Tunnel did not become ready"
 }
 
-window_count() {
-  local pid=$1
-  osascript - "$pid" <<'OSA' 2>/dev/null
-on run argv
-  set targetPid to item 1 of argv as integer
-  tell application "System Events"
-    set matches to every application process whose unix id is targetPid
-    if (count of matches) is 0 then return 0
-    tell item 1 of matches to return count of windows
-  end tell
-end run
-OSA
-}
-
-wait_window_count() {
-  local pid=$1 comparison=$2
-  for _ in $(seq 1 200); do
-    kill -0 "$pid" 2>/dev/null || fail "desktop process exited while waiting for a window"
-    local count
-    count=$(window_count "$pid" || echo 0)
-    if [[ $comparison == visible && $count -ge 1 ]]; then return 0; fi
-    if [[ $comparison == hidden && $count -eq 0 ]]; then return 0; fi
-    sleep 0.1
-  done
-  fail "desktop window did not become $comparison"
-}
-
-close_window() {
-  local pid=$1
-  osascript - "$pid" <<'OSA'
-on run argv
-  set targetPid to item 1 of argv as integer
-  tell application "System Events"
-    set matches to every application process whose unix id is targetPid
-    if (count of matches) is 0 then error "desktop process is missing"
-    tell item 1 of matches
-      set frontmost to true
-      if (count of windows) is 0 then error "desktop window is missing"
-      perform action "AXClose" of window 1
-    end tell
-  end tell
-end run
-OSA
-}
-
 validate_desktop_report() {
   local path=$1 architecture=$2
   python3 - "$path" "$architecture" <<'PY'
@@ -233,32 +188,43 @@ run_desktop_acceptance() {
 }
 
 run_desktop_lifecycle() {
-  local primary_pid secondary_pid secondary_status=0
-  "$desktop" >"$output/desktop-primary.log" 2>&1 &
+  local report="$output/desktop-lifecycle.json" ready="$output/desktop-lifecycle.ready"
+  local primary_pid secondary_status=0 primary_status=0
+  rm -f -- "$report" "$ready"
+  RUNONMINE_DESKTOP_LIFECYCLE_REPORT="$report" \
+  RUNONMINE_DESKTOP_LIFECYCLE_READY="$ready" \
+    "$desktop" >"$output/desktop-primary.log" 2>&1 &
   primary_pid=$!
-  wait_window_count "$primary_pid" visible
-  close_window "$primary_pid"
-  wait_window_count "$primary_pid" hidden
-  "$desktop" >"$output/desktop-secondary.log" 2>&1 &
-  secondary_pid=$!
-  for _ in $(seq 1 100); do
-    kill -0 "$secondary_pid" 2>/dev/null || break
+  for _ in $(seq 1 600); do
+    [[ -f $ready ]] && break
+    kill -0 "$primary_pid" 2>/dev/null || fail "desktop process exited before close-to-menu-bar completed"
     sleep 0.05
   done
-  if kill -0 "$secondary_pid" 2>/dev/null; then
-    kill "$secondary_pid" 2>/dev/null || true
-    fail "second desktop instance did not exit"
-  fi
-  wait "$secondary_pid" || secondary_status=$?
+  [[ -f $ready ]] || fail "desktop lifecycle ready marker was not created"
+  [[ $(cat "$ready") == hidden ]] || fail "desktop lifecycle ready marker is invalid"
+  "$desktop" >"$output/desktop-secondary.log" 2>&1 || secondary_status=$?
   [[ $secondary_status -eq 0 ]] || fail "second desktop instance exited with $secondary_status"
-  kill -0 "$primary_pid" 2>/dev/null || fail "primary desktop exited after close-to-tray"
-  wait_window_count "$primary_pid" visible
-  local matches
-  matches=$(pgrep -f "^$desktop$" | wc -l | tr -d ' ')
-  [[ $matches -eq 1 ]] || fail "single-instance contract expected one desktop process, found $matches"
-  kill "$primary_pid" 2>/dev/null || true
-  wait "$primary_pid" 2>/dev/null || true
+  for _ in $(seq 1 600); do
+    [[ -f $report ]] && break
+    kill -0 "$primary_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  wait "$primary_pid" || primary_status=$?
+  [[ $primary_status -eq 0 && -f $report ]] || fail "primary desktop lifecycle did not finish cleanly"
+  python3 - "$report" <<'PYLIFECYCLE'
+import json, pathlib, sys
+report=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert report["schema_version"] == 1
+assert report["platform"] == "macos"
+assert report["architecture"] == "aarch64"
+assert report["native_shell_available"] is True
+assert report["close_request_intercepted"] is True
+assert report["restored_by_second_instance"] is True
+assert report["single_instance_transport"] == "owner-private-unix-socket"
+PYLIFECYCLE
+  pgrep -f "^$desktop$" >/dev/null 2>&1 && fail "desktop lifecycle left a process running"
 }
+
 
 prepare() {
   [[ -n $dmg && -n $sbom ]] || usage
