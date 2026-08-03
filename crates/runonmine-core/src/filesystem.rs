@@ -589,9 +589,14 @@ mod tests {
         std::fs::write(root.path().join("private/report.txt"), b"report")?;
         let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
 
+        let selected_root = scoped
+            .roots()
+            .into_iter()
+            .next()
+            .context("selected filesystem root is missing")?;
         assert_eq!(
             scoped.resolve_policy_path(Path::new("private/report.txt"))?,
-            root.path().join("private/report.txt")
+            selected_root.join("private/report.txt")
         );
         assert_eq!(
             scoped.resolve_policy_path(&root.path().join("private/report.txt"))?,

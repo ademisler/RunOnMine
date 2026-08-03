@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Align the cross-platform filesystem policy-path regression with the selected canonical root identity so Windows verbatim paths are tested without weakening path authorization.
 - Launch the Windows helper second-user denial probe with an explicit alternate-user process instead of requiring the temporary account to hold the system-wide batch-logon right.
 - Wait for the Windows LocalSystem helper service to reach the stopped state before deleting its SCM entry and installed binary, preventing partial uninstall and locked executable residue.
 - Register the Windows second-user helper denial task with the PowerShell 5.1 password-logon parameter set instead of mixing incompatible principal and credential parameter sets.
