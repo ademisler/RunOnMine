@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Stop the running Windows user Scheduled Task before deleting it and normalize quoted Task Scheduler action paths during reboot acceptance, preventing locked versioned-agent residue and false path failures.
 - Explicitly opt the three private headless applications into cargo-dist so release archives remain buildable while the workspace stays non-publishable.
 - Align MCP filesystem authorization regressions with the selected canonical root identity so Windows verbatim resource paths are asserted consistently for reads and moves.
 - Drain Windows acceptance child stdout and stderr concurrently before waiting for exit so verbose Cargo and installer processes cannot deadlock on full redirected pipe buffers.

@@ -880,6 +880,19 @@ impl UserService {
     #[cfg(windows)]
     #[allow(clippy::unused_self)]
     fn uninstall_windows(&self) -> Result<()> {
+        if windows_scheduled_task_running()? {
+            command_success(
+                Command::new("schtasks.exe").args(["/End", "/TN", "RunOnMine Agent"]),
+                "failed to stop the logon scheduled task",
+            )?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while windows_scheduled_task_running()? {
+                if std::time::Instant::now() >= deadline {
+                    bail!("the logon scheduled task did not stop before removal");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
         command_success(
             Command::new("schtasks.exe").args(["/Delete", "/F", "/TN", "RunOnMine Agent"]),
             "failed to remove the logon scheduled task",

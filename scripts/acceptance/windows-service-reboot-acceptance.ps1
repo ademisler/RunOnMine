@@ -47,7 +47,9 @@ function Assert-TaskContract {
     if ([string]$task.Principal.RunLevel -ne "Limited") { throw "scheduled task RunLevel is $($task.Principal.RunLevel)" }
     $action = @($task.Actions | Select-Object -First 1)[0]
     if (-not $action -or [string]$action.Arguments -ne "run") { throw "scheduled task action arguments are not 'run'" }
-    $agent = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$action.Execute))
+    $taskExecutable = ([string]$action.Execute).Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($taskExecutable)) { throw "scheduled task executable is empty" }
+    $agent = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($taskExecutable))
     if (-not (Test-Path -LiteralPath $agent -PathType Leaf)) { throw "versioned scheduled-task agent is missing" }
     if ($agent -notmatch "(?i)\\service-bin\\0\.1\.0-beta\.1\\runonmine-agent\.exe$") {
         throw "scheduled task does not use the versioned RunOnMine agent"
