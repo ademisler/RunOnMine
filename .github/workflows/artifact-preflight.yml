@@ -87,7 +87,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-0
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-unknown-linux-gnu
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
         with:
           tool: cargo-packager@0.11.8
       - name: Run isolated CLI and MCP acceptance
@@ -190,7 +190,7 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-pc-windows-msvc
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
         with:
           tool: cargo-packager@0.11.8
       - run: choco install nsis --yes --no-progress
