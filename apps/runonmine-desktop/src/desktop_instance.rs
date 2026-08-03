@@ -325,6 +325,7 @@ mod native {
         }
 
         pub(crate) fn try_command(&self) -> Option<DesktopCommand> {
+            debug_assert!(!self._mutex.0.is_null());
             None
         }
     }
