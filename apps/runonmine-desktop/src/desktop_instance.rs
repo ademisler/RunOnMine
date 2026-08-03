@@ -325,7 +325,10 @@ mod native {
         }
 
         pub(crate) fn try_command(&self) -> Option<DesktopCommand> {
-            debug_assert!(!self._mutex.0.is_null());
+            assert!(
+                !self._mutex.0.is_null(),
+                "Windows desktop mutex handle invariant was violated"
+            );
             None
         }
     }
