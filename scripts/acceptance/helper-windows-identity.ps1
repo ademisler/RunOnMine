@@ -41,9 +41,22 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "helper installation exited with code $LASTEXITCODE" }
     $helperInstalled = $true
 
-    $status = (& $runOnMinePath admin status | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $status -notmatch "(?i)healthy") {
-        throw "owner helper health check failed: $status"
+    $statusText = (& $runOnMinePath admin status | Out-String)
+    $statusExitCode = $LASTEXITCODE
+    try {
+        $status = $statusText | ConvertFrom-Json
+    }
+    catch {
+        throw "owner helper status was not valid JSON: $statusText"
+    }
+    if (
+        $statusExitCode -ne 0 -or
+        -not [bool]$status.installed -or
+        -not [bool]$status.running -or
+        -not [bool]$status.available -or
+        [string]$status.state.status -ne "available"
+    ) {
+        throw "owner helper health check failed: $statusText"
     }
     $service = Get-CimInstance Win32_Service -Filter "Name='RunOnMineHelper'"
     if (-not $service) { throw "RunOnMineHelper service was not registered" }

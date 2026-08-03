@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Validate the Windows helper identity acceptance against the structured `admin status` availability contract instead of the removed human-readable `healthy` marker.
 - Launch the Windows privileged helper through native `ShellExecuteExW` process handles instead of PowerShell `Start-Process`, eliminating hangs and null exit-code handling during UAC elevation.
 - Preserve helper executable and DLL-search integrity while allowing harmless create-only rights on higher Windows path ancestors such as the standard `C:\` ACL.
 - Use the Windows PowerShell 5.1-compatible cryptographic RNG instance API in helper identity acceptance while preserving 256-bit random attacker-account credentials.
