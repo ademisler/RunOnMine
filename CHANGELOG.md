@@ -5,6 +5,12 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Freeze release candidates to an exact committed source fingerprint, invalidate acceptance after any later production/workflow/package/documentation change, require passed platform evidence to name that candidate and artifact hash, and make release jobs build the frozen revision instead of evidence-only commits.
+- Complete the macOS product lifecycle: enable the owner-private Unix-socket single-instance contract, add a universal DMG/reboot/LaunchAgent/MCP/Quick-Tunnel/lock/uninstall/residue harness, and preserve MacMCP services and loopback port 45799 as explicit acceptance invariants.
+- Add a fail-closed Apple distribution path using Developer ID, hardened runtime, App Store Connect notarization, stapling, signed DMG and Gatekeeper verification; private-beta artifacts remain explicitly unsigned when publisher credentials are absent.
+- Route untrusted fork pull requests to GitHub-hosted Ubuntu while reserving the persistent self-hosted `runonmine` runner for trusted owner branches, with checksum-pinned Gitleaks bootstrap on the hosted path.
+- Add source-controlled RunOnMine artwork, a macOS ICNS, a secure first-run desktop card, Safe/Developer/Automation product-profile guidance, a concise security-flow diagram, and a dedicated onboarding guide that makes privileged-helper separation and Emergency Lock visible.
+
 - Stop the running Windows user Scheduled Task before deleting it and normalize quoted Task Scheduler action paths during reboot acceptance, preventing locked versioned-agent residue and false path failures.
 - Explicitly opt the three private headless applications into cargo-dist so release archives remain buildable while the workspace stays non-publishable.
 - Align MCP filesystem authorization regressions with the selected canonical root identity so Windows verbatim resource paths are asserted consistently for reads and moves.

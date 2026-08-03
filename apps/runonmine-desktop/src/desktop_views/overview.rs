@@ -17,6 +17,63 @@ impl RunOnMineDesktop {
             .unwrap_or_default();
         let audit_integrity = matches!(self.audit_valid, Some(true));
 
+        if allowed_roots == 0 || enabled_connectors == 0 {
+            let mut onboarding_target = None;
+            theme::card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    theme::icon(ui, UiIcon::Shield, 20.0, theme::ACCENT);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Secure first run")
+                                .size(16.0)
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Start in Safe mode: select only the project roots AI may see, then review or add a connector. Writes and execution still require local review.",
+                            )
+                            .size(11.5)
+                            .color(theme::MUTED),
+                        );
+                    });
+                });
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add(theme::primary_button("1. Select roots")).clicked() {
+                        onboarding_target = Some(Tab::Permissions);
+                    }
+                    let connector_action = if enabled_connectors == 0 {
+                        "2. Add connector"
+                    } else {
+                        "2. Review connector"
+                    };
+                    if ui.add(theme::primary_button(connector_action)).clicked() {
+                        onboarding_target = Some(Tab::Connections);
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "3. Review exact actions in Approvals · Emergency Lock is always available in the sidebar and menu bar.",
+                        )
+                        .size(11.0)
+                        .color(theme::MUTED),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Administrator access is not installed by setup. The privileged helper is a separate, explicit advanced installation.",
+                    )
+                    .size(10.5)
+                    .color(theme::WARNING),
+                );
+            });
+            if let Some(tab) = onboarding_target {
+                self.selected_tab = tab;
+            }
+            ui.add_space(10.0);
+        }
+
         let metrics = [
             (
                 UiIcon::Monitor,

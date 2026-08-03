@@ -13,6 +13,8 @@ use crate::layout;
 use crate::desktop_app::model::Tab;
 
 const REPORT_ENV: &str = "RUNONMINE_DESKTOP_ACCEPTANCE_REPORT";
+const SCREENSHOT_ENV: &str = "RUNONMINE_DESKTOP_ACCEPTANCE_SCREENSHOT";
+const SCREENSHOT_MARKER: &str = "runonmine-acceptance-overview";
 
 #[derive(Debug)]
 pub(crate) struct DesktopAcceptance {
@@ -20,6 +22,10 @@ pub(crate) struct DesktopAcceptance {
     rendered: Vec<RenderedView>,
     report_written: bool,
     completed_at: Option<Instant>,
+    screenshot_output: Option<PathBuf>,
+    screenshot_requested: bool,
+    screenshot_written: bool,
+    screenshot_ready_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,12 +74,63 @@ impl DesktopAcceptance {
         let name = requested
             .file_name()
             .context("desktop acceptance report has no file name")?;
+        let screenshot_output = optional_new_absolute_path(SCREENSHOT_ENV)?;
         Ok(Some(Self {
             output: parent.join(name),
             rendered: Vec::with_capacity(Tab::ALL.len()),
             report_written: false,
             completed_at: None,
+            screenshot_output,
+            screenshot_requested: false,
+            screenshot_written: false,
+            screenshot_ready_at: None,
         }))
+    }
+
+    pub(crate) fn process_screenshot(&mut self, context: &egui::Context) -> Result<bool> {
+        let screenshot = context.input(|input| {
+            input.events.iter().find_map(|event| {
+                let egui::Event::Screenshot {
+                    user_data, image, ..
+                } = event
+                else {
+                    return None;
+                };
+                let marker = user_data
+                    .data
+                    .as_ref()
+                    .and_then(|value| value.downcast_ref::<&'static str>());
+                (marker.copied() == Some(SCREENSHOT_MARKER)).then(|| image.clone())
+            })
+        });
+        if let Some(image) = screenshot {
+            let output = self
+                .screenshot_output
+                .as_ref()
+                .context("desktop acceptance screenshot output is unavailable")?;
+            write_new_png(output, &image)?;
+            self.screenshot_written = true;
+        }
+        if self.screenshot_output.is_none() || self.screenshot_written {
+            return Ok(false);
+        }
+        if self.rendered.is_empty() {
+            self.screenshot_ready_at = None;
+            return Ok(false);
+        }
+        let ready_at = self.screenshot_ready_at.get_or_insert_with(Instant::now);
+        if ready_at.elapsed() < Duration::from_secs(1) {
+            context.request_repaint_after(Duration::from_millis(50));
+            return Ok(true);
+        }
+        if !self.screenshot_requested {
+            context.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                SCREENSHOT_MARKER,
+            )));
+            self.screenshot_requested = true;
+        }
+        context.request_repaint();
+        Ok(true)
     }
 
     pub(crate) fn next_tab(&self) -> Option<Tab> {
@@ -135,6 +192,59 @@ impl DesktopAcceptance {
     }
 }
 
+fn optional_new_absolute_path(variable: &str) -> Result<Option<PathBuf>> {
+    let Some(value) = std::env::var_os(variable) else {
+        return Ok(None);
+    };
+    let requested = PathBuf::from(value);
+    if !requested.is_absolute() {
+        bail!("{variable} must be an absolute path");
+    }
+    if requested.exists() {
+        bail!("{variable} must not already exist");
+    }
+    let parent = requested
+        .parent()
+        .context("desktop acceptance screenshot has no parent directory")?
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "desktop acceptance screenshot parent is unavailable: {}",
+                requested.display()
+            )
+        })?;
+    let name = requested
+        .file_name()
+        .context("desktop acceptance screenshot has no file name")?;
+    Ok(Some(parent.join(name)))
+}
+
+fn write_new_png(path: &Path, image: &egui::ColorImage) -> Result<()> {
+    use image::ImageEncoder as _;
+
+    let width = u32::try_from(image.size[0]).context("screenshot width is too large")?;
+    let height = u32::try_from(image.size[1]).context("screenshot height is too large")?;
+    let mut rgba = Vec::with_capacity(image.pixels.len().saturating_mul(4));
+    for pixel in &image.pixels {
+        rgba.extend_from_slice(&pixel.to_array());
+    }
+    let mut encoded = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut encoded).write_image(
+        &rgba,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("could not create desktop screenshot: {}", path.display()))?;
+    file.write_all(&encoded)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn write_new_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     let mut file = OpenOptions::new()
@@ -166,6 +276,10 @@ mod tests {
             rendered: Vec::new(),
             report_written: false,
             completed_at: None,
+            screenshot_output: None,
+            screenshot_requested: false,
+            screenshot_written: false,
+            screenshot_ready_at: None,
         };
         assert!(acceptance.write_report(true).is_err());
         for (tab, _, _) in Tab::ALL {

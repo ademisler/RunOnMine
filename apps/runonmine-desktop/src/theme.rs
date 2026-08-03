@@ -236,7 +236,7 @@ pub(crate) fn metric_card(
 ) -> egui::Response {
     let available = ui.available_width();
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(available, 165.0), egui::Sense::click());
+        ui.allocate_exact_size(egui::vec2(available, 180.0), egui::Sense::click());
     let fill = if response.hovered() {
         SURFACE_HOVER
     } else {

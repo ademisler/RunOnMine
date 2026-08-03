@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -78,6 +78,10 @@ enum XtaskCommand {
         #[arg(long, default_value = "private-beta")]
         profile: String,
     },
+    /// Freeze the current clean commit as the exact release candidate.
+    FreezeReleaseCandidate,
+    /// Print the frozen release-candidate revision for CI checkout.
+    ReleaseCandidateRevision,
 }
 
 fn main() -> Result<()> {
@@ -99,6 +103,8 @@ fn main() -> Result<()> {
             skip_secret_scan,
         } => verify(headless, skip_secret_scan),
         XtaskCommand::ReleaseReadiness { profile } => release_readiness(&profile),
+        XtaskCommand::FreezeReleaseCandidate => freeze_release_candidate(),
+        XtaskCommand::ReleaseCandidateRevision => release_candidate_revision(),
     }
 }
 
@@ -412,6 +418,10 @@ fn run_checked(program: &str, arguments: &[&str]) -> Result<()> {
     Ok(())
 }
 
+const RELEASE_CANDIDATE_FILE: &str = "acceptance/release-candidate.toml";
+const RELEASE_GATES_FILE: &str = "acceptance/release-gates.toml";
+const RELEASE_EVIDENCE_PREFIX: &str = "acceptance/evidence/";
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReleaseGateManifest {
@@ -428,20 +438,38 @@ struct ReleaseGate {
     required_for: Vec<String>,
     #[serde(default)]
     evidence: String,
+    #[serde(default)]
+    evidence_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseCandidateManifest {
+    schema: u32,
+    revision: String,
+    source_fingerprint: String,
 }
 
 fn release_readiness(profile: &str) -> Result<()> {
     if !matches!(profile, "private-beta" | "public-beta") {
         bail!("release profile must be private-beta or public-beta");
     }
-    let path = workspace_root()?.join("acceptance/release-gates.toml");
+    let root = workspace_root()?;
+    let candidate = validate_release_candidate(&root)?;
+    let path = root.join(RELEASE_GATES_FILE);
     let manifest: ReleaseGateManifest = toml::from_str(&fs::read_to_string(&path)?)?;
     if manifest.schema != 1 {
         bail!("unsupported release-gate schema {}", manifest.schema);
     }
+    for gate in &manifest.gate {
+        validate_release_gate_evidence(&root, gate, &candidate.revision)?;
+    }
     let pending = pending_release_gates(&manifest, profile)?;
     if pending.is_empty() {
-        println!("All {profile} acceptance gates passed.");
+        println!(
+            "All {profile} acceptance gates passed for frozen candidate {}.",
+            candidate.revision
+        );
         return Ok(());
     }
     for gate in &pending {
@@ -454,6 +482,223 @@ fn release_readiness(profile: &str) -> Result<()> {
         "{} required {profile} acceptance gate(s) are not passed",
         pending.len()
     )
+}
+
+fn freeze_release_candidate() -> Result<()> {
+    let root = workspace_root()?;
+    require_clean_worktree(&root)?;
+    let revision = source_revision(&root)?;
+    let source_fingerprint = release_source_fingerprint(&root, &revision)?;
+    let manifest = ReleaseCandidateManifest {
+        schema: 1,
+        revision: revision.clone(),
+        source_fingerprint,
+    };
+    let path = root.join(RELEASE_CANDIDATE_FILE);
+    fs::write(&path, toml::to_string_pretty(&manifest)? + "\n")?;
+    println!("Frozen release candidate {revision} in {}.", path.display());
+    Ok(())
+}
+
+fn release_candidate_revision() -> Result<()> {
+    let root = workspace_root()?;
+    let candidate = validate_release_candidate(&root)?;
+    println!("{}", candidate.revision);
+    Ok(())
+}
+
+fn validate_release_candidate(root: &Path) -> Result<ReleaseCandidateManifest> {
+    require_clean_worktree(root)?;
+    let path = root.join(RELEASE_CANDIDATE_FILE);
+    let manifest: ReleaseCandidateManifest = toml::from_str(&fs::read_to_string(&path)?)?;
+    if manifest.schema != 1 {
+        bail!("unsupported release-candidate schema {}", manifest.schema);
+    }
+    validate_lower_hex(&manifest.revision, 40, "release candidate revision")?;
+    validate_lower_hex(
+        &manifest.source_fingerprint,
+        64,
+        "release candidate source fingerprint",
+    )?;
+    if manifest.revision.chars().all(|character| character == '0')
+        || manifest
+            .source_fingerprint
+            .chars()
+            .all(|character| character == '0')
+    {
+        bail!("release candidate has not been frozen");
+    }
+    git_success(
+        root,
+        &[
+            "cat-file",
+            "-e",
+            &format!("{}^{{commit}}", manifest.revision),
+        ],
+        "release candidate revision does not exist",
+    )?;
+    git_success(
+        root,
+        &["merge-base", "--is-ancestor", &manifest.revision, "HEAD"],
+        "release candidate revision is not an ancestor of HEAD",
+    )?;
+    let frozen = release_source_fingerprint(root, &manifest.revision)?;
+    if frozen != manifest.source_fingerprint {
+        bail!("release candidate manifest fingerprint does not match its revision");
+    }
+    let current = release_source_fingerprint(root, "HEAD")?;
+    if current != manifest.source_fingerprint {
+        bail!(
+            "release source changed after candidate freeze; freeze and rerun all platform acceptance"
+        );
+    }
+    let touched = git_text(
+        root,
+        &[
+            "log",
+            "--format=",
+            "--name-only",
+            &format!("{}..HEAD", manifest.revision),
+        ],
+    )?;
+    let mut forbidden = touched
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| !is_release_metadata_path(path))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    forbidden.sort();
+    forbidden.dedup();
+    if !forbidden.is_empty() {
+        bail!(
+            "non-evidence paths were committed after candidate freeze: {}",
+            forbidden.join(", ")
+        );
+    }
+    Ok(manifest)
+}
+
+fn release_source_fingerprint(root: &Path, revision: &str) -> Result<String> {
+    let tree = git_text(root, &["ls-tree", "-r", "--full-tree", revision])?;
+    let mut hasher = Sha256::new();
+    for line in tree.lines() {
+        let Some((_, path)) = line.split_once('\t') else {
+            bail!("unexpected git ls-tree output while freezing release source");
+        };
+        if is_release_metadata_path(path) {
+            continue;
+        }
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn is_release_metadata_path(path: &str) -> bool {
+    matches!(path, RELEASE_CANDIDATE_FILE | RELEASE_GATES_FILE)
+        || path.starts_with(RELEASE_EVIDENCE_PREFIX)
+}
+
+fn require_clean_worktree(root: &Path) -> Result<()> {
+    if !git_text(root, &["status", "--porcelain"])?
+        .trim()
+        .is_empty()
+    {
+        bail!("release candidate operations require a clean committed worktree");
+    }
+    Ok(())
+}
+
+fn git_text(root: &Path, arguments: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .context("failed to execute git")?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8(output.stdout).context("git output was not UTF-8")
+}
+
+fn git_success(root: &Path, arguments: &[&str], context: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .status()
+        .with_context(|| format!("failed to execute git for {context}"))?;
+    if !status.success() {
+        bail!("{context}");
+    }
+    Ok(())
+}
+
+fn validate_lower_hex(value: &str, length: usize, label: &str) -> Result<()> {
+    if value.len() != length
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} must be {length} lowercase hexadecimal characters");
+    }
+    Ok(())
+}
+
+fn validate_release_gate_evidence(root: &Path, gate: &ReleaseGate, revision: &str) -> Result<()> {
+    let expected_platform = match gate.id.as_str() {
+        "macos-clean-install" => Some("macos-universal"),
+        "linux-clean-install" => Some("linux-x86_64"),
+        "linux-desktop-clean-install" => Some("linux-desktop-x86_64"),
+        "windows-clean-install" => Some("windows-x86_64"),
+        _ => None,
+    };
+    if gate.status != "passed" {
+        return Ok(());
+    }
+    let Some(expected_platform) = expected_platform else {
+        return Ok(());
+    };
+    let evidence_file = gate
+        .evidence_file
+        .as_deref()
+        .with_context(|| format!("passed gate {} must name an evidence_file", gate.id))?;
+    if !evidence_file.starts_with(RELEASE_EVIDENCE_PREFIX)
+        || evidence_file.contains("..")
+        || Path::new(evidence_file).is_absolute()
+    {
+        bail!(
+            "gate {} evidence_file must stay below acceptance/evidence",
+            gate.id
+        );
+    }
+    let evidence: Value = serde_json::from_slice(&fs::read(root.join(evidence_file))?)?;
+    if evidence["platform"].as_str() != Some(expected_platform) {
+        bail!(
+            "gate {} evidence platform must be {expected_platform}",
+            gate.id
+        );
+    }
+    if evidence["source_revision"].as_str() != Some(revision) {
+        bail!(
+            "gate {} evidence was not produced for frozen candidate {revision}",
+            gate.id
+        );
+    }
+    let artifact_sha256 = evidence["artifact_sha256"].as_str().unwrap_or_default();
+    validate_lower_hex(
+        artifact_sha256,
+        64,
+        &format!("gate {} artifact_sha256", gate.id),
+    )?;
+    if artifact_sha256.chars().all(|character| character == '0') {
+        bail!("gate {} artifact_sha256 cannot be a placeholder", gate.id);
+    }
+    Ok(())
 }
 
 fn pending_release_gates<'a>(
@@ -1239,6 +1484,7 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                     status: "pending".to_owned(),
                     required_for: vec!["private-beta".to_owned(), "public-beta".to_owned()],
                     evidence: String::new(),
+                    evidence_file: None,
                 },
                 ReleaseGate {
                     id: "public".to_owned(),
@@ -1246,6 +1492,7 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                     status: "blocked".to_owned(),
                     required_for: vec!["public-beta".to_owned()],
                     evidence: "certificate required".to_owned(),
+                    evidence_file: None,
                 },
                 ReleaseGate {
                     id: "done".to_owned(),
@@ -1253,6 +1500,7 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                     status: "passed".to_owned(),
                     required_for: vec!["private-beta".to_owned()],
                     evidence: "report".to_owned(),
+                    evidence_file: None,
                 },
             ],
         };
@@ -1271,9 +1519,22 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                 status: "passed".to_owned(),
                 required_for: vec!["private-beta".to_owned()],
                 evidence: String::new(),
+                evidence_file: None,
             }],
         };
         assert!(pending_release_gates(&manifest, "private-beta").is_err());
+    }
+
+    #[test]
+    fn release_candidate_allows_only_machine_readable_acceptance_metadata() {
+        assert!(is_release_metadata_path(RELEASE_CANDIDATE_FILE));
+        assert!(is_release_metadata_path(RELEASE_GATES_FILE));
+        assert!(is_release_metadata_path(
+            "acceptance/evidence/macos-universal-clean-install.json"
+        ));
+        assert!(!is_release_metadata_path("Cargo.lock"));
+        assert!(!is_release_metadata_path("docs/releasing.md"));
+        assert!(!is_release_metadata_path("acceptance/README.md"));
     }
 
     #[test]

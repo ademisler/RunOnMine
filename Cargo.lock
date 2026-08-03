@@ -4795,6 +4795,7 @@ dependencies = [
  "command-group",
  "eframe",
  "egui",
+ "image",
  "ksni",
  "nix 0.31.3",
  "runonmine-core",

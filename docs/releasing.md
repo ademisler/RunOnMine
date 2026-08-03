@@ -15,9 +15,27 @@ Before creating a tag:
 6. record evidence in `acceptance/release-gates.toml` and pass `cargo run --locked -p xtask -- release-readiness --profile private-beta`;
 7. present remaining risks and the secret-scan result to the repository owner.
 
-The release workflow independently runs the private-beta readiness command and
-stops before packaging while any required gate is `pending` or `blocked`. Public
-beta also requires signing/notarization and protected-main gates. See
+After all production code, dependency, workflow, documentation, and packaging
+changes are committed, freeze that exact source revision:
+
+```console
+cargo run --locked -p xtask -- freeze-release-candidate
+git add acceptance/release-candidate.toml
+git commit -m "chore(release): freeze beta candidate"
+```
+
+Run every platform acceptance job against the revision recorded in
+`acceptance/release-candidate.toml`. Only that manifest,
+`acceptance/release-gates.toml`, and machine-readable files below
+`acceptance/evidence/` may be committed after the freeze. Readiness fingerprints
+the complete source tree and inspects every path touched after the candidate;
+a later code, dependency, workflow, package, or narrative-documentation change
+invalidates the candidate even if it is subsequently reverted.
+
+The release workflow runs readiness at the tag commit, then checks out and builds
+the frozen source revision. It stops while any required gate is `pending` or
+`blocked`. Public beta additionally requires independent security review,
+hosted platform CI, publisher signing, and protected-main gates. See
 [release acceptance](acceptance.md).
 
 The tag must exactly match the Cargo version:
@@ -40,11 +58,11 @@ It produces:
 - CycloneDX JSON SBOMs containing component references, dependency edges, Cargo.lock package checksums where available, and the Cargo.lock integrity hash;
 - SHA-256 files for release artifacts.
 
-The workflow opens a draft prerelease only. Artifacts are deliberately unsigned and must not be described as signed, notarized, or trusted by the operating system. Signing and notarization require external publisher credentials and a separate owner decision; CI cannot manufacture those credentials. Publishing the draft and making the repository public both require separate owner approval.
+The workflow opens a draft prerelease only. Private-beta artifacts are deliberately unsigned and must not be described as signed, notarized, or trusted by the operating system. For public beta, the checked-in macOS path imports a protected Developer ID certificate, enables hardened runtime, notarizes and staples the universal application, signs the DMG, and runs Gatekeeper verification. Missing credentials or failed verification stop the job. Windows Authenticode remains a separate blocked gate. Publishing the draft and making the repository public both require separate owner approval.
 
 ## Hosted platform validation
 
-`CI` runs one consolidated Linux quality job on the hardened self-hosted runner. It executes `xtask verify --headless` (formatting, version consistency, headless Clippy/tests, both dependency audits, dependency policy, and the complete-history Gitleaks scan), the desktop crate's no-UI contract, and the enforced coverage baseline in one checkout. The job uses an ephemeral Cargo target directory and removes it even after failure, avoiding repeated clean builds and stale runner disk growth. Independent `Security` and `Coverage` workflows remain available for manual dispatch and scheduled sweeps.
+`CI` exposes one stable `Linux quality` check. Pushes, manual runs, and pull requests from owner branches use the hardened self-hosted runner. Fork pull requests are evaluated from the protected base workflow and route to GitHub-hosted `ubuntu-24.04`; they never receive the persistent runner or repository secrets. The hosted path installs Gitleaks 8.24.3 only after verifying the checked-in official SHA-256. Both paths execute the same headless quality, MCP, and coverage contract and remove ephemeral targets after the run. Independent `Security` and `Coverage` workflows remain available for manual dispatch and scheduled sweeps.
 
 `Platform CI` is separate from the self-hosted quality path. Its macOS
 arm64/x86_64, Windows x86_64, and Linux ARM64 jobs run on every pull request and
@@ -62,7 +80,9 @@ cause unless GitHub reports that cause explicitly.
 
 ```console
 cargo run --locked -p xtask -- verify
+cargo run --locked -p xtask -- freeze-release-candidate
 cargo run --locked -p xtask -- release-readiness --profile private-beta
+cargo run --quiet --locked -p xtask -- release-candidate-revision
 cargo run --locked -p xtask -- sync-versions
 cargo run --locked -p xtask -- package --target <rust-target>
 cargo run --locked -p xtask -- stage-packager --target <rust-target>
@@ -118,9 +138,11 @@ accepted. Update the baseline only after reviewing platform compatibility and
 audit/binary-size impact.
 
 Private-beta artifacts remain explicitly unsigned. Public-beta packaging is
-hard-blocked until checked-in Apple signing/notarization and Windows Authenticode
-steps exist; merely supplying secret values is not accepted as signing evidence.
-Do not relabel unsigned artifacts as public candidates.
+hard-blocked until independent security review, Developer ID and Windows
+publisher credentials, successful notarization/AuthentiCode verification,
+hosted platform CI, and protected-main evidence all pass. Merely supplying
+secret values is not accepted as signing evidence. Do not relabel unsigned
+artifacts as public candidates.
 
 ## Clean-install evidence
 

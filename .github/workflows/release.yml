@@ -26,6 +26,8 @@ jobs:
   release-plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      candidate_revision: ${{ steps.candidate.outputs.revision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
@@ -37,37 +39,54 @@ jobs:
         with:
           tool: cargo-dist@0.32.0
       - run: cargo run --locked -p xtask -- verify-versions
-      - run: cargo run --locked -p xtask -- verify-release-tag --tag "${{ github.ref_name }}"
+      - name: Verify release tag
+        if: github.ref_type == 'tag'
+        run: cargo run --locked -p xtask -- verify-release-tag --tag "${{ github.ref_name }}"
       - run: cargo run --locked -p xtask -- release-readiness --profile "${RELEASE_PROFILE}"
+      - name: Resolve frozen candidate revision
+        id: candidate
+        run: echo "revision=$(cargo run --quiet --locked -p xtask -- release-candidate-revision)" >> "$GITHUB_OUTPUT"
+      - name: Check out frozen candidate source
+        run: git checkout --detach "${{ steps.candidate.outputs.revision }}"
+      - run: cargo run --locked -p xtask -- verify-versions
       - run: python3 scripts/release/check-duplicate-dependencies.py
       - name: Verify configured public signing inputs
         if: env.RELEASE_PROFILE == 'public-beta'
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
           WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
         run: |
-          test -n "$APPLE_CERTIFICATE_P12"
+          test -n "$APPLE_CERTIFICATE"
           test -n "$APPLE_CERTIFICATE_PASSWORD"
-          test -n "$APPLE_NOTARY_KEY"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_API_KEY"
+          test -n "$APPLE_API_ISSUER"
+          test -n "$APPLE_API_KEY_P8"
           test -n "$WINDOWS_SIGNING_PFX"
           test -n "$WINDOWS_SIGNING_PASSWORD"
-      - name: Block public beta until signing is implemented
-        if: env.RELEASE_PROFILE == 'public-beta'
-        run: |
-          echo "Public beta is blocked: checked-in Apple signing/notarization and Windows Authenticode steps are not implemented." >&2
-          exit 1
       - run: dist plan --output-format=json
 
   macos-universal:
     needs: release-plan
     runs-on: macos-15
     timeout-minutes: 120
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      RUNONMINE_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install pinned Rust toolchain
@@ -75,6 +94,17 @@ jobs:
       - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
         with:
           tool: cargo-dist@0.32.0,cargo-packager@0.11.8
+      - name: Prepare App Store Connect API key
+        if: env.RELEASE_PROFILE == 'public-beta'
+        run: |
+          key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY}.p8"
+          python3 - "$key_path" <<'PY'
+          import base64, os, pathlib, sys
+          payload=os.environ["APPLE_API_KEY_P8"].encode()
+          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(payload, validate=True))
+          PY
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
       - name: Build cargo-dist headless archives
         run: >-
           dist build --artifacts=local
@@ -115,6 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install pinned Rust toolchain
@@ -153,6 +184,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install Linux desktop build dependencies
@@ -204,6 +236,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install pinned Rust toolchain
@@ -242,7 +275,7 @@ jobs:
           if-no-files-found: error
 
   publish-draft:
-    needs: [macos-universal, linux, linux-desktop, windows]
+    needs: [release-plan, macos-universal, linux, linux-desktop, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -259,8 +292,8 @@ jobs:
           fail_on_unmatched_files: true
           files: artifacts/**/*
           body: |
-            RunOnMine ${{ env.RELEASE_PROFILE }} candidate.
-            Private-beta artifacts are intentionally unsigned. Public-beta publication remains blocked unless signing/notarization gates and clean-install evidence pass.
+            RunOnMine ${{ env.RELEASE_PROFILE }} candidate built from frozen source `${{ needs.release-plan.outputs.candidate_revision }}`.
+            Private-beta artifacts are intentionally unsigned. Public-beta artifacts require Developer ID signing, hardened runtime, notarization, stapling, Windows Authenticode, independent security review, and exact-candidate clean-install evidence.
             Verify every artifact against its accompanying SHA-256 checksum before use.
             SBOM files are provided in CycloneDX JSON format.
             This draft does not change repository visibility.

@@ -10,6 +10,7 @@ binariesDir = "../target/packager-input"
 outDir = "../dist"
 targetTriple = "universal-apple-darwin"
 formats = ["dmg"]
+icons = ["assets/runonmine.icns"]
 resources = ["../README.md"]
 binaries = [
   { path = "runonmine-desktop", main = true },

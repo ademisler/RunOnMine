@@ -554,6 +554,16 @@ impl RunOnMineDesktop {
     }
 
     fn process_acceptance(&mut self, context: &egui::Context) {
+        if let Some(acceptance) = self.acceptance.as_mut() {
+            match acceptance.process_screenshot(context) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
         let next_tab = self
             .acceptance
             .as_ref()

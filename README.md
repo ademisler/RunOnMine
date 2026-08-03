@@ -1,18 +1,54 @@
 # RunOnMine
 
-**Let AI work on the machines you own.**
+<p align="center">
+  <img src="packaging/assets/runonmine.svg" width="112" alt="RunOnMine icon">
+</p>
 
-RunOnMine is a local-first MCP agent intended for an open-source release. It lets
-AI assistants use files, terminals, browsers, and desktop applications on
-machines you own. The
-AI model stays in the chosen AI service; approved tool calls run on your macOS,
-Linux, or Windows machine.
+<p align="center"><strong>Let AI work on the machines you own — through a local security boundary you control.</strong></p>
+
+RunOnMine lets an AI assistant use files, terminals, browsers, and desktop
+applications on macOS, Linux, or Windows without exposing a raw remote shell.
+The model remains in the chosen AI service; every tool call is evaluated on the
+owner's machine against connector identity, selected roots, policy, and local
+approval.
+
+![AI requests pass through the local RunOnMine security boundary before tools execute](docs/assets/security-flow.svg)
+
+![RunOnMine macOS security control center showing secure first-run guidance, connector status, selected roots, approvals and audit integrity](docs/images/control-center-overview.png)
+
+### Why not direct SSH or a raw MCP server?
+
+| Direct machine access | RunOnMine |
+| --- | --- |
+| Broad account authority | Capability- and resource-scoped policy |
+| Static credential often grants everything | Connector and requester identity are evaluated per call |
+| No built-in human checkpoint | Dangerous actions can require exact local approval |
+| Public listener or inbound firewall rule | MCP stays on loopback; managed tunnels connect outward |
+| Ad-hoc logs | Hash-chained audit records and an emergency lock |
+
+### Three-step local start
+
+```console
+runonmine setup --root /absolute/path/to/project
+runonmine policy show
+runonmine agent run
+```
+
+Start with **Safe**. Move to **Developer** only for trusted selected-root coding
+work. **Automation** is the CLI `full` preset and is intentionally broad; remote
+safety ceilings still apply. The privileged helper is always a separate,
+explicit installation and is never installed by setup. See the
+[secure onboarding guide](docs/onboarding.md).
+
+> [!IMPORTANT]
+> RunOnMine never binds MCP to a public interface, never lets a remote connector
+> approve itself, never grants remote administrator execution, and never opens
+> the user's daily browser profile for automation.
 
 > [!WARNING]
 > RunOnMine is pre-release software. Shell, browser, desktop, and administrator
-> tools can make destructive or external changes. The default policy requires
-> local approval before write or execution operations and denies administrator
-> access.
+> tools can make destructive or external changes. The default Safe policy asks
+> locally before write or execution operations and denies administrator access.
 
 ## Status
 

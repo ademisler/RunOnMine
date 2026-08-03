@@ -14,19 +14,20 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HOME: /home/runonmine-ci
-  USER: runonmine-ci
-  LOGNAME: runonmine-ci
-  CARGO_HOME: /home/runonmine-ci/.cargo
-  RUSTUP_HOME: /home/runonmine-ci/.rustup
-  PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  HOME: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '/home/runner' || '/home/runonmine-ci' }}
+  USER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'runner' || 'runonmine-ci' }}
+  LOGNAME: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'runner' || 'runonmine-ci' }}
+  CARGO_HOME: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '/home/runner/.cargo' || '/home/runonmine-ci/.cargo' }}
+  RUSTUP_HOME: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '/home/runner/.rustup' || '/home/runonmine-ci/.rustup' }}
+  PATH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '/home/runner/.local/bin:/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' || '/home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' }}
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
   CARGO_INCREMENTAL: 0
 
 jobs:
   linux-quality:
-    runs-on: [self-hosted, Linux, X64, runonmine]
+    name: Linux quality
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'runonmine' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -34,7 +35,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify isolated runner environment
+        if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
         run: ./scripts/ci/verify-runner-environment.sh
+      - name: Install pinned Gitleaks on untrusted hosted pull requests
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork
+        run: ./scripts/ci/install-gitleaks.sh
       - name: Validate repository documentation
         run: python3 scripts/ci/check-docs.py
       - name: Validate embedded Python heredocs
