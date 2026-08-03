@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Register the Windows second-user helper denial task with the PowerShell 5.1 password-logon parameter set instead of mixing incompatible principal and credential parameter sets.
 - Run the Windows helper identity acceptance through the shared native-process wrapper and bounded native cleanup commands so PowerShell 5.1 cannot hide the original failure behind a hanging cleanup pipeline.
 - Make Windows privileged-helper uninstall treat the named-pipe namespace as IPC rather than a removable filesystem directory, and prove repeated uninstall is idempotent.
 - Validate the Windows helper identity acceptance against the structured `admin status` availability contract instead of the removed human-readable `healthy` marker.

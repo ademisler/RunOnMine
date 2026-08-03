@@ -140,9 +140,8 @@ $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encod
         "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$attackerScript`""
     )
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
-    $principalSpec = New-ScheduledTaskPrincipal -UserId $qualifiedUser -LogonType Password -RunLevel Limited
-    Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principalSpec `
-        -User $qualifiedUser -Password $passwordText -Force | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings `
+        -User $qualifiedUser -Password $passwordText -RunLevel Limited -Force | Out-Null
     $taskRegistered = $true
 
     Start-ScheduledTask -TaskName $taskName
