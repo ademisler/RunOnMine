@@ -257,11 +257,11 @@ fn unix_identity_matches(
     if expected == current {
         return true;
     }
-    let (Some(expected), Some(current)) = (expected, current) else {
-        return false;
-    };
     #[cfg(target_os = "linux")]
     {
+        let (Some(expected), Some(current)) = (expected, current) else {
+            return false;
+        };
         let (map_path, overflow_path) = match kind {
             LinuxIdentityKind::User => ("/proc/self/uid_map", "/proc/sys/kernel/overflowuid"),
             LinuxIdentityKind::Group => ("/proc/self/gid_map", "/proc/sys/kernel/overflowgid"),
