@@ -1005,26 +1005,7 @@ pub(super) fn run_elevated_helper(helper: &Path, arguments: &[std::ffi::OsString
 
 #[cfg(windows)]
 pub(super) fn run_elevated_helper(helper: &Path, arguments: &[std::ffi::OsString]) -> Result<()> {
-    fn quote_powershell(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
-    }
-
-    let argument_list = arguments
-        .iter()
-        .map(|value| quote_powershell(&value.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(",");
-    let script = format!(
-        "$p=Start-Process -FilePath {} -ArgumentList @({argument_list}) -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        quote_powershell(&helper.to_string_lossy())
-    );
-    run_process(ProcessCommand::new("powershell.exe").args([
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        &script,
-    ]))
+    runonmine_platform::helper::run_elevated_process(helper, arguments)
 }
 
 pub(super) fn run_process(command: &mut ProcessCommand) -> Result<()> {
