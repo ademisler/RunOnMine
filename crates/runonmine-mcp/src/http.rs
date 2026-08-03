@@ -58,7 +58,8 @@ struct ConnectorHealthResponse {
 #[derive(Clone)]
 struct LocalHttpConnector {
     runtime: Runtime,
-    token: Arc<secrecy::SecretString>,
+    secret_name: String,
+    secrets: Arc<dyn SecretStore>,
 }
 
 impl std::fmt::Debug for LocalHttpConnector {
@@ -66,6 +67,8 @@ impl std::fmt::Debug for LocalHttpConnector {
         formatter
             .debug_struct("LocalHttpConnector")
             .field("connector_id", &self.runtime.0.connector_id)
+            .field("secret_name", &self.secret_name)
+            .field("secrets", &"[REDACTED]")
             .field("token", &"[REDACTED]")
             .finish()
     }
@@ -355,7 +358,10 @@ fn spawn_session_sweeper(
 
 fn build_http_connector_state(paths: &AppPaths, config: &AppConfig) -> HttpConnectorBuild {
     match default_secret_store(paths) {
-        Ok(secrets) => build_http_connector_state_with_store(paths, config, secrets.as_ref()),
+        Ok(secrets) => {
+            let secrets: Arc<dyn SecretStore> = Arc::from(secrets);
+            build_http_connector_state_with_store(paths, config, &secrets)
+        }
         Err(_) => HttpConnectorBuild {
             state: empty_http_connector_state(config),
             degraded: config
@@ -385,7 +391,7 @@ fn build_http_connector_state(paths: &AppPaths, config: &AppConfig) -> HttpConne
 fn build_http_connector_state_with_store(
     paths: &AppPaths,
     config: &AppConfig,
-    secrets: &dyn SecretStore,
+    secrets: &Arc<dyn SecretStore>,
 ) -> HttpConnectorBuild {
     let mut state = empty_http_connector_state(config);
     let mut degraded = Vec::new();
@@ -395,12 +401,18 @@ fn build_http_connector_state_with_store(
         .filter(|connector| connector.enabled)
     {
         let prepared = match connector.kind {
-            ConnectorKind::LocalHttp => build_local_http_connector(paths, connector, secrets)
-                .map(|value| state.local = Some(value)),
-            ConnectorKind::CloudflareQuick => build_quick_http_connector(paths, connector, secrets)
-                .map(|value| state.quick = Some(value)),
-            ConnectorKind::CloudflareOauth => build_oauth_connector(paths, connector, secrets)
-                .map(|value| state.oauth = Some(value)),
+            ConnectorKind::LocalHttp => {
+                build_local_http_connector(paths, connector, Arc::clone(secrets))
+                    .map(|value| state.local = Some(value))
+            }
+            ConnectorKind::CloudflareQuick => {
+                build_quick_http_connector(paths, connector, secrets.as_ref())
+                    .map(|value| state.quick = Some(value))
+            }
+            ConnectorKind::CloudflareOauth => {
+                build_oauth_connector(paths, connector, secrets.as_ref())
+                    .map(|value| state.oauth = Some(value))
+            }
             ConnectorKind::LocalStdio | ConnectorKind::OpenAiTunnel => Ok(()),
         };
         if prepared.is_err() {
@@ -430,14 +442,15 @@ fn empty_http_connector_state(config: &AppConfig) -> HttpConnectorState {
 fn build_local_http_connector(
     paths: &AppPaths,
     connector: &ConnectorConfig,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
 ) -> Result<LocalHttpConnector> {
     let secret_name = format!("connector.{}.local_http_token", connector.id);
-    let token = required_secret(secrets, &secret_name)?;
+    let token = required_secret(secrets.as_ref(), &secret_name)?;
     validate_local_http_token(token.expose_secret())?;
     Ok(LocalHttpConnector {
         runtime: Runtime::load_from_paths(paths, &connector.id)?,
-        token: Arc::new(token),
+        secret_name,
+        secrets,
     })
 }
 
@@ -766,7 +779,10 @@ fn select_local_connector(
     request: &Request,
 ) -> Result<(Runtime, RequestAccess), Response> {
     let supplied = local_bearer_token(request)?;
-    let expected = local.token.expose_secret().as_bytes();
+    let Some(current_token) = current_local_http_token(local) else {
+        return Err(local_unauthorized());
+    };
+    let expected = current_token.expose_secret().as_bytes();
     let matches =
         supplied.len() == expected.len() && bool::from(supplied.as_bytes().ct_eq(expected));
     if !matches {
@@ -779,6 +795,32 @@ fn select_local_connector(
             principal: RequestPrincipal::LocalHttp,
         },
     ))
+}
+
+fn current_local_http_token(local: &LocalHttpConnector) -> Option<secrecy::SecretString> {
+    let Ok(Some(token)) = local.secrets.get(&local.secret_name) else {
+        diagnostics::log_internal(
+            diagnostics::current_request_id(),
+            &local.runtime.0.connector_id,
+            DiagnosticCategory::Storage,
+            "read_local_http_token",
+            None,
+            None,
+        );
+        return None;
+    };
+    if validate_local_http_token(token.expose_secret()).is_err() {
+        diagnostics::log_internal(
+            diagnostics::current_request_id(),
+            &local.runtime.0.connector_id,
+            DiagnosticCategory::Authorization,
+            "validate_local_http_token",
+            None,
+            None,
+        );
+        return None;
+    }
+    Some(token)
 }
 
 #[allow(clippy::result_large_err)]
@@ -1152,6 +1194,47 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn local_http_auth_reads_rotated_token_without_rebuilding_state() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        let mut config = AppConfig {
+            port: 47_821,
+            ..AppConfig::default()
+        };
+        let local = config
+            .connectors
+            .iter_mut()
+            .find(|connector| connector.kind == ConnectorKind::LocalHttp)
+            .context("default local HTTP connector is missing")?;
+        local.id = "rotating-local".to_owned();
+        local.enabled = true;
+        config.validate()?;
+        config.save(&paths.config_file())?;
+
+        let store = Arc::new(TestSecretStore::default());
+        let old_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([21_u8; 32]);
+        let new_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([22_u8; 32]);
+        let secret_name = "connector.rotating-local.local_http_token";
+        store.set(secret_name, &SecretString::from(old_token.clone()))?;
+        let shared: Arc<dyn SecretStore> = store.clone();
+        let state = build_http_connector_state_with_store(&paths, &config, &shared).state;
+
+        let request = |token: &str| {
+            Request::builder()
+                .uri("http://127.0.0.1:47821/mcp")
+                .header(HOST, "127.0.0.1:47821")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+        };
+        assert!(select_http_connector(&state, &request(&old_token)?).is_ok());
+        store.set(secret_name, &SecretString::from(new_token.clone()))?;
+        assert!(select_http_connector(&state, &request(&old_token)?).is_err());
+        assert!(select_http_connector(&state, &request(&new_token)?).is_ok());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn quick_auth_failure_does_not_disable_healthy_local_http() -> Result<()> {
         let temporary = tempfile::tempdir()?;
@@ -1175,14 +1258,15 @@ mod tests {
         config.validate()?;
         config.save(&paths.config_file())?;
 
-        let store = TestSecretStore::default();
+        let store = Arc::new(TestSecretStore::default());
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([11_u8; 32]);
         store.set(
             "connector.healthy-local.local_http_token",
             &SecretString::from(token),
         )?;
 
-        let build = build_http_connector_state_with_store(&paths, &config, &store);
+        let shared: Arc<dyn SecretStore> = store.clone();
+        let build = build_http_connector_state_with_store(&paths, &config, &shared);
         assert!(build.state.local.is_some());
         assert!(build.state.quick.is_none());
         assert!(build.state.oauth.is_none());
