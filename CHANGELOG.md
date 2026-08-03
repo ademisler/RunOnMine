@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Explicitly load `System.Net.Http` in the Windows smoke test so stale-token rejection works under Windows PowerShell 5.1 as well as newer PowerShell runtimes.
 - Make the Windows owner-approval acceptance loop tolerate transient state-store open contention and report the last captured CLI error instead of aborting on PowerShell native-error conversion.
 - Use `System.Diagnostics.Process` in Windows acceptance scripts so PowerShell 5.1 cannot turn successful MCP, desktop, installer, or uninstaller runs into false failures through a null `Start-Process.ExitCode`.
 - Install SQLite busy handling before lock-taking connection PRAGMAs so owner approval commands wait for an in-flight agent transaction instead of spuriously reporting that setup is missing.

@@ -6,6 +6,7 @@ param(
     [switch]$SkipInteractiveDesktop
 )
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Net.Http
 . "$(Join-Path $PSScriptRoot "windows-desktop-acceptance.ps1")"
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-acceptance-" + [guid]::NewGuid())
 $pathsRoot = Join-Path $root "runonmine"
