@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)] [string]$AllowedProgram
 )
 $ErrorActionPreference = "Stop"
+. "$(Join-Path $PSScriptRoot "windows-process.ps1")"
 
 $runOnMinePath = (Resolve-Path -LiteralPath $RunOnMine).Path
 $allowedProgramPath = (Resolve-Path -LiteralPath $AllowedProgram).Path
@@ -10,6 +11,33 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Windows helper identity acceptance requires an elevated Administrator token"
+}
+
+function Invoke-RunOnMineHelperCommand {
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$Arguments,
+        [int]$TimeoutMilliseconds = 120000,
+        [switch]$IgnoreFailure
+    )
+    $result = Invoke-RunOnMineNativeProcess -FilePath $runOnMinePath -ArgumentList $Arguments `
+        -TimeoutMilliseconds $TimeoutMilliseconds
+    if (-not $IgnoreFailure -and $result.ExitCode -ne 0) {
+        $detail = ($result.Stdout + $result.Stderr).Trim()
+        throw "RunOnMine exited with code $($result.ExitCode) while running $($Arguments -join ' '): $detail"
+    }
+    return $result
+}
+
+function Invoke-CleanupNativeCommand {
+    param(
+        [Parameter(Mandatory = $true)] [string]$FilePath,
+        [Parameter(Mandatory = $true)] [string[]]$Arguments
+    )
+    try {
+        Invoke-RunOnMineNativeProcess -FilePath $FilePath -ArgumentList $Arguments `
+            -TimeoutMilliseconds 30000 | Out-Null
+    }
+    catch {}
 }
 
 $testId = [guid]::NewGuid().ToString("N").Substring(0, 10)
@@ -35,28 +63,34 @@ $taskRegistered = $false
 
 try {
     New-Item -ItemType Directory -Force -Path $root | Out-Null
-    & icacls.exe $root /inheritance:r /grant "*S-1-5-18:(OI)(CI)F" /grant "*S-1-5-32-544:(OI)(CI)F" /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
+    $icacls = Invoke-RunOnMineNativeProcess -FilePath "$env:SystemRoot\System32\icacls.exe" -ArgumentList @(
+        $root,
+        "/inheritance:r",
+        "/grant", "*S-1-5-18:(OI)(CI)F",
+        "/grant", "*S-1-5-32-544:(OI)(CI)F",
+        "/grant", "*S-1-5-32-545:(OI)(CI)M"
+    ) -TimeoutMilliseconds 30000
+    if ($icacls.ExitCode -ne 0) {
+        throw "failed to prepare the helper acceptance directory ACL: $($icacls.Stderr)"
+    }
 
-    & $runOnMinePath admin install --allow-program $allowedProgramPath
-    if ($LASTEXITCODE -ne 0) { throw "helper installation exited with code $LASTEXITCODE" }
+    Invoke-RunOnMineHelperCommand -Arguments @("admin", "install", "--allow-program", $allowedProgramPath) | Out-Null
     $helperInstalled = $true
 
-    $statusText = (& $runOnMinePath admin status | Out-String)
-    $statusExitCode = $LASTEXITCODE
+    $statusResult = Invoke-RunOnMineHelperCommand -Arguments @("admin", "status")
     try {
-        $status = $statusText | ConvertFrom-Json
+        $status = $statusResult.Stdout | ConvertFrom-Json
     }
     catch {
-        throw "owner helper status was not valid JSON: $statusText"
+        throw "owner helper status was not valid JSON: $($statusResult.Stdout)"
     }
     if (
-        $statusExitCode -ne 0 -or
         -not [bool]$status.installed -or
         -not [bool]$status.running -or
         -not [bool]$status.available -or
         [string]$status.state.status -ne "available"
     ) {
-        throw "owner helper health check failed: $statusText"
+        throw "owner helper health check failed: $($statusResult.Stdout)"
     }
     $service = Get-CimInstance Win32_Service -Filter "Name='RunOnMineHelper'"
     if (-not $service) { throw "RunOnMineHelper service was not registered" }
@@ -124,10 +158,8 @@ $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encod
         throw "second Windows user was not denied by the helper pipe: $($attack | ConvertTo-Json -Compress)"
     }
 
-    & $runOnMinePath admin uninstall | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "helper uninstall exited with code $LASTEXITCODE" }
-    & $runOnMinePath admin uninstall | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "idempotent helper uninstall exited with code $LASTEXITCODE" }
+    Invoke-RunOnMineHelperCommand -Arguments @("admin", "uninstall") | Out-Null
+    Invoke-RunOnMineHelperCommand -Arguments @("admin", "uninstall") | Out-Null
     $helperInstalled = $false
 
     Write-Host "RunOnMine Windows LocalSystem helper owner access, second-user named-pipe denial and idempotent uninstall passed."
@@ -136,13 +168,20 @@ finally {
     $passwordText = $null
     $password = $null
     if ($taskRegistered) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Invoke-CleanupNativeCommand -FilePath "$env:SystemRoot\System32\schtasks.exe" `
+            -Arguments @("/Delete", "/TN", $taskName, "/F")
     }
     if ($userCreated) {
-        Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue
+        Invoke-CleanupNativeCommand -FilePath "$env:SystemRoot\System32\net.exe" `
+            -Arguments @("user", $userName, "/delete")
     }
     if ($helperInstalled) {
-        & $runOnMinePath admin uninstall | Out-Null
+        try {
+            Invoke-RunOnMineHelperCommand -Arguments @("admin", "uninstall") `
+                -TimeoutMilliseconds 60000 -IgnoreFailure | Out-Null
+        }
+        catch {}
     }
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $root
 }
+exit 0
