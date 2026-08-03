@@ -290,7 +290,7 @@ mod native {
 
     #[derive(Debug)]
     pub(crate) struct DesktopInstance {
-        _mutex: OwnedHandle,
+        mutex: OwnedHandle,
     }
 
     impl DesktopInstance {
@@ -320,13 +320,13 @@ mod native {
                 return Ok(DesktopInstanceOutcome::Secondary);
             }
             Ok(DesktopInstanceOutcome::Primary(Self {
-                _mutex: OwnedHandle(handle),
+                mutex: OwnedHandle(handle),
             }))
         }
 
         pub(crate) fn try_command(&self) -> Option<DesktopCommand> {
             assert!(
-                !self._mutex.0.is_null(),
+                !self.mutex.0.is_null(),
                 "Windows desktop mutex handle invariant was violated"
             );
             None
