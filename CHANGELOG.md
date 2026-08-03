@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Align MCP filesystem authorization regressions with the selected canonical root identity so Windows verbatim resource paths are asserted consistently for reads and moves.
 - Drain Windows acceptance child stdout and stderr concurrently before waiting for exit so verbose Cargo and installer processes cannot deadlock on full redirected pipe buffers.
 - Align the cross-platform filesystem policy-path regression with the selected canonical root identity so Windows verbatim paths are tested without weakening path authorization.
 - Launch the Windows helper second-user denial probe with an explicit alternate-user process instead of requiring the temporary account to hold the system-wide batch-logon right.

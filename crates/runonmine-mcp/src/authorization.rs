@@ -230,6 +230,11 @@ mod tests {
     fn filesystem_move_authorizes_both_source_and_destination() -> Result<()> {
         let root = tempfile::tempdir()?;
         let filesystem = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let selected_root = filesystem
+            .roots()
+            .into_iter()
+            .next()
+            .context("selected filesystem root is missing")?;
         let resources = policy_resources(
             "fs_move",
             &json!({"from": "source", "to": "restricted/target"}),
@@ -245,8 +250,8 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                root.path().join("source"),
-                root.path().join("restricted/target")
+                selected_root.join("source"),
+                selected_root.join("restricted/target")
             ]
         );
         Ok(())
@@ -256,6 +261,11 @@ mod tests {
     fn relative_filesystem_resource_uses_selected_root_identity() -> Result<()> {
         let root = tempfile::tempdir()?;
         let filesystem = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let selected_root = filesystem
+            .roots()
+            .into_iter()
+            .next()
+            .context("selected filesystem root is missing")?;
         let resources =
             policy_resources("fs_read", &json!({"path": "private/file.txt"}), &filesystem)?;
         let paths = resources
@@ -265,7 +275,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(paths, vec![root.path().join("private/file.txt")]);
+        assert_eq!(paths, vec![selected_root.join("private/file.txt")]);
         Ok(())
     }
 
