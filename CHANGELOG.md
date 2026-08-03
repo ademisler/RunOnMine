@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Treat normal and verbatim absolute Windows paths as the same selected-root identity so approved filesystem tools remain fail-closed without rejecting valid `C:\\...` requests.
 - Complete the Linux package lifecycle: canonical `runonmine`/`runonmine-desktop` DEB identities, explicit runtime dependencies, mutual `Conflicts`/`Replaces`, metadata inspection in release/preflight, synthetic beta.0-to-beta.1 upgrade coverage, and full Ubuntu VM install/reboot/uninstall acceptance.
 - Make the Linux desktop single-instance through an owner-private Unix socket; a second launch asks the primary process to restore/focus its window, while stale or unsafe filesystem entries fail closed.
 - Persist an explicitly supplied headless user-service master key into a private same-user systemd credential source, prefer explicit headless key material over ambient session detection, and verify user/system services across real VM reboots.

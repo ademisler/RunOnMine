@@ -269,6 +269,30 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn normal_windows_absolute_resource_matches_verbatim_selected_root() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let canonical = root.path().canonicalize()?;
+        let canonical_text = canonical.to_string_lossy();
+        let normal = canonical_text
+            .strip_prefix("\\\\?\\")
+            .context("Windows canonical path did not use a verbatim prefix")?;
+        let target = PathBuf::from(normal).join("approved.txt");
+        let filesystem = ScopedFilesystem::new(std::slice::from_ref(&canonical))?;
+        let resources = policy_resources("fs_write", &json!({"path": target}), &filesystem)?;
+        let paths = resources
+            .contexts()
+            .filter_map(|resource| match resource {
+                ResourceContext::Filesystem(path) => Some(path.to_path_buf()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec![canonical.join("approved.txt")]);
+        Ok(())
+    }
+
     #[test]
     fn shell_working_directory_is_canonical_and_bound_to_the_grant_hash() -> Result<()> {
         let root = tempfile::tempdir()?;

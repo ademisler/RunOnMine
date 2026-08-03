@@ -67,7 +67,8 @@ impl ScopedFilesystem {
             if !resolved.is_dir() {
                 bail!("allowed root is not a directory: {}", resolved.display());
             }
-            if canonical_roots.contains(&resolved) {
+            let identity = root_identity_path(&requested, &resolved);
+            if canonical_roots.contains(&identity) {
                 continue;
             }
             let dir = Dir::open_ambient_dir(&resolved, ambient_authority())
@@ -75,9 +76,9 @@ impl ScopedFilesystem {
             if !dir.dir_metadata()?.is_dir() {
                 bail!("allowed root is not a directory: {}", resolved.display());
             }
-            canonical_roots.push(resolved);
+            canonical_roots.push(identity.clone());
             capabilities.push(RootCapability {
-                path: requested,
+                path: identity,
                 dir: Arc::new(dir),
             });
         }
@@ -337,6 +338,7 @@ impl ScopedFilesystem {
             bail!("relative paths require exactly one configured root");
         };
         validate_lexical_path(&absolute)?;
+        let absolute = filesystem_identity_path(&absolute);
         let mut selected: Option<(&RootCapability, PathBuf)> = None;
         for root in &self.roots {
             if let Ok(relative) = absolute.strip_prefix(&root.path) {
@@ -414,6 +416,47 @@ fn search_directory(
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn root_identity_path(_requested: &Path, resolved: &Path) -> PathBuf {
+    filesystem_identity_path(resolved)
+}
+
+#[cfg(not(windows))]
+fn root_identity_path(requested: &Path, _resolved: &Path) -> PathBuf {
+    requested.to_path_buf()
+}
+
+#[cfg(windows)]
+fn filesystem_identity_path(path: &Path) -> PathBuf {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut normalized = match prefix.kind() {
+        Prefix::Disk(drive) => PathBuf::from(format!("\\\\?\\{}:\\", char::from(drive))),
+        Prefix::UNC(server, share) => {
+            let mut normalized = PathBuf::from(r"\\?\UNC");
+            normalized.push(server);
+            normalized.push(share);
+            normalized
+        }
+        _ => return path.to_path_buf(),
+    };
+    for component in components {
+        if !matches!(component, Component::RootDir) {
+            normalized.push(component.as_os_str());
+        }
+    }
+    normalized
+}
+
+#[cfg(not(windows))]
+fn filesystem_identity_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 fn validate_lexical_path(path: &Path) -> Result<()> {
@@ -555,6 +598,27 @@ mod tests {
             scoped.resolve_existing(Path::new("private/report.txt"))?
         );
         assert!(scoped.resolve_policy_path(Path::new("../outside")).is_err());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normal_windows_absolute_path_matches_verbatim_selected_root() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let canonical = root.path().canonicalize()?;
+        let canonical_text = canonical.to_string_lossy();
+        let normal = canonical_text
+            .strip_prefix("\\\\?\\")
+            .context("Windows canonical path did not use a verbatim prefix")?;
+        let target = PathBuf::from(normal).join("approved.txt");
+        let scoped = ScopedFilesystem::new(std::slice::from_ref(&canonical))?;
+
+        assert_eq!(
+            scoped.resolve_policy_path(&target)?,
+            canonical.join("approved.txt")
+        );
+        scoped.write_atomic(&target, b"approved")?;
+        assert_eq!(std::fs::read(canonical.join("approved.txt"))?, b"approved");
         Ok(())
     }
 
