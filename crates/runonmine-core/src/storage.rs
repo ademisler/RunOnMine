@@ -964,11 +964,53 @@ fn pending_approvals_connection(connection: &mut Connection) -> Result<Vec<Appro
 }
 
 fn configure_connection(connection: &Connection) -> Result<()> {
-    connection.pragma_update(None, "journal_mode", "WAL")?;
+    const BUSY_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+    const LOCK_RETRY: StdDuration = StdDuration::from_millis(10);
+
+    // Install the busy handler before any PRAGMA that may need a database lock.
+    // SQLite does not consistently invoke that handler while changing journal
+    // mode, so retry only BUSY/LOCKED responses within the same bounded window.
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    let journal_mode: String = retry_sqlite_lock(deadline, LOCK_RETRY, || {
+        connection.pragma_query_value(None, "journal_mode", |row| row.get(0))
+    })?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        retry_sqlite_lock(deadline, LOCK_RETRY, || {
+            connection.pragma_update(None, "journal_mode", "WAL")
+        })?;
+    }
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "synchronous", "FULL")?;
-    connection.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
+}
+
+fn retry_sqlite_lock<T>(
+    deadline: Instant,
+    interval: StdDuration,
+    mut operation: impl FnMut() -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if sqlite_lock_error(&error) && Instant::now() < deadline => {
+                std::thread::sleep(interval);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn sqlite_lock_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(details, _)
+            if matches!(
+                details.code,
+                rusqlite::ffi::ErrorCode::DatabaseBusy
+                    | rusqlite::ffi::ErrorCode::DatabaseLocked
+            )
+    )
 }
 
 fn map_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest> {
