@@ -290,7 +290,7 @@ mod native {
 
     #[derive(Debug)]
     pub(crate) struct DesktopInstance {
-        mutex: OwnedHandle,
+        _mutex: OwnedHandle,
     }
 
     impl DesktopInstance {
@@ -320,12 +320,11 @@ mod native {
                 return Ok(DesktopInstanceOutcome::Secondary);
             }
             Ok(DesktopInstanceOutcome::Primary(Self {
-                mutex: OwnedHandle(handle),
+                _mutex: OwnedHandle(handle),
             }))
         }
 
         pub(crate) fn try_command(&self) -> Option<DesktopCommand> {
-            let _keep_mutex_alive = &self.mutex;
             None
         }
     }
