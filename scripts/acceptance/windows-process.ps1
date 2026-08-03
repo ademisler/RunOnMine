@@ -68,14 +68,18 @@ function Invoke-RunOnMineNativeProcess {
     $process = Start-RunOnMineNativeProcess -FilePath $FilePath -ArgumentList $ArgumentList `
         -CaptureOutput -CreateNoWindow
     try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutMilliseconds)) {
             $process.Kill()
             $process.WaitForExit()
+            [void]$stdoutTask.GetAwaiter().GetResult()
+            [void]$stderrTask.GetAwaiter().GetResult()
             throw "native process timed out after $TimeoutMilliseconds ms: $FilePath"
         }
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
         $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
         return [pscustomobject]@{
             ExitCode = [int]$process.ExitCode
             Stdout = $stdout
