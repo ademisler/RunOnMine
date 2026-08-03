@@ -62,6 +62,16 @@ for _ in $(seq 1 300); do
   sleep 0.05
 done
 [[ -n $window ]] || { cat "$sandbox/stderr" >&2; echo "visible RunOnMine window was not found" >&2; exit 1; }
+
+if ! timeout 10s env "${common_env[@]}" "$desktop" >"$sandbox/second-stdout" 2>"$sandbox/second-stderr"; then
+  cat "$sandbox/second-stderr" >&2
+  echo "second RunOnMine instance did not notify the primary and exit" >&2
+  exit 1
+fi
+kill -0 "$app_pid"
+window_count=$(xdotool search --onlyvisible --name '^RunOnMine$' 2>/dev/null | wc -l)
+[[ $window_count -eq 1 ]] || { echo "second launch created an additional RunOnMine window" >&2; exit 1; }
+
 after=$(busctl --user list --no-legend | awk '/org.kde.StatusNotifierItem-/ {print $1}' | sort)
 tray_name=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -n1)
 [[ -n $tray_name ]] || { echo "RunOnMine StatusNotifierItem was not registered" >&2; exit 1; }
@@ -97,6 +107,31 @@ done
 if busctl --user list --no-legend | awk -v name="$tray_name" '$1 == name { found=1 } END { exit found ? 0 : 1 }'; then
   echo "RunOnMine StatusNotifierItem remained after exit" >&2
   exit 1
+fi
+
+if [[ -n ${RUNONMINE_LINUX_DESKTOP_SESSION_REPORT:-} ]]; then
+  python3 - "$RUNONMINE_LINUX_DESKTOP_SESSION_REPORT" "$desktop" <<'PYREPORT'
+import datetime, hashlib, json, pathlib, sys
+output = pathlib.Path(sys.argv[1])
+binary = pathlib.Path(sys.argv[2])
+report = {
+    "schema_version": 1,
+    "platform": "linux-x11",
+    "status": "passed",
+    "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+    "tested_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    "checks": {
+        "native_window": True,
+        "status_notifier_registered": True,
+        "close_to_tray": True,
+        "tray_reopen": True,
+        "single_instance": True,
+        "tray_removed_on_exit": True,
+    },
+}
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(report, indent=2) + "\n")
+PYREPORT
 fi
 
 echo "RunOnMine Linux desktop session, close-to-tray and reopen acceptance passed."

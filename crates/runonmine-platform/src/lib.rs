@@ -18,6 +18,8 @@ use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use directories::ProjectDirs;
 use serde::Serialize;
+#[cfg(target_os = "linux")]
+use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PlatformInfo {
@@ -235,29 +237,11 @@ impl LinuxSystemService {
         let install_directory = Path::new(LINUX_SYSTEM_BINARY_PATH)
             .parent()
             .context("system agent path has no parent")?;
-        fs::create_dir_all(install_directory)?;
-        reject_symlink(install_directory, "system binary directory")?;
+        ensure_linux_system_binary_directories(install_directory)?;
         atomic_copy_executable(&self.agent_executable, Path::new(LINUX_SYSTEM_BINARY_PATH))?;
 
         let status_path = linux_system_agent_status_path(&home);
-        let home_environment = systemd_escape(&format!("HOME={}", home.display()));
-        let xdg_config = systemd_escape(&format!("XDG_CONFIG_HOME={}/.config", home.display()));
-        let xdg_data = systemd_escape(&format!("XDG_DATA_HOME={}/.local/share", home.display()));
-        let status_environment = systemd_escape(&format!(
-            "RUNONMINE_AGENT_STATUS_FILE={}",
-            status_path.display()
-        ));
-        let unit = format!(
-            "[Unit]\nDescription=RunOnMine headless MCP agent\nAfter=network-online.target\nWants=network-online.target\n\n\
-             [Service]\nType=simple\nUser={run_as_user}\nExecStart={LINUX_SYSTEM_BINARY_PATH} run\n\
-             WorkingDirectory={}\nEnvironment={home_environment}\nEnvironment={xdg_config}\nEnvironment={xdg_data}\nEnvironment={status_environment}\n\
-             LoadCredential=runonmine-master-key:{LINUX_SYSTEM_MASTER_KEY_PATH}\n\
-             Restart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\
-             PrivateDevices=true\nProtectSystem=full\nProtectKernelTunables=true\nProtectKernelModules=true\n\
-             ProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nRestrictRealtime=true\n\
-             SystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n",
-            systemd_escape(&home.to_string_lossy())
-        );
+        let unit = render_linux_system_unit(run_as_user, &home, &status_path)?;
         atomic_write_mode(Path::new(LINUX_SYSTEM_UNIT_PATH), unit.as_bytes(), 0o644)?;
         linux_systemctl(&["daemon-reload"], "failed to reload systemd")?;
         linux_systemctl(
@@ -386,6 +370,47 @@ fn reject_symlink(path: &Path, label: &str) -> Result<()> {
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
         bail!("{label} must not be a symbolic link");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_system_binary_directories(install_directory: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let libexec = install_directory
+        .parent()
+        .context("system binary directory has no parent")?;
+    for directory in [libexec, install_directory] {
+        fs::create_dir_all(directory)?;
+        reject_symlink(directory, "system binary directory")?;
+        let metadata = fs::symlink_metadata(directory)?;
+        if !metadata.is_dir() || metadata.uid() != 0 {
+            bail!("system binary directory must be a root-owned real directory");
+        }
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn ensure_linux_system_binary_directories_for_owner(
+    install_directory: &Path,
+    expected_owner: u32,
+) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let libexec = install_directory
+        .parent()
+        .context("system binary directory has no parent")?;
+    for directory in [libexec, install_directory] {
+        fs::create_dir_all(directory)?;
+        reject_symlink(directory, "system binary directory")?;
+        let metadata = fs::symlink_metadata(directory)?;
+        if !metadata.is_dir() || metadata.uid() != expected_owner {
+            bail!("system binary directory has an unexpected owner or type");
+        }
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
 }
@@ -790,7 +815,12 @@ impl UserService {
             ensure_private_directory(internal_path)?;
         }
         let writable_paths = linux_user_writable_paths(internal_paths, allowed_roots)?;
-        let unit = render_linux_user_unit(&self.agent_executable, &writable_paths);
+        let master_key_credential = linux_user_service_master_key()?;
+        let unit = render_linux_user_unit(
+            &self.agent_executable,
+            &writable_paths,
+            master_key_credential.as_deref(),
+        );
         write_private(path, unit.as_bytes())
     }
 
@@ -1176,8 +1206,131 @@ fn linux_user_writable_paths(
 }
 
 #[cfg(target_os = "linux")]
-fn render_linux_user_unit(agent_executable: &Path, writable_paths: &[PathBuf]) -> String {
+fn render_linux_system_unit(run_as_user: &str, home: &Path, status_path: &Path) -> Result<String> {
+    validate_systemd_unquoted_path(home, "service account home directory")?;
+    let working_directory = home
+        .to_str()
+        .context("service account home directory is not valid UTF-8")?;
+    let home_environment = systemd_escape(&format!("HOME={}", home.display()));
+    let xdg_config = systemd_escape(&format!("XDG_CONFIG_HOME={}/.config", home.display()));
+    let xdg_data = systemd_escape(&format!("XDG_DATA_HOME={}/.local/share", home.display()));
+    let status_environment = systemd_escape(&format!(
+        "RUNONMINE_AGENT_STATUS_FILE={}",
+        status_path.display()
+    ));
+    Ok(format!(
+        "[Unit]\nDescription=RunOnMine headless MCP agent\nAfter=network-online.target\nWants=network-online.target\n\n\
+         [Service]\nType=simple\nUser={run_as_user}\nExecStart={LINUX_SYSTEM_BINARY_PATH} run\n\
+         WorkingDirectory={working_directory}\nEnvironment={home_environment}\nEnvironment={xdg_config}\nEnvironment={xdg_data}\nEnvironment={status_environment}\n\
+         LoadCredential=runonmine-master-key:{LINUX_SYSTEM_MASTER_KEY_PATH}\n\
+         Restart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\
+         PrivateDevices=true\nProtectSystem=full\nProtectKernelTunables=true\nProtectKernelModules=true\n\
+         ProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nRestrictRealtime=true\n\
+         SystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"
+    ))
+}
+
+#[cfg(target_os = "linux")]
+const USER_SERVICE_MASTER_KEY_FILE: &str = "runonmine-master-key";
+#[cfg(target_os = "linux")]
+const MAX_USER_SERVICE_MASTER_KEY_BYTES: usize = 4 * 1_024;
+
+#[cfg(target_os = "linux")]
+fn linux_user_service_master_key_path() -> Result<PathBuf> {
+    let directories = ProjectDirs::from("dev", "RunOnMine", "RunOnMine")
+        .context("the operating system did not provide RunOnMine user directories")?;
+    Ok(directories
+        .data_local_dir()
+        .join("service-credentials")
+        .join(USER_SERVICE_MASTER_KEY_FILE))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_service_master_key() -> Result<Option<PathBuf>> {
+    let path = linux_user_service_master_key_path()?;
+    if let Ok(raw) = std::env::var("RUNONMINE_MASTER_KEY") {
+        let value = Zeroizing::new(raw);
+        persist_linux_user_service_master_key(&path, value.as_str())?;
+    }
+    match path.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+        Ok(_) => {
+            validate_linux_user_service_master_key(&path)?;
+            Ok(Some(path))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn persist_linux_user_service_master_key(path: &Path, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_USER_SERVICE_MASTER_KEY_BYTES
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        bail!("user-service master key must be bounded and contain no whitespace");
+    }
+    validate_systemd_unquoted_path(path, "user-service credential path")?;
+    let parent = path
+        .parent()
+        .context("user-service credential path has no parent directory")?;
+    ensure_user_service_directory(parent)?;
+    write_private(path, value.as_bytes())?;
+    validate_linux_user_service_master_key(path)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_linux_user_service_master_key(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    validate_systemd_unquoted_path(path, "user-service credential path")?;
+    let metadata = path.symlink_metadata()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_USER_SERVICE_MASTER_KEY_BYTES as u64
+    {
+        bail!("user-service master key must be a bounded regular non-symlink file");
+    }
+    if metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        bail!("user-service master key must be current-user owned and private");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_systemd_unquoted_path(path: &Path, description: &str) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if !path.is_absolute()
+        || path.as_os_str().as_bytes().is_empty()
+        || !path.as_os_str().as_bytes().iter().all(|byte| {
+            matches!(
+                *byte,
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-'
+            )
+        })
+    {
+        bail!("{description} contains characters unsupported by an unquoted systemd path");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_user_unit(
+    agent_executable: &Path,
+    writable_paths: &[PathBuf],
+    master_key_credential: Option<&Path>,
+) -> String {
     let executable = systemd_escape(&agent_executable.to_string_lossy());
+    let credential_directive = master_key_credential.map_or_else(String::new, |path| {
+        format!(
+            "LoadCredential=runonmine-master-key:{}\n",
+            path.to_string_lossy()
+        )
+    });
     let mut writable_directives = String::new();
     for item in writable_paths {
         writable_directives.push_str("ReadWritePaths=");
@@ -1186,7 +1339,7 @@ fn render_linux_user_unit(agent_executable: &Path, writable_paths: &[PathBuf]) -
     }
     format!(
         "[Unit]\nDescription=RunOnMine MCP Agent\nAfter=network-online.target\n\n\
-         [Service]\nType=simple\nExecStart={executable} run\nRestart=on-failure\nRestartSec=3\n\
+         [Service]\nType=simple\nExecStart={executable} run\n{credential_directive}Restart=on-failure\nRestartSec=3\n\
          UMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n\
          {writable_directives}\
          [Install]\nWantedBy=default.target\n"
@@ -1268,6 +1421,24 @@ mod private_file_tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_binary_directories_are_traversable_despite_private_umask() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let temporary = tempfile::tempdir()?;
+        let libexec = temporary.path().join("libexec");
+        let install = libexec.join("runonmine");
+        fs::create_dir_all(&install)?;
+        fs::set_permissions(&libexec, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&install, fs::Permissions::from_mode(0o700))?;
+        let owner = fs::metadata(&install)?.uid();
+        ensure_linux_system_binary_directories_for_owner(&install, owner)?;
+        assert_eq!(fs::metadata(&libexec)?.permissions().mode() & 0o777, 0o755);
+        assert_eq!(fs::metadata(&install)?.permissions().mode() & 0o777, 0o755);
+        Ok(())
+    }
+
     #[test]
     fn private_service_definition_replaces_atomically_with_owner_permissions() -> Result<()> {
         let temporary = tempfile::tempdir()?;
@@ -1310,6 +1481,19 @@ mod linux_user_service_tests {
     use super::*;
 
     #[test]
+    fn system_service_working_directory_is_unquoted_and_absolute() -> Result<()> {
+        let home = Path::new("/home/romsystem");
+        let status = home.join(".local/state/runonmine/agent-runtime.json");
+        let unit = render_linux_system_unit("romsystem", home, &status)?;
+        assert!(unit.contains("WorkingDirectory=/home/romsystem\n"));
+        assert!(!unit.contains("WorkingDirectory=\""));
+        assert!(
+            render_linux_system_unit("romsystem", Path::new("/home/system user"), &status).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn selected_roots_are_rendered_as_systemd_write_exceptions() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let root_with_space = temporary.path().join("project files");
@@ -1337,10 +1521,22 @@ mod linux_user_service_tests {
             1
         );
 
-        let unit = render_linux_user_unit(Path::new("/opt/RunOnMine/runonmine-agent"), &paths);
+        let credential = temporary
+            .path()
+            .join("service-credentials")
+            .join("runonmine-master-key");
+        let unit = render_linux_user_unit(
+            Path::new("/opt/RunOnMine/runonmine-agent"),
+            &paths,
+            Some(&credential),
+        );
         assert!(unit.contains("ProtectSystem=strict"));
         assert!(unit.contains("ProtectHome=read-only"));
         assert!(unit.contains("UMask=0077"));
+        assert!(unit.contains(&format!(
+            "LoadCredential=runonmine-master-key:{}",
+            credential.to_string_lossy()
+        )));
         assert!(unit.contains(&format!(
             "ReadWritePaths={}",
             systemd_escape(&canonical_root.to_string_lossy())
@@ -1349,6 +1545,37 @@ mod linux_user_service_tests {
             "ReadWritePaths={}",
             systemd_escape(&canonical_nested.to_string_lossy())
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn user_service_master_key_is_private_and_symlink_safe() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let temporary = tempfile::tempdir()?;
+        let credential = temporary
+            .path()
+            .join("service-credentials")
+            .join(USER_SERVICE_MASTER_KEY_FILE);
+        let value = "a".repeat(64);
+        persist_linux_user_service_master_key(&credential, &value)?;
+        assert_eq!(
+            fs::metadata(&credential)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(persist_linux_user_service_master_key(&credential, "contains whitespace").is_err());
+        let unsupported_path = temporary
+            .path()
+            .join("service credentials")
+            .join(USER_SERVICE_MASTER_KEY_FILE);
+        assert!(persist_linux_user_service_master_key(&unsupported_path, &value).is_err());
+
+        let target = temporary.path().join("target");
+        fs::write(&target, b"unchanged")?;
+        let link = temporary.path().join("linked-key");
+        symlink(&target, &link)?;
+        assert!(persist_linux_user_service_master_key(&link, "abcd").is_err());
+        assert_eq!(fs::read(&target)?, b"unchanged");
         Ok(())
     }
 

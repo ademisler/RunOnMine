@@ -13,7 +13,7 @@ SUPPORTED = {
     "macos-universal", "linux-x86_64", "linux-aarch64",
     "linux-desktop-x86_64", "windows-x86_64"
 }
-DESKTOP_REQUIRED_STEPS = {"desktop_launch", "desktop_views", "native_shell"}
+DESKTOP_REQUIRED_STEPS = {"desktop_launch", "desktop_views", "native_shell", "single_instance"}
 MACOS_REQUIRED_STEPS = {"native_slice_launch", "rosetta_slice_launch"}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")

@@ -43,6 +43,7 @@ tray-icon = { workspace = true, optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { workspace = true, optional = true, features = ["glow", "x11", "wayland"] }
 ksni = { workspace = true, optional = true }
+nix.workspace = true
 
 [build-dependencies]
 winresource = "0.1.31"

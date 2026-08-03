@@ -796,9 +796,12 @@ pub fn default_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
 fn default_platform_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore>> {
     #[cfg(target_os = "linux")]
     {
-        let desktop_secret_service = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+        let explicit_headless_key = std::env::var_os("CREDENTIALS_DIRECTORY").is_some()
+            || std::env::var_os("RUNONMINE_MASTER_KEY").is_some();
+        let desktop_session = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
             || std::env::var_os("XDG_RUNTIME_DIR").is_some();
-        if !desktop_secret_service {
+        let backend = linux_secret_backend(explicit_headless_key, desktop_session);
+        if backend == LinuxSecretBackend::EncryptedFile {
             return Ok(Box::new(EncryptedFileSecretStore::from_environment(
                 paths.state_dir.join("secrets.enc"),
                 "dev.runonmine.agent",
@@ -806,6 +809,25 @@ fn default_platform_secret_store(paths: &AppPaths) -> Result<Box<dyn SecretStore
         }
     }
     Ok(Box::new(KeyringSecretStore::new("dev.runonmine.agent")))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxSecretBackend {
+    EncryptedFile,
+    SecretService,
+}
+
+#[cfg(target_os = "linux")]
+const fn linux_secret_backend(
+    explicit_headless_key: bool,
+    desktop_session: bool,
+) -> LinuxSecretBackend {
+    if explicit_headless_key || !desktop_session {
+        LinuxSecretBackend::EncryptedFile
+    } else {
+        LinuxSecretBackend::SecretService
+    }
 }
 
 const SYSTEMD_MASTER_KEY_CREDENTIAL: &str = "runonmine-master-key";
@@ -840,7 +862,7 @@ fn read_master_key_credential(path: &Path) -> Result<Zeroizing<String>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        if !master_key_credential_mode_is_private(metadata.permissions().mode()) {
             bail!("master-key credential permissions are too broad");
         }
     }
@@ -850,6 +872,12 @@ fn read_master_key_credential(path: &Path) -> Result<Zeroizing<String>> {
         bail!("master-key credential contains invalid whitespace");
     }
     Ok(Zeroizing::new(trimmed.to_owned()))
+}
+
+#[cfg(unix)]
+const fn master_key_credential_mode_is_private(mode: u32) -> bool {
+    let permissions = mode & 0o777;
+    permissions & 0o400 != 0 && permissions & 0o137 == 0
 }
 
 fn decode_master_key(value: &str) -> Result<[u8; 32]> {
@@ -896,6 +924,40 @@ fn restrict_secret_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn systemd_credential_modes_allow_group_read_but_no_mutation_or_other_access() {
+        assert!(master_key_credential_mode_is_private(0o100_600));
+        assert!(master_key_credential_mode_is_private(0o100_400));
+        assert!(master_key_credential_mode_is_private(0o100_440));
+        assert!(master_key_credential_mode_is_private(0o100_640));
+        assert!(!master_key_credential_mode_is_private(0o100_644));
+        assert!(!master_key_credential_mode_is_private(0o100_660));
+        assert!(!master_key_credential_mode_is_private(0o100_450));
+        assert!(!master_key_credential_mode_is_private(0o100_040));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_headless_key_material_overrides_session_detection() {
+        assert_eq!(
+            linux_secret_backend(true, true),
+            LinuxSecretBackend::EncryptedFile
+        );
+        assert_eq!(
+            linux_secret_backend(true, false),
+            LinuxSecretBackend::EncryptedFile
+        );
+        assert_eq!(
+            linux_secret_backend(false, true),
+            LinuxSecretBackend::SecretService
+        );
+        assert_eq!(
+            linux_secret_backend(false, false),
+            LinuxSecretBackend::EncryptedFile
+        );
+    }
 
     #[derive(Default)]
     struct MemorySecretStore {

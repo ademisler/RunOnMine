@@ -25,9 +25,11 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
+            packager: packaging/Packager.linux-x86_64.toml
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
+            packager: packaging/Packager.linux-aarch64.toml
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -35,6 +37,9 @@ jobs:
         with: { fetch-depth: 0, persist-credentials: false }
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "${{ matrix.target }}"
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-packager@0.11.8
       - name: Run isolated CLI and MCP acceptance
         run: |
           ./scripts/acceptance/cli-smoke.sh
@@ -50,10 +55,14 @@ jobs:
           archive=$(find dist -maxdepth 1 \( -name '*-${{ matrix.target }}-unsigned.tar.gz' -o -name '*-${{ matrix.target }}-unsigned.zip' \) -print -quit)
           cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target ${{ matrix.target }}
           ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+          cargo run --locked -p xtask -- stage-packager --target ${{ matrix.target }}
+          ./packaging/package-linux-deb.sh "${{ matrix.packager }}" runonmine runonmine-desktop
+          deb=$(find dist -maxdepth 1 -name 'runonmine_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine runonmine-desktop
           python3 scripts/acceptance/write-artifact-preflight.py \
             --platform ${{ matrix.platform }} --artifact "$archive" \
             --output "dist/${{ matrix.platform }}-preflight.json" \
-            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,uninstall,residue_check
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,deb_metadata,uninstall,residue_check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runonmine-${{ matrix.platform }}-preflight
@@ -102,6 +111,10 @@ jobs:
           ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
       - run: cargo run --locked -p xtask -- stage-packager --target x86_64-unknown-linux-gnu --desktop
       - run: ./packaging/package-linux-desktop.sh
+      - name: Inspect Linux desktop DEB metadata
+        run: |
+          deb=$(find dist -maxdepth 1 -name 'runonmine-desktop_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine-desktop runonmine
       - name: Install, launch, and remove the desktop DEB
         run: |
           deb=$(find dist -maxdepth 1 -name '*.deb' -print -quit)
@@ -125,7 +138,7 @@ jobs:
           python3 scripts/acceptance/write-artifact-preflight.py \
             --platform linux-desktop-x86_64 --artifact "$archive" \
             --output dist/linux-desktop-x86_64-preflight.json \
-            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,native_shell,deb_install,uninstall,residue_check
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,deb_metadata,deb_install,uninstall,residue_check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runonmine-linux-desktop-x86_64-preflight

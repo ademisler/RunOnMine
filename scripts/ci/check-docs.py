@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
-IGNORED_PARTS = {".git", "target", ".venv", "node_modules"}
+IGNORED_PARTS = {".git", "target", "dist", "artifacts", ".venv", "node_modules"}
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
 

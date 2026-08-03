@@ -5,6 +5,11 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Complete the Linux package lifecycle: canonical `runonmine`/`runonmine-desktop` DEB identities, explicit runtime dependencies, mutual `Conflicts`/`Replaces`, metadata inspection in release/preflight, synthetic beta.0-to-beta.1 upgrade coverage, and full Ubuntu VM install/reboot/uninstall acceptance.
+- Make the Linux desktop single-instance through an owner-private Unix socket; a second launch asks the primary process to restore/focus its window, while stale or unsafe filesystem entries fail closed.
+- Persist an explicitly supplied headless user-service master key into a private same-user systemd credential source, prefer explicit headless key material over ambient session detection, and verify user/system services across real VM reboots.
+- Observe Cloudflare Quick Tunnel URLs from both stdout and stderr and clear configured Quick runtime records during emergency lock before access is restored.
+- Preserve external-binary pin verification inside hardened Linux user services by normalizing only kernel-declared UID/GID user-namespace mappings and overflow identities; path, digest, size, modification time, and mode remain strict.
 - Render the Windows control center through eframe WGPU/Direct3D instead of requiring OpenGL, while retaining Glow on macOS and Linux; add a platform renderer regression test.
 - Update `event-listener` to 5.4.2 so the dependency graph is no longer affected by RUSTSEC-2026-0221.
 - Remove the unused `trash` dependency; RunOnMine uses its own descriptor-relative managed trash, and the stale crate also forced an incompatible Windows bindings version into the Direct3D graph.

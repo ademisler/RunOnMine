@@ -4754,6 +4754,7 @@ dependencies = [
  "eframe",
  "egui",
  "ksni",
+ "nix 0.31.3",
  "runonmine-core",
  "runonmine-oauth",
  "runonmine-platform",
@@ -4866,6 +4867,7 @@ dependencies = [
  "windows-service",
  "windows-sys 0.61.2",
  "xcap",
+ "zeroize",
 ]
 
 [[package]]

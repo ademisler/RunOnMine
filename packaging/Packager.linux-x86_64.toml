@@ -16,3 +16,14 @@ binaries = [
   { path = "runonmine-agent", main = false },
   { path = "runonmine-helper", main = false },
 ]
+
+[deb]
+package-name = "runonmine"
+section = "utils"
+priority = "optional"
+depends = [
+  "libc6 (>= 2.35)",
+  "libgcc-s1",
+  "libgbm1",
+  "libxcb1",
+]

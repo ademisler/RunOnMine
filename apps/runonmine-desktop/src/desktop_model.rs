@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::connector_wizard::ConnectorWizardState;
 use crate::desktop_acceptance::DesktopAcceptance;
+use crate::desktop_instance::DesktopInstance;
 use crate::desktop_process::BackgroundCliTask;
 use crate::desktop_shell::DesktopShell;
 use crate::desktop_snapshot::{BackgroundDesktopSnapshot, ConnectorLifecycle};
@@ -110,6 +111,7 @@ pub(super) struct RunOnMineDesktop {
     pub(super) policy_editor: PolicyEditorState,
     pub(super) connector_wizard: ConnectorWizardState,
     pub(super) connector_rx: Option<BackgroundCliTask>,
+    pub(super) instance: DesktopInstance,
     pub(super) shell: DesktopShell,
     pub(super) exit_requested: bool,
     pub(super) acceptance: Option<DesktopAcceptance>,
