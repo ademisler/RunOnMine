@@ -19,7 +19,13 @@ $root = Join-Path $env:ProgramData ("RunOnMineHelperAcceptance-" + $testId)
 $attackerScript = Join-Path $root "attacker.ps1"
 $resultPath = Join-Path $root "attacker-result.json"
 $passwordBytes = New-Object byte[] 32
-[Security.Cryptography.RandomNumberGenerator]::Fill($passwordBytes)
+$random = [Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $random.GetBytes($passwordBytes)
+}
+finally {
+    $random.Dispose()
+}
 $passwordText = [Convert]::ToBase64String($passwordBytes) + "aA1!"
 [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
 $password = ConvertTo-SecureString $passwordText -AsPlainText -Force

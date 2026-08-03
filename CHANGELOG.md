@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Use the Windows PowerShell 5.1-compatible cryptographic RNG instance API in helper identity acceptance while preserving 256-bit random attacker-account credentials.
 - Re-read the Local HTTP bearer token from the shared secret store on every request so `runonmine lock` invalidates already-issued credentials immediately in a running agent.
 - Explicitly load `System.Net.Http` in the Windows smoke test so stale-token rejection works under Windows PowerShell 5.1 as well as newer PowerShell runtimes.
 - Make the Windows owner-approval acceptance loop tolerate transient state-store open contention and report the last captured CLI error instead of aborting on PowerShell native-error conversion.
