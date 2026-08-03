@@ -495,7 +495,7 @@ fn freeze_release_candidate() -> Result<()> {
         source_fingerprint,
     };
     let path = root.join(RELEASE_CANDIDATE_FILE);
-    fs::write(&path, toml::to_string_pretty(&manifest)? + "\n")?;
+    fs::write(&path, toml::to_string_pretty(&manifest)?)?;
     println!("Frozen release candidate {revision} in {}.", path.display());
     Ok(())
 }
