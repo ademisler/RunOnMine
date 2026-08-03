@@ -124,7 +124,13 @@ $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encod
         throw "second Windows user was not denied by the helper pipe: $($attack | ConvertTo-Json -Compress)"
     }
 
-    Write-Host "RunOnMine Windows LocalSystem helper owner access and second-user named-pipe denial passed."
+    & $runOnMinePath admin uninstall | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "helper uninstall exited with code $LASTEXITCODE" }
+    & $runOnMinePath admin uninstall | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "idempotent helper uninstall exited with code $LASTEXITCODE" }
+    $helperInstalled = $false
+
+    Write-Host "RunOnMine Windows LocalSystem helper owner access, second-user named-pipe denial and idempotent uninstall passed."
 }
 finally {
     $passwordText = $null
