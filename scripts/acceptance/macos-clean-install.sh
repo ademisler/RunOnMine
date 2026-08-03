@@ -146,16 +146,25 @@ PY
 }
 
 install_dmg() {
-  local mount_plist="$output/dmg-attach.plist" mount source_app
+  local mount_plist="$output/dmg-attach.plist" attach_log="$output/dmg-license.log" mount source_app
   [[ -f $dmg && $dmg == /* ]] || fail "DMG is missing or not absolute"
   [[ ! -e $app ]] || fail "$app already exists; clean-install acceptance refuses to overwrite it"
-  hdiutil attach -readonly -nobrowse -plist "$dmg" >"$mount_plist"
-  mount=$(python3 - "$mount_plist" <<'PY'
-import plistlib, sys
-with open(sys.argv[1], 'rb') as handle: data=plistlib.load(handle)
-points=[item.get('mount-point') for item in data.get('system-entities', []) if item.get('mount-point')]
-if len(points) != 1: raise SystemExit(f"expected one DMG mount point, received {points!r}")
-print(points[0])
+  printf 'Y\n' | hdiutil attach -readonly -nobrowse "$dmg" >"$attach_log"
+  hdiutil info -plist >"$mount_plist"
+  mount=$(python3 - "$mount_plist" "$dmg" <<'PY'
+import os, plistlib, sys
+with open(sys.argv[1], 'rb') as handle:
+    data=plistlib.load(handle)
+wanted=os.path.realpath(sys.argv[2])
+matches=[]
+for image in data.get('images', []):
+    if os.path.realpath(image.get('image-path', '')) != wanted:
+        continue
+    points=[item.get('mount-point') for item in image.get('system-entities', []) if item.get('mount-point')]
+    matches.extend(points)
+if len(matches) != 1:
+    raise SystemExit(f"expected one mount point for {wanted}, received {matches!r}")
+print(matches[0])
 PY
 )
   source_app=$(find "$mount" -maxdepth 1 -type d -name 'RunOnMine.app' -print -quit)

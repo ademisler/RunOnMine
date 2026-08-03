@@ -22,14 +22,24 @@ cleanup() {
   rm -f -- "$mount_plist"
 }
 trap cleanup EXIT HUP INT TERM
-hdiutil attach -readonly -nobrowse -plist "$dmg" >"$mount_plist"
-mount_point=$(python3 - "$mount_plist" <<'PY2'
-import plistlib, sys
+printf 'Y\n' | hdiutil attach -readonly -nobrowse "$dmg" >/dev/null
+hdiutil info -plist >"$mount_plist"
+mount_point=$(python3 - "$mount_plist" "$dmg" <<'PY2'
+import os, plistlib, sys
 with open(sys.argv[1], 'rb') as handle:
     data=plistlib.load(handle)
-points=[entry.get('mount-point') for entry in data.get('system-entities', []) if entry.get('mount-point')]
+wanted=os.path.realpath(sys.argv[2])
+points=[]
+for image in data.get('images', []):
+    if os.path.realpath(image.get('image-path', '')) != wanted:
+        continue
+    points.extend(
+        entry.get('mount-point')
+        for entry in image.get('system-entities', [])
+        if entry.get('mount-point')
+    )
 if len(points) != 1:
-    raise SystemExit(f"unexpected mount points: {points!r}")
+    raise SystemExit(f"unexpected mount points for {wanted}: {points!r}")
 print(points[0])
 PY2
 )
