@@ -42,7 +42,6 @@ function Invoke-CleanupNativeCommand {
 
 $testId = [guid]::NewGuid().ToString("N").Substring(0, 10)
 $userName = "RomAttack$testId"
-$taskName = "RunOnMine helper attacker $testId"
 $root = Join-Path $env:ProgramData ("RunOnMineHelperAcceptance-" + $testId)
 $attackerScript = Join-Path $root "attacker.ps1"
 $resultPath = Join-Path $root "attacker-result.json"
@@ -59,7 +58,7 @@ $passwordText = [Convert]::ToBase64String($passwordBytes) + "aA1!"
 $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
 $helperInstalled = $false
 $userCreated = $false
-$taskRegistered = $false
+$attackerProcess = $null
 
 try {
     New-Item -ItemType Directory -Force -Path $root | Out-Null
@@ -136,21 +135,22 @@ $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encod
     New-LocalUser -Name $userName -Password $password -PasswordNeverExpires -AccountNeverExpires | Out-Null
     $userCreated = $true
     $qualifiedUser = "$env:COMPUTERNAME\$userName"
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$attackerScript`""
-    )
-    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings `
-        -User $qualifiedUser -Password $passwordText -RunLevel Limited -Force | Out-Null
-    $taskRegistered = $true
-
-    Start-ScheduledTask -TaskName $taskName
+    $credential = [Management.Automation.PSCredential]::new($qualifiedUser, $password)
+    $attackerProcess = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -ArgumentList @(
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $attackerScript
+        ) -Credential $credential -LoadUserProfile -PassThru
     for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath $resultPath); $attempt++) {
+        $attackerProcess.Refresh()
+        if ($attackerProcess.HasExited) { break }
         Start-Sleep -Milliseconds 100
     }
     if (-not (Test-Path -LiteralPath $resultPath)) {
-        $task = Get-ScheduledTaskInfo -TaskName $taskName
-        throw "attacker task did not write a result; last result=$($task.LastTaskResult)"
+        throw "second-user helper probe exited without writing a result"
     }
     $attack = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
     if ($attack.outcome -ne "denied") {
@@ -166,9 +166,8 @@ $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encod
 finally {
     $passwordText = $null
     $password = $null
-    if ($taskRegistered) {
-        Invoke-CleanupNativeCommand -FilePath "$env:SystemRoot\System32\schtasks.exe" `
-            -Arguments @("/Delete", "/TN", $taskName, "/F")
+    if ($attackerProcess -and -not $attackerProcess.HasExited) {
+        Stop-Process -Id $attackerProcess.Id -Force -ErrorAction SilentlyContinue
     }
     if ($userCreated) {
         Invoke-CleanupNativeCommand -FilePath "$env:SystemRoot\System32\net.exe" `

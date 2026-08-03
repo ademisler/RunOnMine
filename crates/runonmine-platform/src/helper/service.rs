@@ -891,24 +891,8 @@ fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
 
 #[cfg(windows)]
 fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
-    let _ignored = Command::new("sc.exe")
-        .args(["stop", WINDOWS_SERVICE_NAME])
-        .output();
-    let output = Command::new("sc.exe")
-        .args(["delete", WINDOWS_SERVICE_NAME])
-        .output()
-        .context("failed to request Windows service removal")?;
-    if output.status.success()
-        || String::from_utf8_lossy(&output.stdout).contains("1060")
-        || String::from_utf8_lossy(&output.stderr).contains("1060")
-    {
-        Ok(())
-    } else {
-        bail!(
-            "failed to delete the RunOnMine helper service: {}",
-            bounded_command_output(&output)
-        )
-    }
+    windows_stop_allow_absent()?;
+    windows_delete_allow_absent()
 }
 
 fn service_query_error_state(error: &anyhow::Error) -> HelperAvailability {

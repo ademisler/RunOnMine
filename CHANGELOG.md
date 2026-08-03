@@ -5,6 +5,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Launch the Windows helper second-user denial probe with an explicit alternate-user process instead of requiring the temporary account to hold the system-wide batch-logon right.
+- Wait for the Windows LocalSystem helper service to reach the stopped state before deleting its SCM entry and installed binary, preventing partial uninstall and locked executable residue.
 - Register the Windows second-user helper denial task with the PowerShell 5.1 password-logon parameter set instead of mixing incompatible principal and credential parameter sets.
 - Run the Windows helper identity acceptance through the shared native-process wrapper and bounded native cleanup commands so PowerShell 5.1 cannot hide the original failure behind a hanging cleanup pipeline.
 - Make Windows privileged-helper uninstall treat the named-pipe namespace as IPC rather than a removable filesystem directory, and prove repeated uninstall is idempotent.
