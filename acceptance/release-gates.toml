@@ -25,9 +25,9 @@ evidence = "Attach the exact DEB/SBOM checksums, desktop-session report, MCP acc
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Attach the Windows acceptance report and installer checksum."
+evidence = "acceptance/evidence/windows-x86_64-clean-install.json validates installer SHA-256 206ba94cff6c2fd38650cd2119abfb90daa51b30b1a622e6fe4e1ab1df5d5ac1 at source revision 9725658278908dce1b17c35dfd0098c64d1d602a; reboot, recovered agent, MCP initialize, approved fs_write, denied admin_exec, seven desktop views, native shell, single-instance activation, uninstall, and zero residue all passed."
 
 [[gate]]
 id = "hosted-platform-matrix"
@@ -39,9 +39,9 @@ evidence = "Recent jobs ended before checkout with no assigned runner and no exe
 [[gate]]
 id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Attach reviewer notes and negative-test output."
+evidence = "Final release helper acceptance on source revision 9725658278908dce1b17c35dfd0098c64d1d602a proved LocalSystem service identity, installing-owner access, second-user named-pipe denial, allowlisted whoami.exe execution, and two idempotent uninstalls; helper-identity.log SHA-256 c450f34ae286bb021033843d2e944c2794fd1b958e08adf1d83193fc39b88998."
 
 [[gate]]
 id = "owner-risk-review"

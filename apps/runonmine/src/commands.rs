@@ -670,6 +670,14 @@ pub(super) fn emergency_lock(arguments: &LockArgs) -> Result<()> {
         stop_failures.push("system service locking is only supported on Linux".to_owned());
     }
 
+    let cleared_quick_runtime = match clear_configured_quick_runtime(&paths) {
+        Ok(cleared) => cleared,
+        Err(error) => {
+            stop_failures.push(format!("Quick Tunnel runtime cleanup: {error}"));
+            0
+        }
+    };
+
     let store = StateStore::open(&paths.state_db())?;
     let (denied, temporary_grants) = store.emergency_lock()?;
     let oauth = SqliteOAuthStore::open(&paths.state_db())?;
@@ -688,6 +696,7 @@ pub(super) fn emergency_lock(arguments: &LockArgs) -> Result<()> {
     println!("Revoked OAuth tokens: {revoked_tokens}");
     println!("Rotated local HTTP tokens: {rotated_local_http_tokens}");
     println!("Rotated Quick Tunnel secrets: {rotated_quick_tunnels}");
+    println!("Cleared Quick Tunnel runtime records: {cleared_quick_runtime}");
     println!("Rotated OAuth registration tokens: {rotated_oauth_registration_tokens}");
     println!("Removed OpenAI runtime keys: {removed_openai_keys}");
     println!("Restart and reconnect explicitly when access should be restored.");
@@ -698,6 +707,20 @@ pub(super) fn emergency_lock(arguments: &LockArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn clear_configured_quick_runtime(paths: &AppPaths) -> Result<usize> {
+    let config = AppConfig::load(&paths.config_file())?;
+    let runtime = QuickTunnelRuntimeStore::new(paths);
+    let mut cleared = 0_usize;
+    for connector in &config.connectors {
+        if connector.kind == ConnectorKind::CloudflareQuick
+            && runtime.clear_connector(&connector.id)?
+        {
+            cleared = cleared.saturating_add(1);
+        }
+    }
+    Ok(cleared)
 }
 
 fn rotate_lock_credentials(paths: &AppPaths) -> Result<(usize, usize, usize, usize)> {
@@ -982,26 +1005,7 @@ pub(super) fn run_elevated_helper(helper: &Path, arguments: &[std::ffi::OsString
 
 #[cfg(windows)]
 pub(super) fn run_elevated_helper(helper: &Path, arguments: &[std::ffi::OsString]) -> Result<()> {
-    fn quote_powershell(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
-    }
-
-    let argument_list = arguments
-        .iter()
-        .map(|value| quote_powershell(&value.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(",");
-    let script = format!(
-        "$p=Start-Process -FilePath {} -ArgumentList @({argument_list}) -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        quote_powershell(&helper.to_string_lossy())
-    );
-    run_process(ProcessCommand::new("powershell.exe").args([
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        &script,
-    ]))
+    runonmine_platform::helper::run_elevated_process(helper, arguments)
 }
 
 pub(super) fn run_process(command: &mut ProcessCommand) -> Result<()> {
@@ -1162,6 +1166,23 @@ mod tests {
             oauth_owner: None,
             openai_tunnel: None,
         }
+    }
+
+    #[test]
+    fn emergency_lock_runtime_cleanup_removes_configured_quick_records() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let paths = AppPaths::under(directory.path());
+        paths.ensure()?;
+        let mut config = AppConfig::default();
+        config.connectors.push(quick_connector("quick-lock"));
+        config.save(&paths.config_file())?;
+        let runtime = QuickTunnelRuntimeStore::new(&paths);
+        let _generation = runtime.begin("quick-lock")?;
+        assert!(runtime.get("quick-lock")?.is_some());
+        assert_eq!(clear_configured_quick_runtime(&paths)?, 1);
+        assert!(runtime.get("quick-lock")?.is_none());
+        assert_eq!(clear_configured_quick_runtime(&paths)?, 0);
+        Ok(())
     }
 
     #[test]

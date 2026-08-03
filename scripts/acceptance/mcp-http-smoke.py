@@ -213,10 +213,43 @@ def main() -> int:
     if not called or "result" not in called or called["result"].get("isError") is True:
         fail(f"machine_info call failed: {called!r}")
 
+    stage = "denied_admin_exec"
+    admin_id = args.iterations + 3
+    try:
+        denied_admin, _, _ = request(
+            parts,
+            token,
+            {
+                "jsonrpc": "2.0",
+                "id": admin_id,
+                "method": "tools/call",
+                "params": {
+                    "name": "admin_exec",
+                    "arguments": {
+                        "program": "/bin/true",
+                        "args": [],
+                    },
+                },
+            },
+            session=session,
+            expected_id=admin_id,
+        )
+    except (RuntimeError, OSError, socket.timeout) as error:
+        fail(f"denied admin_exec: {error}")
+    admin_denied = bool(
+        denied_admin
+        and (
+            "error" in denied_admin
+            or denied_admin.get("result", {}).get("isError") is True
+        )
+    )
+    if not admin_denied:
+        fail(f"admin_exec was not denied: {denied_admin!r}")
+
     approved_write = False
     if args.approval_write_path:
         stage = "approved_fs_write"
-        write_id = args.iterations + 3
+        write_id = args.iterations + 4
         try:
             written, _, _ = request(
                 parts,
@@ -266,6 +299,7 @@ def main() -> int:
         "session_deleted": True,
         "list_iterations": args.iterations,
         "approved_write": approved_write,
+        "denied_admin_call": admin_denied,
     }, sort_keys=True))
     return 0
 

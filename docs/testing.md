@@ -107,9 +107,22 @@ identifiers, and credentials.
 On a physical Ubuntu 24.04 Xfce/X11 session,
 `linux-desktop-session-smoke.sh` additionally observes a real
 StatusNotifierItem, sends the window manager's `_NET_CLOSE_WINDOW`, verifies the
-window becomes hidden while the process remains alive, activates the tray over
-D-Bus, verifies the window reappears, and confirms the tray name disappears on
+window becomes hidden while the process remains alive, launches a second process
+and verifies it activates the primary without creating another window, activates
+the tray over D-Bus, verifies the window reappears, and confirms the tray name disappears on
 exit.
+
+
+The full Linux candidate path is `scripts/acceptance/linux-clean-install-vm.sh`.
+It uses a disposable Ubuntu 24.04 QEMU overlay for actual boot cycles and package
+manager behavior, while the exact extracted desktop DEB binary is tested on the
+real Oty X11/StatusNotifier session. Nested containers are not accepted as
+user-service credential or reboot evidence because their user mount namespace
+can differ from a normal host. The ARM64 headless equivalent is
+`scripts/acceptance/linux-headless-clean-install-vm.sh`, using an Ubuntu ARM64
+cloud image, QEMU AArch64 UEFI boot, and a verified managed ARM64 connector
+binary.
+
 
 The Linux x86_64 artifact preflight builds all four binaries with desktop
 control enabled, runs the seven-view parity smoke, creates a four-binary

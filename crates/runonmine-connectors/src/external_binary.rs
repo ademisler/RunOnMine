@@ -97,8 +97,12 @@ impl ExternalBinaryPinStore {
         else {
             return Ok(false);
         };
-        if expected != &current {
-            bail!("external connector binary no longer matches its installed pin");
+        let mismatched = pin_mismatch_fields(expected, &current);
+        if !mismatched.is_empty() {
+            bail!(
+                "external connector binary no longer matches its installed pin (mismatched fields: {})",
+                mismatched.join(", ")
+            );
         }
         Ok(true)
     }
@@ -201,6 +205,115 @@ pub fn verify_external_binary(
         ExternalBinaryTrust::ExternalUnpinned
     };
     Ok((binary, trust))
+}
+
+fn pin_mismatch_fields(
+    expected: &ExternalBinaryPin,
+    current: &ExternalBinaryPin,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if expected.kind != current.kind {
+        fields.push("kind");
+    }
+    if expected.canonical_path != current.canonical_path {
+        fields.push("canonical_path");
+    }
+    if expected.sha256 != current.sha256 {
+        fields.push("sha256");
+    }
+    if expected.size != current.size {
+        fields.push("size");
+    }
+    if expected.modified_nanos != current.modified_nanos {
+        fields.push("modified_nanos");
+    }
+    if !unix_identity_matches(expected.unix_uid, current.unix_uid, LinuxIdentityKind::User) {
+        fields.push("unix_uid");
+    }
+    if !unix_identity_matches(
+        expected.unix_gid,
+        current.unix_gid,
+        LinuxIdentityKind::Group,
+    ) {
+        fields.push("unix_gid");
+    }
+    if expected.unix_mode != current.unix_mode {
+        fields.push("unix_mode");
+    }
+    fields
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LinuxIdentityKind {
+    User,
+    Group,
+}
+
+fn unix_identity_matches(
+    expected: Option<u32>,
+    current: Option<u32>,
+    kind: LinuxIdentityKind,
+) -> bool {
+    if expected == current {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (Some(expected), Some(current)) = (expected, current) else {
+            return false;
+        };
+        let (map_path, overflow_path) = match kind {
+            LinuxIdentityKind::User => ("/proc/self/uid_map", "/proc/sys/kernel/overflowuid"),
+            LinuxIdentityKind::Group => ("/proc/self/gid_map", "/proc/sys/kernel/overflowgid"),
+        };
+        let Ok(map) = fs::read_to_string(map_path) else {
+            return false;
+        };
+        let Ok(overflow) = fs::read_to_string(overflow_path) else {
+            return false;
+        };
+        let Ok(overflow) = overflow.trim().parse::<u32>() else {
+            return false;
+        };
+        identity_matches_with_map(expected, current, &map, overflow)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = kind;
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn identity_matches_with_map(expected: u32, current: u32, map: &str, overflow: u32) -> bool {
+    match map_parent_identity(map, expected) {
+        Ok(Some(mapped)) => current == mapped,
+        Ok(None) => current == overflow,
+        Err(()) => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn map_parent_identity(map: &str, parent: u32) -> std::result::Result<Option<u32>, ()> {
+    let parent = u64::from(parent);
+    for line in map.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.split_ascii_whitespace();
+        let inside = fields.next().ok_or(())?.parse::<u64>().map_err(|_| ())?;
+        let outside = fields.next().ok_or(())?.parse::<u64>().map_err(|_| ())?;
+        let length = fields.next().ok_or(())?.parse::<u64>().map_err(|_| ())?;
+        if fields.next().is_some() || length == 0 {
+            return Err(());
+        }
+        let end = outside.checked_add(length).ok_or(())?;
+        if parent >= outside && parent < end {
+            let mapped = inside.checked_add(parent - outside).ok_or(())?;
+            return u32::try_from(mapped).map(Some).map_err(|_| ());
+        }
+    }
+    Ok(None)
 }
 
 fn inspect_pin(kind: BinaryKind, path: &Path) -> Result<ExternalBinaryPin> {
@@ -373,6 +486,40 @@ mod tests {
         assert!(store.remove(BinaryKind::Cloudflared, &binary)?);
         assert!(!store.verify(BinaryKind::Cloudflared, &binary)?);
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn namespace_identity_mapping_accepts_only_kernel_mapped_or_overflow_identity() {
+        let restricted = "1001 1001 1\n";
+        assert!(identity_matches_with_map(1001, 1001, restricted, 65_534));
+        assert!(identity_matches_with_map(0, 65_534, restricted, 65_534));
+        assert!(!identity_matches_with_map(0, 1001, restricted, 65_534));
+        assert!(identity_matches_with_map(0, 0, "0 0 1\n", 65_534));
+        assert!(identity_matches_with_map(1000, 0, "0 1000 1\n", 65_534));
+        assert!(!identity_matches_with_map(0, 65_534, "invalid\n", 65_534));
+        assert!(!identity_matches_with_map(0, 65_534, "0 0 0\n", 65_534));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pin_comparison_still_rejects_content_and_mode_changes() {
+        let expected = ExternalBinaryPin {
+            kind: "cloudflared".to_owned(),
+            canonical_path: PathBuf::from("/usr/local/bin/cloudflared"),
+            sha256: "a".repeat(64),
+            size: 10,
+            modified_nanos: Some(20),
+            unix_uid: Some(0),
+            unix_gid: Some(0),
+            unix_mode: Some(0o100_755),
+        };
+        let mut current = expected.clone();
+        current.sha256 = "b".repeat(64);
+        current.unix_mode = Some(0o100_775);
+        let mismatched = pin_mismatch_fields(&expected, &current);
+        assert!(mismatched.contains(&"sha256"));
+        assert!(mismatched.contains(&"unix_mode"));
     }
 
     #[cfg(unix)]

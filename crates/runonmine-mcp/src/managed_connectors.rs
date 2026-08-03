@@ -544,10 +544,15 @@ async fn start_external_connectors_inner(
                 ConnectorStartupStage::Process,
             );
         }
-        if start_synchronous_connector(&context, connector, managed, pending_observers)
-            .await
-            .is_err()
+        if let Err(error) =
+            start_synchronous_connector(&context, connector, managed, pending_observers).await
         {
+            tracing::error!(
+                connector_id = %connector.id,
+                kind = ?connector.kind,
+                error = ?error,
+                "connector preparation failed"
+            );
             managed.record_degraded(
                 &connector.id,
                 connector.kind,
@@ -920,7 +925,9 @@ fn spawn_quick_url_observer(
         };
         loop {
             match events.recv().await {
-                Ok(ProcessEvent::StandardOutput { line }) => {
+                Ok(
+                    ProcessEvent::StandardOutput { line } | ProcessEvent::StandardError { line },
+                ) => {
                     if let Some(url) = parse_quick_tunnel_url(&line)
                         && store.set_url(&generation, &url).is_err()
                     {
@@ -943,11 +950,7 @@ fn spawn_quick_url_observer(
                     state: ProcessState::Failed { .. } | ProcessState::Stopped { .. },
                 })
                 | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Ok(
-                    ProcessEvent::HealthChanged { .. }
-                    | ProcessEvent::StateChanged { .. }
-                    | ProcessEvent::StandardError { .. },
-                ) => {}
+                Ok(ProcessEvent::HealthChanged { .. } | ProcessEvent::StateChanged { .. }) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(
                         connector_id = generation.connector_id(),
@@ -1635,7 +1638,7 @@ exit 1
         managed.activate_quick_observers(pending);
 
         let first = Url::parse("https://first-observer.trycloudflare.com/")?;
-        sender.send(ProcessEvent::StandardOutput {
+        sender.send(ProcessEvent::StandardError {
             line: first.to_string(),
         })?;
         wait_for_quick_url(&store, "quick-connector", Some(&first)).await?;

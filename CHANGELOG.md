@@ -5,6 +5,31 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Stop the running Windows user Scheduled Task before deleting it and normalize quoted Task Scheduler action paths during reboot acceptance, preventing locked versioned-agent residue and false path failures.
+- Explicitly opt the three private headless applications into cargo-dist so release archives remain buildable while the workspace stays non-publishable.
+- Align MCP filesystem authorization regressions with the selected canonical root identity so Windows verbatim resource paths are asserted consistently for reads and moves.
+- Drain Windows acceptance child stdout and stderr concurrently before waiting for exit so verbose Cargo and installer processes cannot deadlock on full redirected pipe buffers.
+- Align the cross-platform filesystem policy-path regression with the selected canonical root identity so Windows verbatim paths are tested without weakening path authorization.
+- Launch the Windows helper second-user denial probe with an explicit alternate-user process instead of requiring the temporary account to hold the system-wide batch-logon right.
+- Wait for the Windows LocalSystem helper service to reach the stopped state before deleting its SCM entry and installed binary, preventing partial uninstall and locked executable residue.
+- Register the Windows second-user helper denial task with the PowerShell 5.1 password-logon parameter set instead of mixing incompatible principal and credential parameter sets.
+- Run the Windows helper identity acceptance through the shared native-process wrapper and bounded native cleanup commands so PowerShell 5.1 cannot hide the original failure behind a hanging cleanup pipeline.
+- Make Windows privileged-helper uninstall treat the named-pipe namespace as IPC rather than a removable filesystem directory, and prove repeated uninstall is idempotent.
+- Validate the Windows helper identity acceptance against the structured `admin status` availability contract instead of the removed human-readable `healthy` marker.
+- Launch the Windows privileged helper through native `ShellExecuteExW` process handles instead of PowerShell `Start-Process`, eliminating hangs and null exit-code handling during UAC elevation.
+- Preserve helper executable and DLL-search integrity while allowing harmless create-only rights on higher Windows path ancestors such as the standard `C:\` ACL.
+- Use the Windows PowerShell 5.1-compatible cryptographic RNG instance API in helper identity acceptance while preserving 256-bit random attacker-account credentials.
+- Re-read the Local HTTP bearer token from the shared secret store on every request so `runonmine lock` invalidates already-issued credentials immediately in a running agent.
+- Explicitly load `System.Net.Http` in the Windows smoke test so stale-token rejection works under Windows PowerShell 5.1 as well as newer PowerShell runtimes.
+- Make the Windows owner-approval acceptance loop tolerate transient state-store open contention and report the last captured CLI error instead of aborting on PowerShell native-error conversion.
+- Use `System.Diagnostics.Process` in Windows acceptance scripts so PowerShell 5.1 cannot turn successful MCP, desktop, installer, or uninstaller runs into false failures through a null `Start-Process.ExitCode`.
+- Install SQLite busy handling before lock-taking connection PRAGMAs so owner approval commands wait for an in-flight agent transaction instead of spuriously reporting that setup is missing.
+- Treat normal and verbatim absolute Windows paths as the same selected-root identity so approved filesystem tools remain fail-closed without rejecting valid `C:\\...` requests.
+- Complete the Linux package lifecycle: canonical `runonmine`/`runonmine-desktop` DEB identities, explicit runtime dependencies, mutual `Conflicts`/`Replaces`, metadata inspection in release/preflight, synthetic beta.0-to-beta.1 upgrade coverage, and full Ubuntu VM install/reboot/uninstall acceptance.
+- Make the Linux desktop single-instance through an owner-private Unix socket; a second launch asks the primary process to restore/focus its window, while stale or unsafe filesystem entries fail closed.
+- Persist an explicitly supplied headless user-service master key into a private same-user systemd credential source, prefer explicit headless key material over ambient session detection, and verify user/system services across real VM reboots.
+- Observe Cloudflare Quick Tunnel URLs from both stdout and stderr and clear configured Quick runtime records during emergency lock before access is restored.
+- Preserve external-binary pin verification inside hardened Linux user services by normalizing only kernel-declared UID/GID user-namespace mappings and overflow identities; path, digest, size, modification time, and mode remain strict.
 - Render the Windows control center through eframe WGPU/Direct3D instead of requiring OpenGL, while retaining Glow on macOS and Linux; add a platform renderer regression test.
 - Update `event-listener` to 5.4.2 so the dependency graph is no longer affected by RUSTSEC-2026-0221.
 - Remove the unused `trash` dependency; RunOnMine uses its own descriptor-relative managed trash, and the stale crate also forced an incompatible Windows bindings version into the Direct3D graph.

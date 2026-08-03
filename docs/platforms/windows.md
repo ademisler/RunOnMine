@@ -41,10 +41,11 @@ runonmine.exe service status
 
 Task Scheduler restarts the task up to three times at one-minute intervals after
 failure, ignores duplicate instances, and starts when the machine becomes
-available. This recovery policy does not elevate the task or change its
-interactive-user authority. Secrets use Windows Credential Manager. Process
-timeouts assign descendants to a Job Object so child processes do not survive
-the tool call.
+available. Service removal first ends a running task and waits for it to stop
+before deleting the task and versioned agent binary. This recovery policy does
+not elevate the task or change its interactive-user authority. Secrets use
+Windows Credential Manager. Process timeouts assign descendants to a Job Object
+so child processes do not survive the tool call.
 
 ## Building and packaging
 

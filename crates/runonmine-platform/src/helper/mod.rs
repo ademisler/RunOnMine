@@ -40,6 +40,11 @@ pub use service::{
     resolve_install_owner,
 };
 
+#[cfg(windows)]
+pub fn run_elevated_process(executable: &Path, arguments: &[std::ffi::OsString]) -> Result<()> {
+    windows::run_elevated_process(executable, arguments)
+}
+
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const POLICY_VERSION: u16 = 2;

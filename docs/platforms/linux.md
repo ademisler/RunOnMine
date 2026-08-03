@@ -13,8 +13,9 @@ cargo build --release --no-default-features \
 The x86_64 desktop package is a standalone alternative to the headless DEB. It
 installs `runonmine`, `runonmine-agent`, `runonmine-helper`, and
 `runonmine-desktop` together under `/usr/bin`, plus a validated freedesktop menu
-entry and icon. Do not install the headless and desktop DEBs together because
-both intentionally own the same CLI and service binaries.
+entry and icon. The two DEBs intentionally own the same CLI and service
+binaries, so their metadata declares mutual `Conflicts` and `Replaces`; `apt`
+performs an explicit package replacement instead of leaving both installed.
 
 On Ubuntu 24.04, source builds require the X11/Wayland, PipeWire, EGL, GBM, DRM,
 and XKB development libraries used by eframe and optional desktop-control
@@ -36,8 +37,11 @@ freedesktop StatusNotifierItem tray. It does not require GTK or AppIndicator.
 The tray exposes the same **Open RunOnMine**, **Lock RunOnMine**, and **Quit**
 actions as macOS and Windows. Closing the window through the window manager
 hides it while the tray remains active; activating the tray restores and focuses
-the window. Sessions without a working StatusNotifierItem host fall back to a
-normal window whose close action exits.
+the window. A second desktop launch connects to an owner-private Unix socket in
+the RunOnMine state directory, asks the primary process to show itself, and exits
+without creating another window. Unsafe non-socket or foreign-owned entries are
+never replaced. Sessions without a working StatusNotifierItem host fall back to
+a normal window whose close action exits.
 
 Install a built candidate and start the user service with:
 
@@ -82,8 +86,8 @@ isolated D-Bus/Xvfb session and writes a privacy-bounded JSON contract:
 
 On a real X11 desktop, install `wmctrl`, `xdotool`, `libglib2.0-bin`, and the
 normal systemd/D-Bus tools, then validate StatusNotifier registration,
-window-manager close-to-tray behavior, tray activation, and clean tray removal
-with:
+window-manager close-to-tray behavior, tray activation, single-instance
+activation, and clean tray removal with:
 
 ```console
 DISPLAY=:0 \
@@ -113,6 +117,22 @@ validated configuration. Later `runonmine setup --root ...` operations and root
 changes from the desktop application re-render the installed unit; a running
 service is restarted immediately so write policy and the systemd sandbox cannot
 disagree.
+
+A headless user service needs durable key material. When a valid 32-byte
+`RUNONMINE_MASTER_KEY` is present during `runonmine service install`, RunOnMine
+copies it without whitespace into an owner-only mode-0600 file below the local
+data directory and renders a systemd `LoadCredential` directive. The service
+then receives only systemd's read-only runtime credential copy. The source path,
+its parents, ownership, mode, size, and symlink state are validated before use.
+A desktop session that uses Secret Service and does not supply an explicit master
+key continues to use the platform credential store instead.
+
+The same hardened user-service namespace can display root-owned external
+connector binaries with the kernel overflow UID/GID. Pin verification translates
+only identities described by `/proc/self/uid_map`, `/proc/self/gid_map`, and the
+kernel overflow settings; canonical path, SHA-256, size, modification time, and
+mode must still match exactly. A user-owned replacement therefore remains a pin
+failure.
 
 ## Headless system service
 
@@ -152,7 +172,10 @@ root-owned, non-symlink `/etc/runonmine/master-key` with no group/other access.
 The value is base64 or hex and must decode to exactly 32 bytes. RunOnMine then
 uses an XChaCha20-Poly1305 file backend with a private cross-process lock.
 `RUNONMINE_MASTER_KEY` remains an explicit compatibility fallback for non-systemd
-hosts, not the recommended service configuration.
+hosts and the input used when installing a headless per-user service. Explicit
+headless key material takes precedence over ambient `XDG_RUNTIME_DIR` or session
+bus variables so a lingering user manager cannot accidentally select Secret
+Service without a usable keyring.
 
 To rotate the key, stop the service, export or recreate connector credentials,
 atomically replace `/etc/runonmine/master-key` with a new 32-byte value at mode
@@ -175,3 +198,38 @@ before spawn, and executed through `/proc/self/fd/<fd>`. A pathname replacement
 after authorization cannot redirect the child to a different inode.
 
 Helper upgrades stage the executable, policy and systemd unit before stopping the service. A failed start or health check restores the previous files, reloads systemd, recreates the former enabled/running state and verifies the restored helper when it was previously running.
+
+## Full Linux clean-install acceptance
+
+The x86_64 release candidate is exercised in a disposable Ubuntu 24.04 QEMU VM,
+then the exact desktop DEB binary is exercised against Oty's real X11 and user
+D-Bus session. The harness verifies synthetic beta.0-to-beta.1 upgrades, package
+replacement, user and system services, two distinct VM reboots, MCP initialize,
+a locally approved write, denied administrator execution, a real Cloudflare
+Quick Tunnel, emergency lock and stale-token rejection, seven-view rendering,
+tray lifecycle, single-instance activation, uninstall, and residue inspection.
+
+```console
+sudo ./scripts/acceptance/linux-clean-install-vm.sh \
+  /var/lib/runonmine-acceptance/cache/noble-server-cloudimg-amd64.img \
+  "$PWD/dist/runonmine_0.1.0-beta.1_amd64.deb" \
+  "$PWD/dist/runonmine-desktop_0.1.0-beta.1_amd64.deb" \
+  /usr/local/bin/cloudflared \
+  /var/lib/runonmine-acceptance/evidence/linux-x86_64
+```
+
+Formal evidence requires a clean committed worktree. Development-only runs may
+set `RUNONMINE_ACCEPTANCE_ALLOW_DIRTY=1`; their report is explicitly labeled
+`development_clean_install_acceptance` and cannot satisfy a release gate.
+
+The ARM64 headless artifact uses the matching full-system QEMU path. The guest
+downloads the architecture-correct `cloudflared` through RunOnMine's verified
+managed-binary resolver, then verifies one real reboot and the complete
+user/system-service, MCP, lock, uninstall, and residue lifecycle:
+
+```console
+sudo ./scripts/acceptance/linux-headless-clean-install-vm.sh \
+  /var/lib/runonmine-acceptance/cache/noble-server-cloudimg-arm64.img \
+  "$PWD/dist/runonmine_0.1.0-beta.1_arm64.deb" \
+  /var/lib/runonmine-acceptance/evidence/linux-aarch64
+```

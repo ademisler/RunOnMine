@@ -40,6 +40,10 @@ const fn native_renderer() -> eframe::Renderer {
 }
 
 pub fn run() -> Result<()> {
+    let instance = match crate::desktop_instance::DesktopInstance::acquire()? {
+        crate::desktop_instance::DesktopInstanceOutcome::Primary(instance) => instance,
+        crate::desktop_instance::DesktopInstanceOutcome::Secondary => return Ok(()),
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(layout::DEFAULT_VIEWPORT)
@@ -51,9 +55,9 @@ pub fn run() -> Result<()> {
     eframe::run_native(
         "RunOnMine",
         options,
-        Box::new(|context| {
+        Box::new(move |context| {
             theme::apply(&context.egui_ctx);
-            Ok(Box::new(RunOnMineDesktop::new()?))
+            Ok(Box::new(RunOnMineDesktop::new(instance)?))
         }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
@@ -62,7 +66,7 @@ pub fn run() -> Result<()> {
 use model::{RunOnMineDesktop, Tab};
 
 impl RunOnMineDesktop {
-    fn new() -> Result<Self> {
+    fn new(instance: crate::desktop_instance::DesktopInstance) -> Result<Self> {
         let now = Instant::now();
         let mut app = Self {
             paths: None,
@@ -96,6 +100,7 @@ impl RunOnMineDesktop {
             policy_editor: PolicyEditorState::default(),
             connector_wizard: ConnectorWizardState::default(),
             connector_rx: None,
+            instance,
             shell: crate::desktop_shell::DesktopShell::new(),
             exit_requested: false,
             acceptance: crate::desktop_acceptance::DesktopAcceptance::from_environment()?,
@@ -515,7 +520,11 @@ impl RunOnMineDesktop {
     }
 
     fn process_shell(&mut self, context: &egui::Context) {
-        while let Some(command) = self.shell.try_command() {
+        while let Some(command) = self
+            .shell
+            .try_command()
+            .or_else(|| self.instance.try_command())
+        {
             match command {
                 crate::desktop_shell::DesktopCommand::Show => show_window(context),
                 crate::desktop_shell::DesktopCommand::Lock => {

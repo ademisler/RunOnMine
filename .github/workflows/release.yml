@@ -131,7 +131,11 @@ jobs:
       - name: Validate Linux SBOM
         run: cargo run --locked -p xtask -- validate-sbom --path "$(find dist -maxdepth 1 -name '*-${{ matrix.target }}-unsigned.sbom.json' -print -quit)" --target ${{ matrix.target }}
       - run: cargo run --locked -p xtask -- stage-packager --target ${{ matrix.target }}
-      - run: cargo packager --release --config ${{ matrix.packager }}
+      - name: Package and inspect Linux DEB
+        run: |
+          ./packaging/package-linux-deb.sh "${{ matrix.packager }}" runonmine runonmine-desktop
+          deb=$(find dist -maxdepth 1 -name 'runonmine_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine runonmine-desktop
       - run: cargo run --locked -p xtask -- checksums
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -182,6 +186,10 @@ jobs:
           ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
       - run: cargo run --locked -p xtask -- stage-packager --target x86_64-unknown-linux-gnu --desktop
       - run: ./packaging/package-linux-desktop.sh
+      - name: Inspect Linux desktop DEB metadata
+        run: |
+          deb=$(find dist -maxdepth 1 -name 'runonmine-desktop_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine-desktop runonmine
       - run: cargo run --locked -p xtask -- checksums
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

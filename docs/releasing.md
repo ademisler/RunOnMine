@@ -78,6 +78,18 @@ cargo run --locked -p xtask -- universal-macos
 The packaging helpers accept only validated target names and operate below the
 workspace `target` and `dist` directories.
 
+
+Linux DEBs must be created through `packaging/package-linux-deb.sh` or
+`packaging/package-linux-desktop.sh`, not a direct `cargo packager` invocation.
+The wrappers normalize the Debian package identity, add explicit runtime
+`Depends`, enforce mutual headless/desktop `Conflicts` and `Replaces`, rebuild
+the checksum, and run `scripts/acceptance/linux-deb-metadata.sh`. Release and
+artifact-preflight workflows use the same path for x86_64 and aarch64 headless
+packages and the x86_64 desktop package. Formal Linux evidence is generated with
+`scripts/acceptance/linux-clean-install-vm.sh` for x86_64 headless/desktop and
+`scripts/acceptance/linux-headless-clean-install-vm.sh` for ARM64 headless.
+
+
 ## Uninstall acceptance
 
 `runonmine uninstall` removes the per-user service and preserves configuration,

@@ -1,3 +1,5 @@
+. "$(Join-Path $PSScriptRoot "windows-process.ps1")"
+
 if (-not ("RunOnMine.NativeWindow" -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
@@ -131,7 +133,7 @@ function Invoke-RunOnMineDesktopAcceptance {
     $desktopProcess = $null
     try {
         $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $reportPath
-        $desktopProcess = Start-Process -FilePath $Desktop -PassThru
+        $desktopProcess = Start-RunOnMineNativeProcess -FilePath $Desktop
         if ($RequireInteractiveWindow) {
             $window = Wait-RunOnMineMainWindow -Process $desktopProcess
             if ($window -eq [IntPtr]::Zero) {
@@ -160,7 +162,7 @@ function Invoke-RunOnMineDesktopAcceptance {
     }
     $desktopProcess = $null
     try {
-        $desktopProcess = Start-Process -FilePath $Desktop -PassThru
+        $desktopProcess = Start-RunOnMineNativeProcess -FilePath $Desktop
         $window = Wait-RunOnMineMainWindow -Process $desktopProcess
         if ($window -eq [IntPtr]::Zero) {
             throw "RunOnMine desktop did not expose a window for close-to-tray acceptance"
@@ -179,6 +181,27 @@ function Invoke-RunOnMineDesktopAcceptance {
         } while ($visible -and [DateTime]::UtcNow -lt $deadline)
         if ($visible) {
             throw "RunOnMine desktop window did not hide after WM_CLOSE"
+        }
+
+        $secondary = Start-RunOnMineNativeProcess -FilePath $Desktop
+        if (-not $secondary.WaitForExit(10000)) {
+            Stop-Process -Id $secondary.Id -Force -ErrorAction SilentlyContinue
+            throw "second RunOnMine desktop instance did not exit"
+        }
+        if ($secondary.ExitCode -ne 0) {
+            throw "second RunOnMine desktop instance exited with code $($secondary.ExitCode)"
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 100
+            $desktopProcess.Refresh()
+            if ($desktopProcess.HasExited) {
+                throw "primary RunOnMine desktop exited during single-instance activation"
+            }
+            $visible = [RunOnMine.NativeWindow]::IsWindowVisible($window)
+        } while (-not $visible -and [DateTime]::UtcNow -lt $deadline)
+        if (-not $visible) {
+            throw "second RunOnMine desktop instance did not restore the primary window"
         }
     }
     finally {

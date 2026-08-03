@@ -16,6 +16,7 @@
     {"id": "desktop_launch", "status": "passed", "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"},
     {"id": "desktop_views", "status": "passed", "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"},
     {"id": "native_shell", "status": "passed", "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"},
+    {"id": "single_instance", "status": "passed", "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"},
     {"id": "uninstall", "status": "passed", "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"},
     {"id": "residue_check", "status": "passed", "evidence": "REPLACE_WITH_LOG_OR_REPORT_REFERENCE"}
   ],

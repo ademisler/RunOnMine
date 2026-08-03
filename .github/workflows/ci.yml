@@ -37,6 +37,8 @@ jobs:
         run: ./scripts/ci/verify-runner-environment.sh
       - name: Validate repository documentation
         run: python3 scripts/ci/check-docs.py
+      - name: Validate embedded Python heredocs
+        run: python3 scripts/ci/check-embedded-python.py
       - name: Validate clean-install evidence templates
         run: |
           python3 scripts/release/validate-clean-install-evidence.py acceptance/evidence/clean-install.template.json

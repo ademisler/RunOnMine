@@ -28,6 +28,7 @@ subtle.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 xcap = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -42,7 +43,9 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Memory",
   "Win32_System_Pipes",
+  "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

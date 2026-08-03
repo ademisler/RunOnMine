@@ -106,7 +106,7 @@ impl HelperManager {
         if let Some(service) = &paths.service_definition {
             remove_regular_file_if_present(service)?;
         }
-        remove_empty_parent(&paths.socket)?;
+        remove_runtime_parent(&paths.socket)?;
         drop(install_lock);
         remove_regular_file_if_present(&install_lock_path(&paths))?;
         remove_empty_parent(&paths.policy)?;
@@ -454,6 +454,17 @@ fn validate_helper_health(result: HelperResult) -> Result<()> {
         bail!("running helper package version does not match the installer");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)]
+fn remove_runtime_parent(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn remove_runtime_parent(path: &Path) -> Result<()> {
+    remove_empty_parent(path)
 }
 
 fn remove_empty_parent(path: &Path) -> Result<()> {
@@ -881,24 +892,8 @@ fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
 
 #[cfg(windows)]
 fn uninstall_platform_service(_paths: &SystemPaths) -> Result<()> {
-    let _ignored = Command::new("sc.exe")
-        .args(["stop", WINDOWS_SERVICE_NAME])
-        .output();
-    let output = Command::new("sc.exe")
-        .args(["delete", WINDOWS_SERVICE_NAME])
-        .output()
-        .context("failed to request Windows service removal")?;
-    if output.status.success()
-        || String::from_utf8_lossy(&output.stdout).contains("1060")
-        || String::from_utf8_lossy(&output.stderr).contains("1060")
-    {
-        Ok(())
-    } else {
-        bail!(
-            "failed to delete the RunOnMine helper service: {}",
-            bounded_command_output(&output)
-        )
-    }
+    windows_stop_allow_absent()?;
+    windows_delete_allow_absent()
 }
 
 fn service_query_error_state(error: &anyhow::Error) -> HelperAvailability {
@@ -1078,6 +1073,12 @@ mod tests {
     #[test]
     fn owner_resolution_rejects_root() {
         assert!(resolve_install_owner(Some(0), None).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_runtime_parent_cleanup_is_not_a_filesystem_removal() -> Result<()> {
+        remove_runtime_parent(Path::new(r"\\.\pipe\RunOnMine.Helper"))
     }
 
     #[cfg(target_os = "linux")]

@@ -55,6 +55,43 @@ The physical X11 tray lifecycle and Windows native-window/NSIS procedures are
 specified in [testing](testing.md) and the platform documents. Wine is
 supplemental Windows compatibility evidence, not physical Windows acceptance.
 
+
+### Linux QEMU and native desktop acceptance
+
+After producing both x86_64 DEBs, run the QEMU harness from a clean committed
+worktree. It generates validated headless and desktop evidence JSON for the exact
+artifact hashes and combines VM reboot/service results with the physical X11
+tray and single-instance report:
+
+```console
+sudo ./scripts/acceptance/linux-clean-install-vm.sh \
+  /var/lib/runonmine-acceptance/cache/noble-server-cloudimg-amd64.img \
+  "$PWD/dist/runonmine_0.1.0-beta.1_amd64.deb" \
+  "$PWD/dist/runonmine-desktop_0.1.0-beta.1_amd64.deb" \
+  /usr/local/bin/cloudflared \
+  /var/lib/runonmine-acceptance/evidence/linux-x86_64
+```
+
+The VM starts from a qcow2 overlay, upgrades synthetic beta.0 packages, survives
+two verified boot-ID changes, exercises both user and system services, runs the
+real MCP approval flow and Quick Tunnel, locks and rejects the stale token, then
+replaces and removes both package variants. The host portion never installs the
+candidate DEB; it extracts only the packaged `runonmine` and
+`runonmine-desktop` executables into a private temporary directory for
+real-session validation.
+
+ARM64 headless acceptance uses an Ubuntu ARM64 cloud image and the canonical
+arm64 DEB. It validates the same headless service and MCP security lifecycle,
+including RunOnMine's managed download and verification of the ARM64
+`cloudflared` binary:
+
+```console
+sudo ./scripts/acceptance/linux-headless-clean-install-vm.sh \
+  /var/lib/runonmine-acceptance/cache/noble-server-cloudimg-arm64.img \
+  "$PWD/dist/runonmine_0.1.0-beta.1_arm64.deb" \
+  /var/lib/runonmine-acceptance/evidence/linux-aarch64
+```
+
 ## Clean-machine acceptance
 
 For each release artifact, record the exact artifact SHA-256, operating system,

@@ -727,6 +727,36 @@ fn trusted_state_backup_can_restore_after_corruption() -> Result<()> {
 }
 
 #[test]
+fn state_store_open_waits_for_an_existing_writer() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("state.db");
+    let writer = Connection::open(&database)?;
+    writer.execute_batch(
+        "CREATE TABLE writer_lock (value INTEGER NOT NULL);
+         BEGIN IMMEDIATE;
+         INSERT INTO writer_lock (value) VALUES (1);",
+    )?;
+
+    let waiting_database = database.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || -> Result<StateStore> {
+        started_tx
+            .send(())
+            .map_err(|_| anyhow!("start signal failed"))?;
+        StateStore::open(&waiting_database)
+    });
+    started_rx.recv()?;
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    writer.execute_batch("ROLLBACK;")?;
+
+    let store = thread
+        .join()
+        .map_err(|_| anyhow!("state-store open thread panicked"))??;
+    assert!(store.pending_approvals()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn concurrent_legacy_migration_is_serialized_and_idempotent() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("state").join("state.db");

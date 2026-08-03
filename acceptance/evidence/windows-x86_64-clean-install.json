@@ -1,0 +1,74 @@
+{
+    "schema_version":  1,
+    "platform":  "windows-x86_64",
+    "artifact":  "runonmine-desktop_0.1.0-beta.1_x64-setup.exe",
+    "artifact_sha256":  "206ba94cff6c2fd38650cd2119abfb90daa51b30b1a622e6fe4e1ab1df5d5ac1",
+    "source_revision":  "9725658278908dce1b17c35dfd0098c64d1d602a",
+    "tester":  "OpenAI automated acceptance on owner-authorized Windows VM",
+    "tested_at":  "2026-08-03T21:23:51.0768501Z",
+    "steps":  [
+                  {
+                      "id":  "install",
+                      "status":  "passed",
+                      "evidence":  "stage1-status.json and windows-smoke.log: current-user NSIS metadata, four binaries, shortcuts and installed application flow verified"
+                  },
+                  {
+                      "id":  "reboot",
+                      "status":  "passed",
+                      "evidence":  "service-verify.log: Windows boot identity changed and the limited-logon Scheduled Task recovered"
+                  },
+                  {
+                      "id":  "agent_ready",
+                      "status":  "passed",
+                      "evidence":  "service-verify.log and service-status-post-reboot.json: loopback agent health ready after reboot"
+                  },
+                  {
+                      "id":  "mcp_initialize",
+                      "status":  "passed",
+                      "evidence":  "post-reboot-mcp.json: Streamable HTTP initialize negotiated protocol 2025-06-18"
+                  },
+                  {
+                      "id":  "approved_tool_call",
+                      "status":  "passed",
+                      "evidence":  "post-reboot-mcp.json: exact owner-approved fs_write passed and admin_exec remained denied"
+                  },
+                  {
+                      "id":  "connector",
+                      "status":  "passed",
+                      "evidence":  "connect-list.log and post-reboot-mcp.json: LocalHttp connector served authenticated MCP after reboot"
+                  },
+                  {
+                      "id":  "desktop_launch",
+                      "status":  "passed",
+                      "evidence":  "windows-smoke.log: installed desktop exposed a real native RunOnMine HWND"
+                  },
+                  {
+                      "id":  "desktop_views",
+                      "status":  "passed",
+                      "evidence":  "windows-smoke.log: exact seven-view desktop acceptance report passed"
+                  },
+                  {
+                      "id":  "native_shell",
+                      "status":  "passed",
+                      "evidence":  "windows-smoke.log: Windows tray actions and WM_CLOSE hide-to-tray contract passed"
+                  },
+                  {
+                      "id":  "single_instance",
+                      "status":  "passed",
+                      "evidence":  "windows-smoke.log: second desktop launch restored the primary window and exited cleanly"
+                  },
+                  {
+                      "id":  "uninstall",
+                      "status":  "passed",
+                      "evidence":  "helper-identity.log, service-cleanup.log and silent NSIS uninstall: helper, user service, user data and package removed"
+                  },
+                  {
+                      "id":  "residue_check",
+                      "status":  "passed",
+                      "evidence":  "stage2-status.json: uninstall record, install files, tasks, helper, data, processes and port 47821 absent"
+                  }
+              ],
+    "residues":  [
+
+                 ]
+}

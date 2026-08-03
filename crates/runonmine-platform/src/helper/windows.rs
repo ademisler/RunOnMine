@@ -2,7 +2,7 @@
 
 #![allow(unsafe_code)] // Audited Win32 FFI is confined to this module.
 
-use std::ffi::{OsStr, c_void};
+use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt as _;
@@ -18,7 +18,9 @@ use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
 };
 use tokio::sync::Semaphore;
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_BUSY, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_PIPE_BUSY, HANDLE, LocalFree, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
     ConvertStringSidToSidW, GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE,
@@ -37,9 +39,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, ImpersonateNamedPipeClient};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken, OpenThreadToken,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, INFINITE, OpenProcess,
+    OpenProcessToken, OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
+use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use super::{
     AdminPolicy, HelperRequest, HelperResponse, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
@@ -333,6 +337,106 @@ pub(super) fn require_local_system() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn run_elevated_process(executable: &Path, arguments: &[OsString]) -> Result<()> {
+    if !executable.is_absolute() || !executable.is_file() {
+        bail!("the elevated helper executable must be an absolute regular file");
+    }
+    let verb = wide("runas");
+    let file = wide(executable.as_os_str());
+    let parameters = windows_parameter_list(arguments)?;
+    let parameter_pointer = if arguments.is_empty() {
+        ptr::null()
+    } else {
+        parameters.as_ptr()
+    };
+    let mut execution = SHELLEXECUTEINFOW {
+        cbSize: u32::try_from(std::mem::size_of::<SHELLEXECUTEINFOW>()).unwrap_or(u32::MAX),
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        hwnd: ptr::null_mut(),
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: parameter_pointer,
+        lpDirectory: ptr::null(),
+        nShow: SW_SHOWNORMAL,
+        ..SHELLEXECUTEINFOW::default()
+    };
+    // SAFETY: all UTF-16 buffers are NUL-terminated and retained until the
+    // synchronous ShellExecuteExW call returns. The returned process handle is
+    // exclusively owned by OwnedHandle below.
+    if unsafe { ShellExecuteExW(&raw mut execution) } == 0 {
+        return Err(io::Error::last_os_error()).context("failed to launch the elevated helper");
+    }
+    if execution.hProcess.is_null() {
+        bail!("the elevated helper did not return a process handle");
+    }
+    let process = OwnedHandle(execution.hProcess);
+    // SAFETY: process is a live process handle returned by ShellExecuteExW.
+    if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
+        return Err(io::Error::last_os_error()).context("failed to wait for the elevated helper");
+    }
+    let mut exit_code = 0_u32;
+    // SAFETY: process remains open and exit_code points to initialized writable storage.
+    if unsafe { GetExitCodeProcess(process.0, &raw mut exit_code) } == 0 {
+        return Err(io::Error::last_os_error())
+            .context("failed to read the elevated helper exit code");
+    }
+    if exit_code != 0 {
+        bail!("privileged helper operation failed with exit code {exit_code}");
+    }
+    Ok(())
+}
+
+fn windows_parameter_list(arguments: &[OsString]) -> Result<Vec<u16>> {
+    let mut command_line = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if index > 0 {
+            command_line.push(u16::from(b' '));
+        }
+        append_windows_argument(&mut command_line, argument.as_os_str())?;
+    }
+    command_line.push(0);
+    Ok(command_line)
+}
+
+fn append_windows_argument(output: &mut Vec<u16>, argument: &OsStr) -> Result<()> {
+    let units = argument.encode_wide().collect::<Vec<_>>();
+    if units.contains(&0) {
+        bail!("elevated helper arguments may not contain NUL characters");
+    }
+    let needs_quotes = units.is_empty()
+        || units.iter().any(|unit| {
+            matches!(
+                *unit,
+                0x0009 | 0x000a | 0x000b | 0x000c | 0x000d | 0x0020 | 0x0022
+            )
+        });
+    if !needs_quotes {
+        output.extend_from_slice(&units);
+        return Ok(());
+    }
+
+    output.push(u16::from(b'"'));
+    let mut backslashes = 0_usize;
+    for unit in units {
+        if unit == u16::from(b'\\') {
+            backslashes += 1;
+            continue;
+        }
+        if unit == u16::from(b'"') {
+            output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes * 2 + 1));
+            output.push(unit);
+            backslashes = 0;
+            continue;
+        }
+        output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
+        backslashes = 0;
+        output.push(unit);
+    }
+    output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes * 2));
+    output.push(u16::from(b'"'));
+    Ok(())
+}
+
 pub(super) fn require_elevated_administrator() -> Result<()> {
     let sid = allocated_sid(BUILTIN_ADMINISTRATORS_SID)?;
     let mut member = 0;
@@ -362,13 +466,20 @@ pub(super) fn validate_privileged_program_path(path: &Path) -> Result<()> {
     }
     let mut current = Some(path);
     let mut depth = 0_usize;
+    let mut role = PrivilegedPathRole::Executable;
     while let Some(component) = current {
         if depth > 64 {
             bail!("admin executable path is too deeply nested");
         }
         reject_reparse_point(component)?;
-        reject_low_privilege_write_access(component)?;
+        reject_low_privilege_write_access(component, role)?;
         current = component.parent();
+        role = match role {
+            PrivilegedPathRole::Executable => PrivilegedPathRole::ExecutableDirectory,
+            PrivilegedPathRole::ExecutableDirectory | PrivilegedPathRole::Ancestor => {
+                PrivilegedPathRole::Ancestor
+            }
+        };
         depth += 1;
     }
     Ok(())
@@ -392,13 +503,36 @@ fn file_owner_sid(path: &Path) -> Result<String> {
     sid_to_string(security.owner)
 }
 
-fn reject_low_privilege_write_access(path: &Path) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivilegedPathRole {
+    Executable,
+    ExecutableDirectory,
+    Ancestor,
+}
+
+fn low_privilege_mutation_mask(role: PrivilegedPathRole) -> u32 {
+    match role {
+        PrivilegedPathRole::Executable => {
+            FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER
+        }
+        PrivilegedPathRole::ExecutableDirectory => {
+            FILE_WRITE_DATA
+                | FILE_APPEND_DATA
+                | FILE_DELETE_CHILD
+                | DELETE
+                | WRITE_DAC
+                | WRITE_OWNER
+        }
+        PrivilegedPathRole::Ancestor => FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER,
+    }
+}
+
+fn reject_low_privilege_write_access(path: &Path, role: PrivilegedPathRole) -> Result<()> {
     let security = query_file_security(path)?;
     if security.dacl.is_null() {
         bail!("admin executable path has an unrestricted DACL");
     }
-    let write_mask =
-        FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER;
+    let write_mask = low_privilege_mutation_mask(role);
     for sid_text in LOW_PRIVILEGE_SIDS {
         let sid = allocated_sid(sid_text)?;
         let trustee = TRUSTEE_W {
@@ -531,6 +665,44 @@ impl Drop for RevertGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standard_system32_executable_is_an_acceptable_admin_program() -> Result<()> {
+        validate_privileged_program_path(&system_root().join("System32/whoami.exe"))
+    }
+
+    #[test]
+    fn ancestor_create_rights_do_not_weaken_executable_integrity_masks() {
+        let ancestor = low_privilege_mutation_mask(PrivilegedPathRole::Ancestor);
+        assert_eq!(ancestor & (FILE_WRITE_DATA | FILE_APPEND_DATA), 0);
+        assert_ne!(
+            ancestor & (FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER),
+            0
+        );
+        let executable_directory =
+            low_privilege_mutation_mask(PrivilegedPathRole::ExecutableDirectory);
+        assert_ne!(
+            executable_directory & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD),
+            0
+        );
+    }
+
+    #[test]
+    fn elevated_parameter_quoting_preserves_spaces_quotes_and_trailing_backslashes() -> Result<()> {
+        let arguments = [
+            OsString::from("install"),
+            OsString::from(r"C:\Program Files\RunOnMine\\"),
+            OsString::from("quoted\"value"),
+            OsString::new(),
+        ];
+        let encoded = windows_parameter_list(&arguments)?;
+        let rendered = String::from_utf16(&encoded[..encoded.len() - 1])?;
+        assert_eq!(
+            rendered,
+            r#"install "C:\Program Files\RunOnMine\\\\" "quoted\"value" """#
+        );
+        Ok(())
+    }
 
     #[test]
     fn pipe_name_is_product_scoped_and_local() {
