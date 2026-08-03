@@ -457,6 +457,7 @@ fn validate_helper_health(result: HelperResult) -> Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)]
 fn remove_runtime_parent(_path: &Path) -> Result<()> {
     Ok(())
 }
