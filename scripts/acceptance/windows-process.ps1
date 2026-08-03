@@ -58,3 +58,31 @@ function Start-RunOnMineNativeProcess {
     }
     return $process
 }
+
+function Invoke-RunOnMineNativeProcess {
+    param(
+        [Parameter(Mandatory = $true)] [string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [int]$TimeoutMilliseconds = 120000
+    )
+    $process = Start-RunOnMineNativeProcess -FilePath $FilePath -ArgumentList $ArgumentList `
+        -CaptureOutput -CreateNoWindow
+    try {
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw "native process timed out after $TimeoutMilliseconds ms: $FilePath"
+        }
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        return [pscustomobject]@{
+            ExitCode = [int]$process.ExitCode
+            Stdout = $stdout
+            Stderr = $stderr
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}

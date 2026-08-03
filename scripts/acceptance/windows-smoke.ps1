@@ -79,13 +79,24 @@ try {
             "--approval-write-path", $approvedPath
         ) -CaptureOutput -CreateNoWindow
         $approvalId = $null
+        $lastApprovalError = ""
         for ($attempt = 0; $attempt -lt 1800; $attempt++) {
-            $pending = (& $RunOnMine approvals list 2>$null | Out-String)
-            $match = [regex]::Match($pending, '(?m)^([0-9a-fA-F-]{36})  ')
-            if ($match.Success) {
-                $approvalId = $match.Groups[1].Value
-                & $RunOnMine approvals approve $approvalId --once | Out-Null
-                break
+            $approvalPoll = Invoke-RunOnMineNativeProcess -FilePath $RunOnMine `
+                -ArgumentList @("approvals", "list") -TimeoutMilliseconds 10000
+            if ($approvalPoll.ExitCode -eq 0) {
+                $match = [regex]::Match($approvalPoll.Stdout, '(?m)^([0-9a-fA-F-]{36})  ')
+                if ($match.Success) {
+                    $approvalId = $match.Groups[1].Value
+                    $approval = Invoke-RunOnMineNativeProcess -FilePath $RunOnMine `
+                        -ArgumentList @("approvals", "approve", $approvalId, "--once") `
+                        -TimeoutMilliseconds 10000
+                    if ($approval.ExitCode -ne 0) {
+                        throw "owner approval failed with code $($approval.ExitCode): $($approval.Stderr)"
+                    }
+                    break
+                }
+            } else {
+                $lastApprovalError = $approvalPoll.Stderr
             }
             if ($clientProcess.HasExited) { break }
             Start-Sleep -Milliseconds 50
@@ -101,7 +112,7 @@ try {
         [System.IO.File]::WriteAllText($clientStdout, $clientOutput)
         [System.IO.File]::WriteAllText($clientStderr, $clientFailure)
         if ($clientProcess.ExitCode -ne 0 -or -not $approvalId) {
-            throw "MCP HTTP acceptance client failed with code $($clientProcess.ExitCode): $clientFailure"
+            throw "MCP HTTP acceptance client failed with code $($clientProcess.ExitCode): $clientFailure; last approval poll error: $lastApprovalError"
         }
         $clientProcess.Dispose()
         $clientProcess = $null
@@ -119,7 +130,11 @@ try {
             -RequireInteractiveWindow (-not $SkipInteractiveDesktop.IsPresent)
     }
 
-    (& $RunOnMine approvals list | Out-String) | Select-String -SimpleMatch "No pending approvals." | Out-Null
+    $pendingAfterMcp = Invoke-RunOnMineNativeProcess -FilePath $RunOnMine `
+        -ArgumentList @("approvals", "list") -TimeoutMilliseconds 10000
+    if ($pendingAfterMcp.ExitCode -ne 0 -or $pendingAfterMcp.Stdout -notmatch 'No pending approvals\.') {
+        throw "pending approval inventory was not empty after MCP acceptance: $($pendingAfterMcp.Stderr)"
+    }
     & $RunOnMine audit tail --limit 5 | Out-Null
     (& $RunOnMine lock | Out-String) | Select-String -SimpleMatch "RunOnMine is locked." | Out-Null
 
