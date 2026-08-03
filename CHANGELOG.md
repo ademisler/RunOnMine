@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Use `System.Diagnostics.Process` in Windows acceptance scripts so PowerShell 5.1 cannot turn successful MCP, desktop, installer, or uninstaller runs into false failures through a null `Start-Process.ExitCode`.
 - Install SQLite busy handling before lock-taking connection PRAGMAs so owner approval commands wait for an in-flight agent transaction instead of spuriously reporting that setup is missing.
 - Treat normal and verbatim absolute Windows paths as the same selected-root identity so approved filesystem tools remain fail-closed without rejecting valid `C:\\...` requests.
 - Complete the Linux package lifecycle: canonical `runonmine`/`runonmine-desktop` DEB identities, explicit runtime dependencies, mutual `Conflicts`/`Replaces`, metadata inspection in release/preflight, synthetic beta.0-to-beta.1 upgrade coverage, and full Ubuntu VM install/reboot/uninstall acceptance.

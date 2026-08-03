@@ -11,6 +11,7 @@ $root = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-acceptance-" + [
 $pathsRoot = Join-Path $root "runonmine"
 $project = Join-Path $root "project"
 $agentProcess = $null
+$clientProcess = $null
 New-Item -ItemType Directory -Force -Path $pathsRoot, $project | Out-Null
 
 $old = @{
@@ -70,13 +71,13 @@ try {
         $clientStdout = Join-Path $root "mcp-client.stdout.log"
         $clientStderr = Join-Path $root "mcp-client.stderr.log"
         $python = Get-Command python -ErrorAction Stop
-        $clientProcess = Start-Process -FilePath $python.Source -ArgumentList @(
+        $clientProcess = Start-RunOnMineNativeProcess -FilePath $python.Source -ArgumentList @(
             $McpClient,
             "--url", "http://127.0.0.1:$port/mcp",
             "--token-file", $credential,
             "--iterations", "25",
             "--approval-write-path", $approvedPath
-        ) -PassThru -NoNewWindow -RedirectStandardOutput $clientStdout -RedirectStandardError $clientStderr
+        ) -CaptureOutput -CreateNoWindow
         $approvalId = $null
         for ($attempt = 0; $attempt -lt 1800; $attempt++) {
             $pending = (& $RunOnMine approvals list 2>$null | Out-String)
@@ -90,14 +91,21 @@ try {
             Start-Sleep -Milliseconds 50
         }
         if (-not $clientProcess.WaitForExit(120000)) {
-            Stop-Process -Id $clientProcess.Id -Force -ErrorAction SilentlyContinue
+            $clientProcess.Kill()
+            $clientProcess.WaitForExit()
             throw "MCP HTTP acceptance client timed out"
         }
+        $clientOutput = $clientProcess.StandardOutput.ReadToEnd()
+        $clientFailure = $clientProcess.StandardError.ReadToEnd()
+        $clientProcess.WaitForExit()
+        [System.IO.File]::WriteAllText($clientStdout, $clientOutput)
+        [System.IO.File]::WriteAllText($clientStderr, $clientFailure)
         if ($clientProcess.ExitCode -ne 0 -or -not $approvalId) {
-            $failure = Get-Content -Raw -ErrorAction SilentlyContinue $clientStderr
-            throw "MCP HTTP acceptance client failed: $failure"
+            throw "MCP HTTP acceptance client failed with code $($clientProcess.ExitCode): $clientFailure"
         }
-        $mcpResult = Get-Content -Raw -LiteralPath $clientStdout | ConvertFrom-Json
+        $clientProcess.Dispose()
+        $clientProcess = $null
+        $mcpResult = $clientOutput | ConvertFrom-Json
         if ($mcpResult.status -ne "passed" -or -not $mcpResult.approved_write -or -not $mcpResult.denied_admin_call) {
             throw "MCP HTTP acceptance did not prove approved fs_write and denied admin_exec"
         }
@@ -158,6 +166,13 @@ try {
     }
 }
 finally {
+    if ($clientProcess) {
+        if (-not $clientProcess.HasExited) {
+            $clientProcess.Kill()
+            $clientProcess.WaitForExit()
+        }
+        $clientProcess.Dispose()
+    }
     if ($agentProcess -and -not $agentProcess.HasExited) {
         Stop-Process -Id $agentProcess.Id -Force -ErrorAction SilentlyContinue
     }

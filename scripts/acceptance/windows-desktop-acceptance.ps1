@@ -1,3 +1,5 @@
+. "$(Join-Path $PSScriptRoot "windows-process.ps1")"
+
 if (-not ("RunOnMine.NativeWindow" -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
@@ -131,7 +133,7 @@ function Invoke-RunOnMineDesktopAcceptance {
     $desktopProcess = $null
     try {
         $env:RUNONMINE_DESKTOP_ACCEPTANCE_REPORT = $reportPath
-        $desktopProcess = Start-Process -FilePath $Desktop -PassThru
+        $desktopProcess = Start-RunOnMineNativeProcess -FilePath $Desktop
         if ($RequireInteractiveWindow) {
             $window = Wait-RunOnMineMainWindow -Process $desktopProcess
             if ($window -eq [IntPtr]::Zero) {
@@ -160,7 +162,7 @@ function Invoke-RunOnMineDesktopAcceptance {
     }
     $desktopProcess = $null
     try {
-        $desktopProcess = Start-Process -FilePath $Desktop -PassThru
+        $desktopProcess = Start-RunOnMineNativeProcess -FilePath $Desktop
         $window = Wait-RunOnMineMainWindow -Process $desktopProcess
         if ($window -eq [IntPtr]::Zero) {
             throw "RunOnMine desktop did not expose a window for close-to-tray acceptance"
@@ -181,7 +183,7 @@ function Invoke-RunOnMineDesktopAcceptance {
             throw "RunOnMine desktop window did not hide after WM_CLOSE"
         }
 
-        $secondary = Start-Process -FilePath $Desktop -PassThru
+        $secondary = Start-RunOnMineNativeProcess -FilePath $Desktop
         if (-not $secondary.WaitForExit(10000)) {
             Stop-Process -Id $secondary.Id -Force -ErrorAction SilentlyContinue
             throw "second RunOnMine desktop instance did not exit"

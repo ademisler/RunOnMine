@@ -28,8 +28,14 @@ if ((Test-Path -LiteralPath $localDataRoot) -or (Test-Path -LiteralPath $roaming
     throw "RunOnMine user data already exists; installer acceptance refuses to modify it"
 }
 try {
-    $install = Start-Process -FilePath $installerPath -ArgumentList "/S" -PassThru -Wait
+    $install = Start-RunOnMineNativeProcess -FilePath $installerPath -ArgumentList @("/S")
+    if (-not $install.WaitForExit(120000)) {
+        $install.Kill()
+        throw "NSIS installer timed out"
+    }
+    $install.WaitForExit()
     if ($install.ExitCode -ne 0) { throw "NSIS installer exited with code $($install.ExitCode)" }
+    $install.Dispose()
     if (-not (Test-Path -LiteralPath $registryPath)) { throw "NSIS installer did not create the current-user uninstall record" }
     $entry = Get-ItemProperty -LiteralPath $registryPath
     $installLocation = ([string]$entry.InstallLocation).Trim('"')
@@ -62,8 +68,14 @@ try {
         throw "NSIS uninstall command is incorrect"
     }
     if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw "NSIS uninstaller is missing" }
-    $remove = Start-Process -FilePath $uninstaller -ArgumentList "/S" -PassThru -Wait
+    $remove = Start-RunOnMineNativeProcess -FilePath $uninstaller -ArgumentList @("/S")
+    if (-not $remove.WaitForExit(120000)) {
+        $remove.Kill()
+        throw "NSIS uninstaller timed out"
+    }
+    $remove.WaitForExit()
     if ($remove.ExitCode -ne 0) { throw "NSIS uninstaller exited with code $($remove.ExitCode)" }
+    $remove.Dispose()
     for ($attempt = 0; $attempt -lt 100 -and (Test-Path -LiteralPath $installLocation); $attempt++) {
         Start-Sleep -Milliseconds 100
     }
@@ -101,7 +113,12 @@ finally {
         }
     }
     if ($uninstaller -and (Test-Path -LiteralPath $uninstaller)) {
-        Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -ErrorAction SilentlyContinue
+        try {
+            $cleanup = Start-RunOnMineNativeProcess -FilePath $uninstaller -ArgumentList @("/S")
+            if (-not $cleanup.WaitForExit(120000)) { $cleanup.Kill() }
+            $cleanup.WaitForExit()
+            $cleanup.Dispose()
+        } catch {}
         for ($attempt = 0; $attempt -lt 100; $attempt++) {
             $registryRemains = Test-Path -LiteralPath $registryPath
             $installRemains = $installLocation -and (Test-Path -LiteralPath $installLocation)
