@@ -3,6 +3,12 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+# cargo-packager's CI mode invokes create-dmg with --skip-jenkins, avoiding
+# Finder AppleScript automation prompts while preserving the application,
+# Applications symlink, volume icon, EULA, compression, and signing paths.
+CI=true
+export CI
+
 identity=${RUNONMINE_APPLE_SIGNING_IDENTITY:-}
 if [ -z "$identity" ]; then
   exec cargo packager --config packaging/Packager.macos.toml
