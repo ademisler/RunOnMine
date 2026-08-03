@@ -64,9 +64,46 @@ try {
     }
     if (-not $ready) { throw "agent did not become ready" }
 
+    $mcpResult = $null
     if ($McpClient) {
-        & python $McpClient --url "http://127.0.0.1:$port/mcp" --token-file $credential --iterations 25
-        if ($LASTEXITCODE -ne 0) { throw "MCP HTTP acceptance client failed" }
+        $approvedPath = Join-Path $project "approved.txt"
+        $clientStdout = Join-Path $root "mcp-client.stdout.log"
+        $clientStderr = Join-Path $root "mcp-client.stderr.log"
+        $python = Get-Command python -ErrorAction Stop
+        $clientProcess = Start-Process -FilePath $python.Source -ArgumentList @(
+            $McpClient,
+            "--url", "http://127.0.0.1:$port/mcp",
+            "--token-file", $credential,
+            "--iterations", "25",
+            "--approval-write-path", $approvedPath
+        ) -PassThru -NoNewWindow -RedirectStandardOutput $clientStdout -RedirectStandardError $clientStderr
+        $approvalId = $null
+        for ($attempt = 0; $attempt -lt 1800; $attempt++) {
+            $pending = (& $RunOnMine approvals list 2>$null | Out-String)
+            $match = [regex]::Match($pending, '(?m)^([0-9a-fA-F-]{36})  ')
+            if ($match.Success) {
+                $approvalId = $match.Groups[1].Value
+                & $RunOnMine approvals approve $approvalId --once | Out-Null
+                break
+            }
+            if ($clientProcess.HasExited) { break }
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not $clientProcess.WaitForExit(120000)) {
+            Stop-Process -Id $clientProcess.Id -Force -ErrorAction SilentlyContinue
+            throw "MCP HTTP acceptance client timed out"
+        }
+        if ($clientProcess.ExitCode -ne 0 -or -not $approvalId) {
+            $failure = Get-Content -Raw -ErrorAction SilentlyContinue $clientStderr
+            throw "MCP HTTP acceptance client failed: $failure"
+        }
+        $mcpResult = Get-Content -Raw -LiteralPath $clientStdout | ConvertFrom-Json
+        if ($mcpResult.status -ne "passed" -or -not $mcpResult.approved_write -or -not $mcpResult.denied_admin_call) {
+            throw "MCP HTTP acceptance did not prove approved fs_write and denied admin_exec"
+        }
+        if ((Get-Content -Raw -LiteralPath $approvedPath) -ne "approved MCP acceptance write`n") {
+            throw "MCP approved write content is incorrect"
+        }
     }
 
     if ($Desktop) {
@@ -77,6 +114,36 @@ try {
     (& $RunOnMine approvals list | Out-String) | Select-String -SimpleMatch "No pending approvals." | Out-Null
     & $RunOnMine audit tail --limit 5 | Out-Null
     (& $RunOnMine lock | Out-String) | Select-String -SimpleMatch "RunOnMine is locked." | Out-Null
+
+    $staleToken = (Get-Content -Raw -LiteralPath $credential | ConvertFrom-Json).bearer_token
+    $payload = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"stale-token-check","version":"1"}}}'
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.UseProxy = $false
+    $http = [System.Net.Http.HttpClient]::new($handler)
+    try {
+        $request = [System.Net.Http.HttpRequestMessage]::new(
+            [System.Net.Http.HttpMethod]::Post,
+            "http://127.0.0.1:$port/mcp"
+        )
+        $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new("Bearer", $staleToken)
+        $request.Headers.Accept.ParseAdd("application/json, text/event-stream")
+        $request.Headers.Host = "127.0.0.1:$port"
+        $request.Content = [System.Net.Http.StringContent]::new($payload, [Text.Encoding]::UTF8, "application/json")
+        $response = $http.SendAsync($request).GetAwaiter().GetResult()
+        try {
+            if ([int]$response.StatusCode -ne 401) {
+                throw "stale local HTTP token returned $([int]$response.StatusCode), expected 401"
+            }
+        }
+        finally {
+            $response.Dispose()
+            $request.Dispose()
+        }
+    }
+    finally {
+        $http.Dispose()
+        $handler.Dispose()
+    }
 
     if ($agentProcess -and -not $agentProcess.HasExited) {
         Stop-Process -Id $agentProcess.Id -Force

@@ -35,6 +35,12 @@ tray-icon = { workspace = true, optional = true }
 # `gpu-allocator` accepts several incompatible pre-1.0 `windows` releases.
 # Cargo.lock pins its edge to the same 0.62 line used by wgpu-hal.
 wgpu = { workspace = true, optional = true, features = ["dx12"] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 eframe = { workspace = true, optional = true, features = ["glow"] }

@@ -180,6 +180,27 @@ function Invoke-RunOnMineDesktopAcceptance {
         if ($visible) {
             throw "RunOnMine desktop window did not hide after WM_CLOSE"
         }
+
+        $secondary = Start-Process -FilePath $Desktop -PassThru
+        if (-not $secondary.WaitForExit(10000)) {
+            Stop-Process -Id $secondary.Id -Force -ErrorAction SilentlyContinue
+            throw "second RunOnMine desktop instance did not exit"
+        }
+        if ($secondary.ExitCode -ne 0) {
+            throw "second RunOnMine desktop instance exited with code $($secondary.ExitCode)"
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 100
+            $desktopProcess.Refresh()
+            if ($desktopProcess.HasExited) {
+                throw "primary RunOnMine desktop exited during single-instance activation"
+            }
+            $visible = [RunOnMine.NativeWindow]::IsWindowVisible($window)
+        } while (-not $visible -and [DateTime]::UtcNow -lt $deadline)
+        if (-not $visible) {
+            throw "second RunOnMine desktop instance did not restore the primary window"
+        }
     }
     finally {
         if ($desktopProcess -and -not $desktopProcess.HasExited) {
