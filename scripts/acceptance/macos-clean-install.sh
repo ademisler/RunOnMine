@@ -187,6 +187,26 @@ verify_bundle() {
   "$cli" --version | grep -Fx 'runonmine 0.1.0-beta.1' >/dev/null
 }
 
+has_preexisting_runonmine_state() {
+  local managed_path first_entry
+  [[ -e "$HOME/Library/LaunchAgents/dev.runonmine.agent.plist" ]] && return 0
+  launchctl print "gui/$(id -u)/dev.runonmine.agent" >/dev/null 2>&1 && return 0
+  pgrep -f '^/Applications/RunOnMine.app/Contents/MacOS/runonmine-(agent|desktop)( |$)' >/dev/null 2>&1 && return 0
+  for managed_path in \
+    "$HOME/Library/Application Support/dev.RunOnMine.RunOnMine" \
+    "$HOME/Library/Preferences/dev.RunOnMine.RunOnMine" \
+    "$HOME/Library/Logs/dev.RunOnMine.RunOnMine"; do
+    [[ -L $managed_path ]] && return 0
+    [[ -e $managed_path && ! -d $managed_path ]] && return 0
+    if [[ -d $managed_path ]]; then
+      first_entry=""
+      first_entry=$(find "$managed_path" -mindepth 1 ! -type d -print -quit) || return 0
+      [[ -n $first_entry ]] && return 0
+    fi
+  done
+  return 1
+}
+
 run_desktop_acceptance() {
   local arm_report="$output/desktop-arm64.json" intel_report="$output/desktop-x86_64.json"
   rm -f -- "$arm_report" "$intel_report"
@@ -239,19 +259,26 @@ prepare() {
   [[ -n $dmg && -n $sbom ]] || usage
   [[ $dmg == /* && $sbom == /* && -f $sbom ]] || fail "DMG and SBOM must be existing absolute files"
   [[ ! -e $state ]] || fail "acceptance output already contains state"
-  local revision artifact_hash port quick_id endpoint
+  local revision artifact_hash port quick_id endpoint had_preexisting_state=0
   revision=$(require_clean_revision)
   capture_macmcp "$macmcp_baseline"
+  has_preexisting_runonmine_state && had_preexisting_state=1
   python3 "$repo_root/scripts/release/validate-clean-install-evidence.py" "$repo_root/acceptance/evidence/clean-install.template.json" >/dev/null
   cargo run --quiet --locked -p xtask --manifest-path "$repo_root/Cargo.toml" -- validate-sbom --path "$sbom" --target universal-apple-darwin
   install_dmg
   verify_bundle
 
-  # Remove any previous beta LaunchAgent/data using the installed current CLI.
-  "$cli" uninstall --purge --confirm PURGE >"$output/preexisting-purge.log" 2>&1 || {
-    "$cli" uninstall >"$output/preexisting-uninstall.log" 2>&1 || true
-    fail "pre-existing RunOnMine state could not be safely purged"
-  }
+  # Purge only state that existed before the clean-install attempt. A fresh CLI
+  # intentionally refuses destructive purge without configuration because it
+  # cannot enumerate unknown credential-store entries safely.
+  if [[ $had_preexisting_state -eq 1 ]]; then
+    "$cli" uninstall --purge --confirm PURGE >"$output/preexisting-purge.log" 2>&1 || {
+      "$cli" uninstall >"$output/preexisting-uninstall.log" 2>&1 || true
+      fail "pre-existing RunOnMine state could not be safely purged"
+    }
+  else
+    printf '%s\n' 'No pre-existing RunOnMine managed state was present.' >"$output/preexisting-purge.log"
+  fi
   run_desktop_acceptance
   run_desktop_lifecycle
 
