@@ -104,7 +104,7 @@ const WINDOWS_RECOVERY_COMMAND: &str = "$settings = New-ScheduledTaskSettingsSet
 const MACOS_SERVICE_LOG_LIMIT_BYTES: u64 = 5 * 1_024 * 1_024;
 // Cold starts can include first-run state, keychain, and connector inventory initialization.
 // Keep the wait bounded while allowing a healthy service to publish its verified marker.
-const AGENT_RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+const AGENT_RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ServiceStatus {
