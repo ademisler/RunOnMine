@@ -11,9 +11,9 @@ evidence_file = "acceptance/evidence/macos-universal-clean-install.json"
 [[gate]]
 id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Previous evidence predates the frozen candidate; rerun and attach service, MCP, package, and cleanup verification."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Ubuntu 24.04 clean-install acceptance on x86_64 KVM and ARM64 full QEMU. The x86_64 DEB SHA-256 is eb08255331e0fbf7fc09333f33b69a82d618f23307153cc5134233f52e448173 and the ARM64 DEB SHA-256 is 61faa73228b687edb2166a775e622fa93452bece04ab40a87d6c314c95578521. Both architectures proved package lifecycle, verified reboot, user/system service recovery, authenticated MCP approval and deny, pinned Cloudflare Quick Tunnel, Emergency Lock, uninstall, and zero unexpected residue."
 evidence_file = "acceptance/evidence/linux-x86_64-clean-install.json"
 
 [[gate]]
