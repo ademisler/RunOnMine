@@ -32,7 +32,7 @@ done
 [[ $stage == prepare || $stage == verify ]] || usage
 [[ -n $output && $output == /* ]] || usage
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 app=/Applications/RunOnMine.app
 app_bin="$app/Contents/MacOS"
 cli="$app_bin/runonmine"
