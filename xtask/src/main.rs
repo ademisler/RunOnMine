@@ -635,13 +635,16 @@ fn git_text(root: &Path, arguments: &[&str]) -> Result<String> {
 }
 
 fn git_success(root: &Path, arguments: &[&str], context: &str) -> Result<()> {
-    let status = Command::new("git")
+    let output = Command::new("git")
         .args(arguments)
         .current_dir(root)
-        .status()
+        .output()
         .with_context(|| format!("failed to execute git for {context}"))?;
-    if !status.success() {
-        bail!("{context}");
+    if !output.status.success() {
+        bail!(
+            "{context}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     Ok(())
 }
