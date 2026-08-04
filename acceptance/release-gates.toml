@@ -3,9 +3,9 @@ schema = 1
 [[gate]]
 id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Rerun on the frozen candidate and attach the validated report plus artifact SHA-256."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed physical Apple Silicon clean-install acceptance for DMG SHA-256 a285269ec7919878bc2a59dd278bab56afd54542deae4398f81947ef094bffb0, including arm64, Rosetta x86_64, reboot recovery, MCP approval, deny, Quick Tunnel, uninstall, zero residue, and unchanged MacMCP invariants."
 evidence_file = "acceptance/evidence/macos-universal-clean-install.json"
 
 [[gate]]
