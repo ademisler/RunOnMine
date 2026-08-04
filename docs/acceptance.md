@@ -104,6 +104,7 @@ The repeatable macOS procedure is split around a real reboot:
 ./scripts/acceptance/macos-clean-install.sh prepare \
   --dmg /absolute/path/to/RunOnMine.dmg \
   --sbom /absolute/path/to/runonmine-0.1.0-beta.1-universal-apple-darwin-unsigned.sbom.json \
+  --cloudflared /absolute/canonical/path/to/cloudflared \
   --output /absolute/private/acceptance-directory
 # Reboot, sign back into the same account, then:
 ./scripts/acceptance/macos-clean-install.sh verify \
@@ -117,8 +118,12 @@ authenticated Local HTTP plus a temporary Cloudflare Quick Tunnel, verifies the
 LaunchAgent after reboot, performs an owner-approved MCP write while remote
 administrator execution remains denied, tests Emergency Lock, retained-data
 uninstall and full purge, and confirms MacMCP LaunchAgents and loopback port
-45799 are unchanged. The generated evidence is still reviewed before it is
-committed.
+45799 are unchanged. `--cloudflared` is optional: omit it to exercise the
+signed-provenance managed download, or provide a canonical non-symlink executable
+when a constrained network cannot complete that official asset download within
+the bounded installer timeout. RunOnMine still checks compatibility and pins the
+external file identity; its SHA-256 is recorded in local acceptance evidence. The
+generated evidence is still reviewed before it is committed.
 
 ## Clean-machine acceptance
 

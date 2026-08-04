@@ -4,13 +4,15 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 usage:
-  macos-clean-install.sh prepare --dmg ABSOLUTE_DMG --sbom ABSOLUTE_SBOM --output ABSOLUTE_DIRECTORY
+  macos-clean-install.sh prepare --dmg ABSOLUTE_DMG --sbom ABSOLUTE_SBOM --output ABSOLUTE_DIRECTORY [--cloudflared ABSOLUTE_BINARY]
   macos-clean-install.sh verify --output ABSOLUTE_DIRECTORY
 
 The prepare stage installs the DMG into /Applications, exercises both universal
 slices and the native desktop lifecycle, configures Local HTTP plus a temporary
 Cloudflare Quick Tunnel, installs the per-user LaunchAgent, and records the boot
 session. Reboot the Mac, then run verify in the same logged-in user session.
+An optional canonical external cloudflared binary can be supplied when the official
+GitHub asset path is too slow; RunOnMine still validates and pins that binary.
 USAGE
   exit 2
 }
@@ -21,16 +23,19 @@ shift
 dmg=""
 sbom=""
 output=""
+cloudflared=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dmg) [[ $# -ge 2 ]] || usage; dmg=$2; shift 2 ;;
     --sbom) [[ $# -ge 2 ]] || usage; sbom=$2; shift 2 ;;
     --output) [[ $# -ge 2 ]] || usage; output=$2; shift 2 ;;
+    --cloudflared) [[ $# -ge 2 ]] || usage; cloudflared=$2; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ $stage == prepare || $stage == verify ]] || usage
 [[ -n $output && $output == /* ]] || usage
+[[ $stage == prepare || -z $cloudflared ]] || usage
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 app=/Applications/RunOnMine.app
@@ -126,6 +131,19 @@ PY
     sleep 0.25
   done
   fail "Cloudflare Quick Tunnel did not become ready"
+}
+
+validate_external_cloudflared() {
+  local canonical
+  [[ -n $cloudflared && $cloudflared == /* ]] || fail "external cloudflared path must be absolute"
+  [[ -f $cloudflared && -x $cloudflared && ! -L $cloudflared ]] || fail "external cloudflared must be an executable regular file, not a symlink"
+  canonical=$(python3 - "$cloudflared" <<'PYREALPATH'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PYREALPATH
+)
+  [[ $canonical == "$cloudflared" ]] || fail "external cloudflared path must already be canonical"
+  "$cloudflared" --version >"$output/cloudflared-version.log" 2>&1 || fail "external cloudflared version probe failed"
 }
 
 validate_desktop_report() {
@@ -261,7 +279,12 @@ prepare() {
   [[ -n $dmg && -n $sbom ]] || usage
   [[ $dmg == /* && $sbom == /* && -f $sbom ]] || fail "DMG and SBOM must be existing absolute files"
   [[ ! -e $state ]] || fail "acceptance output already contains state"
-  local revision artifact_hash port quick_id endpoint had_preexisting_state=0
+  local revision artifact_hash port quick_id endpoint cloudflared_hash="" cloudflared_source="managed" had_preexisting_state=0
+  if [[ -n $cloudflared ]]; then
+    validate_external_cloudflared
+    cloudflared_hash=$(sha256 "$cloudflared")
+    cloudflared_source="external"
+  fi
   revision=$(require_clean_revision)
   capture_macmcp "$macmcp_baseline"
   has_preexisting_runonmine_state && had_preexisting_state=1
@@ -286,7 +309,12 @@ prepare() {
 
   mkdir -p "$output/project"
   "$cli" setup --root "$output/project" >"$output/setup.log"
-  "$cli" connect cloudflare quick >"$output/cloudflare-quick-create.log"
+  if [[ -n $cloudflared ]]; then
+    "$cli" connect cloudflare quick --cloudflared "$cloudflared" >"$output/cloudflare-quick-create.log"
+    [[ $(sha256 "$cloudflared") == "$cloudflared_hash" ]] || fail "external cloudflared changed during connector setup"
+  else
+    "$cli" connect cloudflare quick >"$output/cloudflare-quick-create.log"
+  fi
   quick_id=$("$cli" connect list | awk '$2 == "CloudflareQuick" {print $1; exit}')
   [[ -n $quick_id ]] || fail "Cloudflare Quick Tunnel connector ID was not found"
   "$cli" connect local-http enable --token-output "$output/local-http.json" >"$output/local-http-enable.log"
@@ -307,7 +335,7 @@ PY
   wait_health "$port"
   wait_connector_ready "$port" "$quick_id"
   artifact_hash=$(sha256 "$dmg")
-  python3 - "$state" "$revision" "$(boot_session)" "$(basename "$dmg")" "$artifact_hash" "$port" "$quick_id" <<'PY'
+  python3 - "$state" "$revision" "$(boot_session)" "$(basename "$dmg")" "$artifact_hash" "$port" "$quick_id" "$cloudflared_source" "$cloudflared_hash" <<'PY'
 import json, pathlib, sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
     "schema_version": 1,
@@ -317,6 +345,8 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({
     "artifact_sha256": sys.argv[5],
     "port": int(sys.argv[6]),
     "quick_connector_id": sys.argv[7],
+    "cloudflared_source": sys.argv[8],
+    "cloudflared_sha256": sys.argv[9],
 }, indent=2) + "\n")
 PY
   chmod 600 "$state"
@@ -360,13 +390,19 @@ write_evidence() {
   python3 - "$state" "$evidence" "$tested_at" <<'PY'
 import json, pathlib, sys
 state=json.loads(pathlib.Path(sys.argv[1]).read_text())
+connector_detail="Cloudflare Quick Tunnel reached ready before and after reboot without recording its secret public URL"
+if state.get("cloudflared_source") == "external":
+    digest=state.get("cloudflared_sha256", "")
+    if len(digest) != 64:
+        raise SystemExit("external cloudflared digest is missing from acceptance state")
+    connector_detail += f"; the canonical external binary remained pinned to SHA-256 {digest}"
 steps=[
  ("install", "DMG mounted read-only; RunOnMine.app copied to /Applications; bundle ID, four universal binaries, version and code-signature structure verified"),
  ("reboot", "macOS boot session UUID changed after the installed per-user LaunchAgent was configured"),
  ("agent_ready", "LaunchAgent remained loaded and loopback health returned ready after reboot"),
  ("mcp_initialize", "post-reboot Streamable HTTP client initialized an authenticated MCP session"),
  ("approved_tool_call", "owner-approved fs_write succeeded once; admin_exec remained denied by the MCP acceptance client"),
- ("connector", "Cloudflare Quick Tunnel reached ready before and after reboot without recording its secret public URL"),
+ ("connector", connector_detail),
  ("desktop_launch", "installed arm64 desktop launched from the application bundle in the active GUI session"),
  ("desktop_views", "all seven security-control views rendered in both arm64 and Rosetta x86_64 slices"),
  ("native_shell", "native menu-bar integration reported available and closing the main window kept the process alive"),
