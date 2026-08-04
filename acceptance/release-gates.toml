@@ -19,9 +19,9 @@ evidence_file = "acceptance/evidence/linux-x86_64-clean-install.json"
 [[gate]]
 id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Previous evidence predates the frozen candidate; rerun the exact DEB/SBOM, desktop-session, MCP, uninstall, and reboot checks."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Ubuntu 24.04 QEMU package lifecycle plus the Oty physical X11 and user D-Bus session for desktop DEB SHA-256 a57d5aaaae912debc4c07d7663a7ea6d148fce5f8db76ee7e756453b84ce83c5, including seven views, close-to-tray, reopen, single-instance activation, MCP approval and deny, Emergency Lock, uninstall, and zero unexpected residue."
 evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
 
 [[gate]]
