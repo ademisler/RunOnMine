@@ -1151,21 +1151,26 @@ fn build_cyclonedx_sbom(
 }
 
 fn source_revision(root: &Path) -> Result<String> {
-    if let Ok(revision) = std::env::var("GITHUB_SHA")
-        && revision.len() == 40
-        && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Ok(revision.to_ascii_lowercase());
-    }
+    let ci_fallback = std::env::var("GITHUB_SHA").ok();
+    source_revision_with_fallback(root, ci_fallback.as_deref())
+}
+
+fn source_revision_with_fallback(root: &Path, ci_fallback: Option<&str>) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root)
         .output()
         .context("git failed while resolving SBOM provenance")?;
-    if !output.status.success() {
-        bail!("git failed while resolving SBOM provenance");
+    if output.status.success() {
+        return normalize_source_revision(String::from_utf8(output.stdout)?.trim());
     }
-    let revision = String::from_utf8(output.stdout)?.trim().to_owned();
+    if let Some(revision) = ci_fallback {
+        return normalize_source_revision(revision.trim());
+    }
+    bail!("git failed while resolving SBOM provenance")
+}
+
+fn normalize_source_revision(revision: &str) -> Result<String> {
     if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("SBOM provenance revision is invalid");
     }
@@ -1625,6 +1630,19 @@ evidence_file = "acceptance/evidence/macos.json"
         assert!(!is_release_metadata_path("Cargo.lock"));
         assert!(!is_release_metadata_path("docs/releasing.md"));
         assert!(!is_release_metadata_path("acceptance/README.md"));
+    }
+
+    #[test]
+    fn source_revision_prefers_repository_head_over_ci_fallback() -> Result<()> {
+        let temporary = release_test_repository()?;
+        let root = temporary.path();
+        let expected = git_text(root, &["rev-parse", "HEAD"])?.trim().to_owned();
+        let synthetic_merge_revision = "f".repeat(40);
+        assert_eq!(
+            source_revision_with_fallback(root, Some(&synthetic_merge_revision))?,
+            expected
+        );
+        Ok(())
     }
 
     #[test]
