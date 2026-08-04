@@ -251,7 +251,9 @@ assert report["close_request_intercepted"] is True
 assert report["restored_by_second_instance"] is True
 assert report["single_instance_transport"] == "owner-private-unix-socket"
 PYLIFECYCLE
-  pgrep -f "^$desktop$" >/dev/null 2>&1 && fail "desktop lifecycle left a process running"
+  if pgrep -f "^$desktop$" >/dev/null 2>&1; then
+    fail "desktop lifecycle left a process running"
+  fi
 }
 
 
