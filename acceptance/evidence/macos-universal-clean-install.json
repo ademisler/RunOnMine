@@ -5,7 +5,7 @@
   "artifact_sha256": "a285269ec7919878bc2a59dd278bab56afd54542deae4398f81947ef094bffb0",
   "source_revision": "1a0ba3d134f40fc95b9e8c52a95132fff061acb0",
   "tester": "OpenAI automated acceptance on owner-authorized Apple Silicon Mac",
-  "tested_at": "2026-08-04T21:09:42Z",
+  "tested_at": "2026-08-05T07:43:43Z",
   "steps": [
     {
       "id": "install",
@@ -66,6 +66,11 @@
       "id": "rosetta_slice_launch",
       "status": "passed",
       "evidence": "x86_64 slice launched under Rosetta and produced the validated seven-view acceptance report"
+    },
+    {
+      "id": "privileged_helper_boundary",
+      "status": "passed",
+      "evidence": "a real second local macOS user could not connect to the owner-only privileged-helper socket while the socket owner succeeded; the kernel enforced the denial, and the temporary account, UID lookup, home directory, Directory Services plist, and account-owned processes were removed after the test"
     },
     {
       "id": "uninstall",
