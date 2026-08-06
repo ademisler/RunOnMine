@@ -5,8 +5,11 @@ pre-release software. There is no supported production release yet.
 
 ## Supported versions
 
-Only the current `main` branch is reviewed. Older commits, locally modified
-builds, and pre-release artifacts are unsupported.
+The current `main` branch is the reviewed source line, but it is not itself a
+published production release. The exact private-beta candidate named in
+`acceptance/release-candidate.toml` is eligible only for owner-authorized testing
+when its artifact SHA-256 matches committed evidence. Older commits, locally
+modified builds, and unrecorded artifacts are unsupported.
 
 ## Reporting a vulnerability
 
@@ -39,5 +42,8 @@ A beta candidate must pass formatting, Clippy, tests, dependency policy, full
 Git-history secret scanning, the enforced coverage floor, scheduled fuzzing,
 platform builds, clean-machine acceptance tests, and an owner risk review. The
 tag workflow reads `acceptance/release-gates.toml` and fails while required
-evidence is pending or blocked. Packages remain unsupported until signing and
-platform acceptance are complete.
+evidence is pending or blocked. The recorded frozen candidate completed the
+private-beta platform gates, but its artifacts remain unsigned and limited to
+owner-authorized testing. Public or production support remains blocked until
+publisher signing and every public-beta gate are complete. Changes after a
+freeze require a new candidate and may not reuse prior platform evidence.

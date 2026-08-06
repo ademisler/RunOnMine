@@ -44,8 +44,8 @@ the final authority when a document and implementation disagree.
 
 - [Testing](testing.md): CI matrices, coverage, fuzzing, desktop parity, and
   native acceptance.
-- [Release acceptance](acceptance.md): clean-machine procedure and evidence
-  handling.
+- [Release acceptance](acceptance.md): recorded exact-candidate status,
+  clean-machine procedures, and evidence handling.
 - [Release process](releasing.md): gates, artifacts, signing status, packaging,
   and branch protection.
 - [Rollback runbook](release-rollback.md): application, connector, state, and

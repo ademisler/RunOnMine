@@ -5,6 +5,11 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Merge the complete exact-candidate private-beta evidence into `main`, recording rebooted macOS, Linux x86_64/aarch64, Linux desktop, and Windows x86_64 acceptance while keeping all public-beta external gates explicit.
+- Make Windows release binaries self-contained by statically linking MSVC/UCRT, harden native-process acceptance against PowerShell 5.1 exit/cleanup races, prove the LocalSystem helper boundary with a distinct non-admin token, and remove only empty duplicate ProjectDirs parent shells after purge.
+- Align loopback-health property generation with URL default-port normalization and make Unix stale-socket recovery tests wait for kernel listener teardown, preserving the fail-closed product contracts without flaky assertions.
+- Synchronize status, security, platform, testing, acceptance, release, and audit-task documentation with the recorded candidate and the requirement to refreeze after post-candidate changes.
+
 - Freeze release candidates to an exact committed source fingerprint, invalidate acceptance after any later production/workflow/package/documentation change, require passed platform evidence to name that candidate and artifact hash, and make release jobs build the frozen revision instead of evidence-only commits.
 - Complete the macOS product lifecycle: enable the owner-private Unix-socket single-instance contract, add a universal DMG/reboot/LaunchAgent/MCP/Quick-Tunnel/lock/uninstall/residue harness with an optional canonical pinned cloudflared input for constrained networks, package DMGs without Finder automation prompts, and preserve MacMCP services and loopback port 45799 as explicit acceptance invariants.
 - Add a fail-closed Apple distribution path using Developer ID, hardened runtime, App Store Connect notarization, stapling, signed DMG and Gatekeeper verification; private-beta artifacts use ad-hoc hardened-runtime signatures and sealed resources without claiming publisher identity or notarization.
@@ -51,7 +56,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 - Restore macOS desktop compilation by declaring its direct Serde dependency and remove platform-only warning regressions exposed by full-feature Clippy.
 - Make every cargo-packager 0.11.8 configuration self-identifying and resolve license, binary, output, and resource paths from the configuration directory; add an xtask regression gate for this contract.
-- Validate the universal macOS DMG on a physical Apple-silicon Mac through native and Rosetta launches, LaunchAgent lifecycle, Streamable HTTP MCP approval flow, all desktop navigation views, retained-data uninstall, full purge, and user-state restoration. Developer ID signing, notarization, and reboot evidence remain separate release gates.
+- Validate the universal macOS DMG on a physical Apple-silicon Mac through native and Rosetta launches, LaunchAgent lifecycle, Streamable HTTP MCP approval flow, all desktop navigation views, retained-data uninstall, full purge, and user-state restoration. Developer ID signing and notarization remain separate public-beta gates; the exact-candidate reboot evidence is recorded by the clean-install acceptance flow.
 
 - Make GitHub OAuth callback recovery replay-safe with short-lived state+code claims, bounded user-endpoint retries, atomic consent completion, and explicit root-only issuer deployment.
 

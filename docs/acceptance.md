@@ -16,6 +16,19 @@ Readiness also validates the frozen source fingerprint, rejects any non-evidence
 path touched after the freeze, and requires every passed platform report to name
 the exact candidate revision and a real artifact SHA-256.
 
+## Recorded private-beta candidate
+
+Frozen source `1a0ba3d134f40fc95b9e8c52a95132fff061acb0` completed the
+owner-controlled private-beta gate set. The committed evidence covers macOS
+universal arm64/Rosetta, Linux x86_64 headless and desktop, Linux ARM64 headless,
+and Windows x86_64. It records real reboots, MCP approval and denied
+administrator execution, native desktop lifecycle where applicable, helper
+identity boundaries, uninstall, and residue inspection.
+
+That evidence belongs only to the recorded source and artifact hashes. Current
+or future `main` changes require a new freeze and fresh applicable acceptance;
+copying the old JSON or changing only its revision is invalid.
+
 ## Automated local smoke test
 
 The debug-only smoke harness redirects the entire RunOnMine user environment to
@@ -43,7 +56,10 @@ Windows has the equivalent CLI/MCP harness:
 The default Windows invocation requires a visible native window and verifies
 `WM_CLOSE` hides it to the tray. `-SkipInteractiveDesktop` is reserved for
 non-interactive hosted preflight and must not be used as native-shell release
-evidence.
+evidence. Formal Windows evidence additionally combines
+`windows-installer-smoke.ps1`, `helper-windows-identity.ps1`, and the
+Prepare/Verify/Cleanup stages of `windows-service-reboot-acceptance.ps1` across
+a real reboot, followed by purge and zero-residue inspection.
 
 Desktop binaries have a separate seven-view parity contract. On Linux, build to
 an explicit target directory and run:

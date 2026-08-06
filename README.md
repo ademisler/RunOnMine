@@ -52,11 +52,14 @@ explicit installation and is never installed by setup. See the
 
 ## Status
 
-The Rust `0.1.0-beta.1` implementation is in security-hardening and acceptance
-testing. The repository must remain private until the final security review is
-presented to its owner. Release tags are blocked by machine-readable acceptance
-gates until clean-machine, cross-platform, and owner-review evidence is recorded.
-There is no supported production release yet.
+The exact `0.1.0-beta.1` candidate recorded in
+`acceptance/release-candidate.toml` completed owner-controlled private-beta
+acceptance on macOS, Linux x86_64/aarch64, Linux desktop, and Windows x86_64.
+Its artifact hashes and redacted reports are committed below
+`acceptance/evidence/`. Current `main` also contains post-candidate hardening;
+a new tag must freeze that newer source and repeat the applicable platform gates
+instead of reusing older evidence. There is no supported public or production
+release yet.
 
 Implemented connection modes:
 
@@ -300,7 +303,7 @@ and desktop shortcuts, and a no-console GUI executable. Its Windows preflight
 performs silent install, real-window and seven-view acceptance, close-to-tray
 validation, silent uninstall, and residue checks.
 
-Release candidates are unsigned. The release workflow creates portable `cargo-dist` archives, native `cargo-packager` installers, CycloneDX SBOMs with dependency edges and Cargo.lock checksums, and SHA-256 artifact checksum files, then opens a draft GitHub prerelease. It never changes repository visibility.
+Private-beta release candidates are deliberately unsigned. The release workflow creates portable `cargo-dist` archives, native `cargo-packager` installers, CycloneDX SBOMs with dependency edges and Cargo.lock checksums, and SHA-256 artifact checksum files, then opens a draft GitHub prerelease. Public-beta publication remains fail-closed on publisher signing, independent review, hosted-platform evidence, and protected-main gates. CI never changes repository visibility.
 
 The legacy reference under `Eski örnek` is intentionally ignored and must not
 be committed.

@@ -3,6 +3,19 @@
 The first candidate version is `0.1.0-beta.1`. Repository visibility is a
 separate owner decision and is never changed by CI.
 
+## Current repository status
+
+Frozen source `1a0ba3d134f40fc95b9e8c52a95132fff061acb0` completed the
+owner-controlled private-beta gate set, with artifact identities and redacted
+reports committed under `acceptance/evidence/`. Later hardening and documentation
+changes are now present on `main`; they do not retroactively change that evidence,
+but they do invalidate it for a new tag. The next candidate must be frozen from
+the intended tag source and rerun through every applicable platform gate.
+
+Public beta remains blocked on independent security review, Apple Developer ID
+and notarization credentials, Windows publisher signing, hosted-platform runner
+allocation, and protected-main availability.
+
 ## Required gates
 
 Before creating a tag:
@@ -148,9 +161,8 @@ artifacts as public candidates.
 
 Copy `acceptance/evidence/clean-install.template.json` for headless artifacts
 or `acceptance/evidence/clean-install.desktop.template.json` for desktop
-artifacts, then
-artifact, fill the real SHA-256, source revision, tester, timestamp and evidence
-references, then run:
+artifacts. Fill the real artifact SHA-256, source revision, tester, timestamp,
+and evidence references, then run:
 
 ```console
 python3 scripts/release/validate-clean-install-evidence.py evidence.json

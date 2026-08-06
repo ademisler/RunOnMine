@@ -154,8 +154,10 @@ command omits that switch and remains the required interactive Windows VM or
 physical-machine gate.
 
 An interactive Windows VM or physical Windows machine is authoritative for the
-native-window and tray lifecycle. A Wine x86_64 run is useful supplemental
-evidence for PE launch, tray creation, seven-view rendering, standard Windows
-data paths, and GUI-subsystem compatibility, but it does not claim physical
-Windows installation, Authenticode signing, reboot, or release clean-install
-acceptance.
+native-window and tray lifecycle. The formal private-beta run also verifies a
+real boot-identity change, Scheduled Task recovery, MCP approval/deny, the
+LocalSystem helper owner/second-user boundary, purge, and zero unexpected
+residue. A Wine x86_64 run remains useful supplemental evidence for PE launch,
+tray creation, seven-view rendering, standard Windows data paths, and
+GUI-subsystem compatibility, but it does not claim physical Windows
+installation, Authenticode signing, reboot, or release clean-install acceptance.

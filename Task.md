@@ -1,6 +1,9 @@
 # RunOnMine hardening task list
 
-This file tracks the full repository audit performed against `main` at commit `c28f079`.
+This file records the repository hardening audit and its verified outcomes. The
+machine-readable release state in `acceptance/release-candidate.toml`,
+`acceptance/release-gates.toml`, and `acceptance/evidence/` is authoritative for
+candidate-specific readiness.
 
 ## Completion rules
 
@@ -58,7 +61,7 @@ Status markers:
 ## P2 — Architecture, reliability and maintainability
 
 - [x] **P2-01 — Split oversized modules.** Desktop rendering is split into a shell plus per-screen view modules; StateStore keeps its public worker/approval surface separate from audit/checkpoint logic, schema migration and tests; MCP keeps the macro-bound tool router separate from runtime identity, server authorization/bootstrap and tests. The connector CLI now routes through typed command-family handlers instead of one monolithic dispatcher.
-- [!] **P2-02 — Break down very long functions.** MCP authorization, connector startup, approval-preview formatting and CLI connector setup use typed requests and focused helpers. Desktop rendering is split by screen, but several isolated legacy screen/form/icon functions retain narrow documented `too_many_lines` suppressions until their sections are extracted with regression coverage; full macOS and headless Clippy otherwise pass with warnings denied.
+- [-] **P2-02 — Break down very long functions.** MCP authorization, connector startup, approval-preview formatting and CLI connector setup use typed requests and focused helpers. Desktop rendering is split by screen, but several isolated legacy screen/form/icon functions retain narrow documented `too_many_lines` suppressions until their sections are extracted with regression coverage; full macOS and headless Clippy otherwise pass with warnings denied.
 - [x] **P2-03 — Separate desktop model/update/effects/views.** Desktop bootstrap, state model, update/orchestration, background snapshot effects and views live in separate modules; credential and process effects remain outside rendering.
 - [x] **P2-04 — Move desktop refresh work off the UI thread.** Config/secret recovery, SQLite/OAuth reads, incremental audit verification, Quick runtime discovery and bounded connector-health HTTP run in one non-overlapping background snapshot; audit history is incrementally paged to 10,000 records.
 - [x] **P2-05 — Zeroize desktop credential inputs.** Every desktop field whose identity denotes a secret, token, password, API key or credential now uses `Zeroizing<String>`; existing submit/cancel/reset paths perform explicit zeroization and drop wipes remaining capacity.
@@ -98,7 +101,7 @@ Status markers:
 - [x] **P2-T04 — Expand fuzz targets.** The scheduled eight-target matrix now builds and fuzzes config, policy, OAuth request models, restricted browser URLs, privileged-helper frames, MCP session/header bindings, verified ZIP/TAR entry selection, and real SQLite approval transitions. Every target builds from the committed fuzz lockfile, and the six parser/state targets were smoke-tested with 1,000 real libFuzzer executions each.
 - [x] **P2-T05 — Add real MCP protocol end-to-end tests.** A real agent and Streamable HTTP client exercise JSON/SSE initialize, initialized notification, repeated tools/list, machine_info, approval-gated fs_write resolved once through the CLI, invalid authentication, malformed transport and session deletion in an isolated profile.
 - [x] **P2-T06 — Add adversarial real-Chromium tests.** Real Chromium exercises private fetch, public-to-private redirect, popup, iframe, download, dedicated/shared/service workers, WebSocket and DNS rebinding while asserting zero private-probe connections; separate tests cover file URLs, credentials, mixed/private destinations and IPv4/IPv6 translation/documentation ranges.
-- [!] **P2-T07 — Add real helper OS-security acceptance tests.** Root acceptance now launches the real Unix helper socket for owner UID 1002 and attacker UID 65534, verifies owner/mode 0600, accepts the owner health frame and observes kernel permission denial for the second user. Real Windows SID/pipe impersonation and macOS multi-user evidence still require those external hosts.
+- [x] **P2-T07 — Add real helper OS-security acceptance tests.** Root Unix acceptance launches the real helper socket for distinct owner and attacker identities and proves kernel permission denial. Physical macOS acceptance uses a real temporary second account, while Windows Server acceptance verifies the LocalSystem service, installing-owner access, a distinct non-admin token, and named-pipe denial for that second identity.
 - [x] **P2-T08 — Add soak and performance tests.** Deterministic tests cover 64 concurrent admissions, 22,000 authenticated audit rows with incremental checkpoints, 5,000 calls in one Streamable HTTP session, repeated real-Chromium adversarial runs and bounded StateStore/output behavior; the scheduled matrix adds ten browser cycles and a 30-minute macOS desktop lifecycle run.
 - [x] **P2-T09 — Add mutation/state-machine testing.** Approval transitions now run against a SQLite-backed reference-model proptest and fuzz target; MCP session binding uses one production transition model shared by middleware, deterministic tests and fuzzing. The scheduled targeted mutation matrix caught all 20 MCP session mutants and all 15 viable approval mutants (six generated approval mutants were unviable), with no surviving mutation.
 
@@ -106,7 +109,7 @@ Status markers:
 
 - [!] **P2-R01 — Enforce branch protection and required checks.** Repository includes an idempotent `gh api` apply/check script requiring review, CODEOWNERS, Linux quality, platform matrix and dependency review while blocking force-push/deletion. The current private-repository plan returns HTTP 403 for this feature, so the GitHub-side policy remains blocked and must not be reported active.
 - [!] **P2-R02 — Sign and notarize release artifacts.** The checked-in macOS path now ad-hoc seals private-beta bundles with hardened runtime and sealed resources, while the separate public path imports a protected Developer ID certificate, signs every Mach-O with hardened runtime and timestamp, notarizes and staples the universal application, signs the DMG, and verifies both with codesign, Gatekeeper, stapler and a read-only mount. This Mac has no Developer ID/App Store Connect credentials, and Windows Authenticode still requires an external publisher certificate, so public-beta signing evidence remains blocked rather than fabricated.
-- [-] **P2-R03 — Complete clean-install acceptance on every artifact/OS.** A two-stage macOS harness now installs a universal DMG into `/Applications`, launches arm64 and Rosetta slices, proves native menu-bar/close/single-instance behavior, validates Local HTTP plus Quick Tunnel across a real reboot, performs the approved MCP/denied-admin/lock lifecycle, purges all managed residue, and verifies MacMCP invariants. All Linux, Windows and macOS gates were deliberately returned to pending because prior evidence predates the frozen candidate; every platform must be rebuilt and rerun against that exact revision before the private-beta release is marked complete.
+- [x] **P2-R03 — Complete clean-install acceptance on every artifact/OS.** Frozen source `1a0ba3d134f40fc95b9e8c52a95132fff061acb0` passed owner-controlled macOS universal, Linux x86_64 headless/desktop, Linux ARM64 headless, and Windows x86_64 clean-install acceptance with real reboot, MCP approval/deny, native desktop lifecycle where applicable, helper boundaries, uninstall, and zero unexpected residue. Any later source or narrative-documentation change requires a new freeze and candidate-specific evidence before another tag.
 - [x] **P2-R04 — Generate and validate SBOM with standard tooling.** Every package receives CycloneDX 1.6 JSON with dependency graph, Cargo.lock SHA-256, exact release target, source revision and included-binary provenance; xtask validates structure and target identity before upload.
 - [x] **P2-R05 — Reduce duplicate dependency versions.** Direct production use of rand 0.9 was removed in favor of getrandom, the duplicate metadata ratchet blocks regressions, and attempted major convergence is documented. Remaining rand/nix/crypto major splits are imposed by Chromium/WebSocket, MCP, proptest and command-group upstream compatibility.
 - [x] **P2-R06 — Replace substring packaging-target selection with an exact allowlist.** Packaging and packager staging use a six-value exact target enum; suffix/platform spoof strings and unsupported triples are rejected by tests.
@@ -128,9 +131,9 @@ Status markers:
 
 ## Final gate
 
-- [x] All tasks that are implementable in-repository are complete.
+- [-] Release-blocking in-repository tasks are complete; P2-02 remains tracked as non-security maintainability debt.
 - [x] External blockers are explicitly marked `[!]` with owner/platform requirements.
 - [x] Full headless verification passes.
 - [x] CLI and real Streamable HTTP MCP acceptance pass.
-- [-] Exact-candidate rebooted macOS/Linux/Windows private-beta evidence is being regenerated. Publisher signing/notarization and independent security review remain explicit public-beta external gates and are not fabricated by repository CI.
+- [x] Exact-candidate rebooted macOS/Linux/Windows private-beta evidence is recorded for frozen source `1a0ba3d134f40fc95b9e8c52a95132fff061acb0`. Publisher signing/notarization, independent security review, hosted-runner allocation, and protected-main availability remain explicit public-beta external gates and are not fabricated by repository CI.
 - [x] `Task.md`, `CHANGELOG.md`, architecture, connections, threat model and platform docs match the implementation.
