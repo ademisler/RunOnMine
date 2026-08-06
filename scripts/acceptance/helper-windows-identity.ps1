@@ -40,11 +40,34 @@ function Invoke-CleanupNativeCommand {
     catch {}
 }
 
+if (-not ("RunOnMineAcceptance.NativeLogon" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace RunOnMineAcceptance {
+    public static class NativeLogon {
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool LogonUser(
+            string username,
+            string domain,
+            string password,
+            int logonType,
+            int logonProvider,
+            out IntPtr token
+        );
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseHandle(IntPtr handle);
+    }
+}
+'@
+}
+
 $testId = [guid]::NewGuid().ToString("N").Substring(0, 10)
 $userName = "RomAttack$testId"
-$root = Join-Path $env:ProgramData ("RunOnMineHelperAcceptance-" + $testId)
-$attackerScript = Join-Path $root "attacker.ps1"
-$resultPath = Join-Path $root "attacker-result.json"
 $passwordBytes = New-Object byte[] 32
 $random = [Security.Cryptography.RandomNumberGenerator]::Create()
 try {
@@ -58,21 +81,11 @@ $passwordText = [Convert]::ToBase64String($passwordBytes) + "aA1!"
 $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
 $helperInstalled = $false
 $userCreated = $false
-$attackerProcess = $null
+$logonToken = [IntPtr]::Zero
+$attackerIdentity = $null
+$impersonationContext = $null
 
 try {
-    New-Item -ItemType Directory -Force -Path $root | Out-Null
-    $icacls = Invoke-RunOnMineNativeProcess -FilePath "$env:SystemRoot\System32\icacls.exe" -ArgumentList @(
-        $root,
-        "/inheritance:r",
-        "/grant", "*S-1-5-18:(OI)(CI)F",
-        "/grant", "*S-1-5-32-544:(OI)(CI)F",
-        "/grant", "*S-1-5-32-545:(OI)(CI)M"
-    ) -TimeoutMilliseconds 30000
-    if ($icacls.ExitCode -ne 0) {
-        throw "failed to prepare the helper acceptance directory ACL: $($icacls.Stderr)"
-    }
-
     Invoke-RunOnMineHelperCommand -Arguments @("admin", "install", "--allow-program", $allowedProgramPath) | Out-Null
     $helperInstalled = $true
 
@@ -98,61 +111,67 @@ try {
     }
     if ($service.State -ne "Running") { throw "RunOnMineHelper is not running" }
 
-    @'
-$ErrorActionPreference = "Stop"
-$resultPath = '__RESULT_PATH__'
-try {
-    $pipe = [IO.Pipes.NamedPipeClientStream]::new(
-        ".",
-        "RunOnMine.Helper",
-        [IO.Pipes.PipeDirection]::InOut,
-        [IO.Pipes.PipeOptions]::Asynchronous
-    )
-    try {
-        $pipe.Connect(5000)
-        $result = @{ outcome = "connected"; exception = "" }
-    }
-    catch [UnauthorizedAccessException] {
-        $result = @{ outcome = "denied"; exception = $_.Exception.GetType().FullName }
-    }
-    catch [IO.IOException] {
-        $result = @{ outcome = "denied"; exception = $_.Exception.GetType().FullName }
-    }
-    catch [TimeoutException] {
-        $result = @{ outcome = "timeout"; exception = $_.Exception.GetType().FullName }
-    }
-    finally {
-        $pipe.Dispose()
-    }
-}
-catch {
-    $result = @{ outcome = "failed"; exception = $_.Exception.GetType().FullName }
-}
-$result | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encoding UTF8
-'@.Replace('__RESULT_PATH__', $resultPath.Replace("'", "''")) |
-        Set-Content -LiteralPath $attackerScript -Encoding UTF8
-
     New-LocalUser -Name $userName -Password $password -PasswordNeverExpires -AccountNeverExpires | Out-Null
     $userCreated = $true
-    $qualifiedUser = "$env:COMPUTERNAME\$userName"
-    $credential = [Management.Automation.PSCredential]::new($qualifiedUser, $password)
-    $attackerProcess = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-        -ArgumentList @(
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy", "Bypass",
-            "-File", $attackerScript
-        ) -Credential $credential -LoadUserProfile -PassThru
-    for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath $resultPath); $attempt++) {
-        $attackerProcess.Refresh()
-        if ($attackerProcess.HasExited) { break }
-        Start-Sleep -Milliseconds 100
+    if (-not [RunOnMineAcceptance.NativeLogon]::LogonUser(
+        $userName,
+        $env:COMPUTERNAME,
+        $passwordText,
+        2,
+        0,
+        [ref]$logonToken
+    )) {
+        $win32Error = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "failed to log on the temporary second Windows user (win32=$win32Error)"
     }
-    if (-not (Test-Path -LiteralPath $resultPath)) {
-        throw "second-user helper probe exited without writing a result"
+
+    $attackerIdentity = [Security.Principal.WindowsIdentity]::new($logonToken)
+    if ($attackerIdentity.User.Value -eq $identity.User.Value) {
+        throw "temporary second-user token unexpectedly matched the owner SID"
     }
-    $attack = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
+    $impersonationContext = $attackerIdentity.Impersonate()
+    try {
+        $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $currentPrincipal = [Security.Principal.WindowsPrincipal]::new($currentIdentity)
+        if ($currentIdentity.User.Value -ne $attackerIdentity.User.Value) {
+            throw "thread impersonation did not activate the temporary second-user SID"
+        }
+        if ($currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw "temporary second-user token unexpectedly has Administrator membership"
+        }
+
+        $pipe = [IO.Pipes.NamedPipeClientStream]::new(
+            ".",
+            "RunOnMine.Helper",
+            [IO.Pipes.PipeDirection]::InOut,
+            [IO.Pipes.PipeOptions]::Asynchronous
+        )
+        try {
+            try {
+                $pipe.Connect(5000)
+                $attack = @{ outcome = "connected"; exception = "" }
+            }
+            catch [UnauthorizedAccessException] {
+                $attack = @{ outcome = "denied"; exception = $_.Exception.GetType().FullName }
+            }
+            catch [IO.IOException] {
+                $attack = @{ outcome = "denied"; exception = $_.Exception.GetType().FullName }
+            }
+            catch [TimeoutException] {
+                $attack = @{ outcome = "timeout"; exception = $_.Exception.GetType().FullName }
+            }
+        }
+        finally {
+            $pipe.Dispose()
+        }
+    }
+    finally {
+        if ($impersonationContext) {
+            $impersonationContext.Undo()
+            $impersonationContext.Dispose()
+            $impersonationContext = $null
+        }
+    }
     if ($attack.outcome -ne "denied") {
         throw "second Windows user was not denied by the helper pipe: $($attack | ConvertTo-Json -Compress)"
     }
@@ -161,14 +180,21 @@ $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encod
     Invoke-RunOnMineHelperCommand -Arguments @("admin", "uninstall") | Out-Null
     $helperInstalled = $false
 
-    Write-Host "RunOnMine Windows LocalSystem helper owner access, second-user named-pipe denial and idempotent uninstall passed."
+    Write-Host "RunOnMine Windows LocalSystem helper owner access, second-user token named-pipe denial and idempotent uninstall passed."
 }
 finally {
+    if ($impersonationContext) {
+        try { $impersonationContext.Undo() } catch {}
+        try { $impersonationContext.Dispose() } catch {}
+    }
+    if ($attackerIdentity) {
+        try { $attackerIdentity.Dispose() } catch {}
+    }
+    if ($logonToken -ne [IntPtr]::Zero) {
+        [void][RunOnMineAcceptance.NativeLogon]::CloseHandle($logonToken)
+    }
     $passwordText = $null
     $password = $null
-    if ($attackerProcess -and -not $attackerProcess.HasExited) {
-        Stop-Process -Id $attackerProcess.Id -Force -ErrorAction SilentlyContinue
-    }
     if ($userCreated) {
         Invoke-CleanupNativeCommand -FilePath "$env:SystemRoot\System32\net.exe" `
             -Arguments @("user", $userName, "/delete")
@@ -180,6 +206,5 @@ finally {
         }
         catch {}
     }
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $root
 }
 exit 0

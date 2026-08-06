@@ -52,6 +52,11 @@ so child processes do not survive the tool call.
 Install Rust 1.95.0, Visual Studio 2022 Build Tools with the Windows SDK, NSIS,
 and `cargo-packager` 0.11.8. From a PowerShell prompt:
 
+The checked-in target configuration statically links the MSVC/UCRT runtime into
+all Windows binaries. This is required for clean supported Windows images that
+do not already provide `VCRUNTIME140.dll`; do not override the Windows target
+rustflags when producing release artifacts.
+
 ```powershell
 cargo build --release --locked --target x86_64-pc-windows-msvc `
   --workspace --exclude xtask

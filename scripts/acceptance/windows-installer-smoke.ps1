@@ -12,6 +12,39 @@ function Test-RunOnMineFullyQualifiedWindowsPath {
         ($Path -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$)')
 }
 
+
+function Test-RunOnMinePath {
+    param(
+        [Parameter(Mandatory = $true)] [string]$LiteralPath,
+        [ValidateSet("Any", "Leaf", "Container")] [string]$PathType = "Any",
+        [int]$TimeoutMilliseconds = 60000
+    )
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        try {
+            if ($PathType -eq "Any") {
+                return Test-Path -LiteralPath $LiteralPath -ErrorAction Stop
+            }
+            return Test-Path -LiteralPath $LiteralPath -PathType $PathType -ErrorAction Stop
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'Access is denied') { throw }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "access remained denied while probing path: $LiteralPath"
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    } while ($true)
+}
+
+function Test-RunOnMineManagedFilesRemain {
+    param([string]$Location)
+    foreach ($managedName in @("runonmine.exe", "runonmine-agent.exe", "runonmine-desktop.exe", "runonmine-helper.exe", "uninstall.exe", "README.md")) {
+        if (Test-RunOnMinePath -LiteralPath (Join-Path $Location $managedName)) { return $true }
+    }
+    return $false
+}
+
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("runonmine-installer-" + [guid]::NewGuid())
 $registryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\RunOnMine"
@@ -21,22 +54,23 @@ $installLocation = $null
 $uninstaller = $null
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 
-if (Test-Path -LiteralPath $registryPath) {
+if (Test-RunOnMinePath -LiteralPath $registryPath) {
     throw "RunOnMine is already installed for the current user; installer acceptance refuses to replace it"
 }
-if ((Test-Path -LiteralPath $localDataRoot) -or (Test-Path -LiteralPath $roamingDataRoot)) {
+if ((Test-RunOnMinePath -LiteralPath $localDataRoot) -or (Test-RunOnMinePath -LiteralPath $roamingDataRoot)) {
     throw "RunOnMine user data already exists; installer acceptance refuses to modify it"
 }
 try {
     $install = Start-RunOnMineNativeProcess -FilePath $installerPath -ArgumentList @("/S")
-    if (-not $install.WaitForExit(120000)) {
-        $install.Kill()
-        throw "NSIS installer timed out"
+    if (-not $install.WaitForExit(1800000)) {
+        Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
+        [void]$install.WaitForExit(30000)
+        throw "NSIS installer timed out after 1800 seconds"
     }
     $install.WaitForExit()
     if ($install.ExitCode -ne 0) { throw "NSIS installer exited with code $($install.ExitCode)" }
     $install.Dispose()
-    if (-not (Test-Path -LiteralPath $registryPath)) { throw "NSIS installer did not create the current-user uninstall record" }
+    if (-not (Test-RunOnMinePath -LiteralPath $registryPath)) { throw "NSIS installer did not create the current-user uninstall record" }
     $entry = Get-ItemProperty -LiteralPath $registryPath
     $installLocation = ([string]$entry.InstallLocation).Trim('"')
     $uninstaller = ([string]$entry.UninstallString).Trim('"')
@@ -47,7 +81,7 @@ try {
         throw "NSIS install location is not absolute"
     }
     foreach ($binary in @("runonmine.exe", "runonmine-agent.exe", "runonmine-desktop.exe", "runonmine-helper.exe")) {
-        if (-not (Test-Path -LiteralPath (Join-Path $installLocation $binary) -PathType Leaf)) {
+        if (-not (Test-RunOnMinePath -LiteralPath (Join-Path $installLocation $binary) -PathType Leaf)) {
             throw "installed binary is missing: $binary"
         }
     }
@@ -56,10 +90,10 @@ try {
         (Join-Path $programs "RunOnMine.lnk"),
         (Join-Path $programs "RunOnMine\RunOnMine.lnk")
     )
-    $startMenu = $startMenuCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $startMenu = $startMenuCandidates | Where-Object { Test-RunOnMinePath -LiteralPath $_ } | Select-Object -First 1
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "RunOnMine.lnk"
     if (-not $startMenu) { throw "RunOnMine Start Menu shortcut is missing" }
-    if (-not (Test-Path -LiteralPath $desktopShortcut)) { throw "RunOnMine desktop shortcut is missing" }
+    if (-not (Test-RunOnMinePath -LiteralPath $desktopShortcut)) { throw "RunOnMine desktop shortcut is missing" }
     Invoke-RunOnMineDesktopAcceptance -Desktop (Join-Path $installLocation "runonmine-desktop.exe") `
         -Root $root -ExpectNativeShell $true -RequireInteractiveWindow (-not $SkipInteractiveDesktop.IsPresent)
 
@@ -67,27 +101,31 @@ try {
     if (-not [string]::Equals($uninstaller, $expectedUninstaller, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "NSIS uninstall command is incorrect"
     }
-    if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw "NSIS uninstaller is missing" }
+    if (-not (Test-RunOnMinePath -LiteralPath $uninstaller -PathType Leaf)) { throw "NSIS uninstaller is missing" }
     $remove = Start-RunOnMineNativeProcess -FilePath $uninstaller -ArgumentList @("/S")
-    if (-not $remove.WaitForExit(120000)) {
-        $remove.Kill()
-        throw "NSIS uninstaller timed out"
+    if (-not $remove.WaitForExit(1800000)) {
+        Stop-Process -Id $remove.Id -Force -ErrorAction SilentlyContinue
+        [void]$remove.WaitForExit(30000)
+        throw "NSIS uninstaller timed out after 1800 seconds"
     }
     $remove.WaitForExit()
     if ($remove.ExitCode -ne 0) { throw "NSIS uninstaller exited with code $($remove.ExitCode)" }
     $remove.Dispose()
-    for ($attempt = 0; $attempt -lt 100 -and (Test-Path -LiteralPath $installLocation); $attempt++) {
+    for ($attempt = 0; $attempt -lt 1800; $attempt++) {
+        $registryRemains = Test-RunOnMinePath -LiteralPath $registryPath
+        $managedRemains = Test-RunOnMineManagedFilesRemain -Location $installLocation
+        if (-not $registryRemains -and -not $managedRemains) { break }
         Start-Sleep -Milliseconds 100
     }
-    if (Test-Path -LiteralPath $registryPath) { throw "NSIS uninstall record remained after removal" }
+    if (Test-RunOnMinePath -LiteralPath $registryPath) { throw "NSIS uninstall record remained after removal" }
     foreach ($managedName in @("runonmine.exe", "runonmine-agent.exe", "runonmine-desktop.exe", "runonmine-helper.exe", "uninstall.exe", "README.md")) {
-        if (Test-Path -LiteralPath (Join-Path $installLocation $managedName)) {
+        if (Test-RunOnMinePath -LiteralPath (Join-Path $installLocation $managedName)) {
             throw "NSIS managed file remained after removal: $managedName"
         }
     }
-    if (Test-Path -LiteralPath $startMenu) { throw "RunOnMine Start Menu shortcut remained after removal" }
-    if (Test-Path -LiteralPath $desktopShortcut) { throw "RunOnMine desktop shortcut remained after removal" }
-    if (-not (Test-Path -LiteralPath $localDataRoot)) {
+    if (Test-RunOnMinePath -LiteralPath $startMenu) { throw "RunOnMine Start Menu shortcut remained after removal" }
+    if (Test-RunOnMinePath -LiteralPath $desktopShortcut) { throw "RunOnMine desktop shortcut remained after removal" }
+    if (-not (Test-RunOnMinePath -LiteralPath $localDataRoot)) {
         throw "NSIS uninstall did not preserve RunOnMine local user data by default"
     }
     $unexpectedFiles = @(Get-ChildItem -LiteralPath $installLocation -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
@@ -103,7 +141,7 @@ try {
     }
 }
 finally {
-    if (-not $uninstaller -and (Test-Path -LiteralPath $registryPath)) {
+    if (-not $uninstaller -and (Test-RunOnMinePath -LiteralPath $registryPath)) {
         $cleanupEntry = Get-ItemProperty -LiteralPath $registryPath -ErrorAction SilentlyContinue
         if ($cleanupEntry) {
             $uninstaller = ([string]$cleanupEntry.UninstallString).Trim('"')
@@ -112,23 +150,26 @@ finally {
             }
         }
     }
-    if ($uninstaller -and (Test-Path -LiteralPath $uninstaller)) {
+    if ($uninstaller -and (Test-RunOnMinePath -LiteralPath $uninstaller)) {
         try {
             $cleanup = Start-RunOnMineNativeProcess -FilePath $uninstaller -ArgumentList @("/S")
-            if (-not $cleanup.WaitForExit(120000)) { $cleanup.Kill() }
+            if (-not $cleanup.WaitForExit(1800000)) {
+                Stop-Process -Id $cleanup.Id -Force -ErrorAction SilentlyContinue
+                [void]$cleanup.WaitForExit(30000)
+            }
             $cleanup.WaitForExit()
             $cleanup.Dispose()
         } catch {}
-        for ($attempt = 0; $attempt -lt 100; $attempt++) {
-            $registryRemains = Test-Path -LiteralPath $registryPath
-            $installRemains = $installLocation -and (Test-Path -LiteralPath $installLocation)
-            if (-not $registryRemains -and -not $installRemains) { break }
+        for ($attempt = 0; $attempt -lt 1800; $attempt++) {
+            $registryRemains = Test-RunOnMinePath -LiteralPath $registryPath
+            $managedRemains = $installLocation -and (Test-RunOnMineManagedFilesRemain -Location $installLocation)
+            if (-not $registryRemains -and -not $managedRemains) { break }
             Start-Sleep -Milliseconds 100
         }
     }
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $localDataRoot
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $roamingDataRoot
-    if ($installLocation -and (Test-Path -LiteralPath $installLocation)) {
+    if ($installLocation -and (Test-RunOnMinePath -LiteralPath $installLocation)) {
         $remaining = @(Get-ChildItem -LiteralPath $installLocation -Force -ErrorAction SilentlyContinue)
         if ($remaining.Count -eq 0) {
             Remove-Item -Force -LiteralPath $installLocation -ErrorAction SilentlyContinue

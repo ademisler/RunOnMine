@@ -151,6 +151,12 @@ mod tests {
         1_u16..=u16::MAX
     }
 
+    fn explicit_http_port_strategy() -> impl Strategy<Value = u16> {
+        nonzero_port_strategy().prop_filter("the URL parser elides the default HTTP port", |port| {
+            *port != 80
+        })
+    }
+
     #[test]
     fn accepts_only_explicit_loopback_health_urls() -> Result<()> {
         assert!(validate_loopback_url(&Url::parse("http://127.0.0.1:44123/readyz")?).is_ok());
@@ -159,6 +165,7 @@ mod tests {
         assert!(validate_loopback_url(&Url::parse("https://127.0.0.1:44123/readyz")?).is_err());
         assert!(validate_loopback_url(&Url::parse("http://10.0.0.1:44123/readyz")?).is_err());
         assert!(validate_loopback_url(&Url::parse("http://127.0.0.1:0/readyz")?).is_err());
+        assert!(validate_loopback_url(&Url::parse("http://127.0.0.1:80/readyz")?).is_err());
         assert!(
             validate_loopback_url(&Url::parse("http://127.0.0.1:44123/readyz#fragment")?).is_err()
         );
@@ -189,7 +196,7 @@ mod tests {
             second in any::<u8>(),
             third in any::<u8>(),
             fourth in any::<u8>(),
-            port in nonzero_port_strategy(),
+            port in explicit_http_port_strategy(),
             path in "[a-z][a-z0-9_-]{0,20}",
         ) {
             let url = Url::parse(&format!(

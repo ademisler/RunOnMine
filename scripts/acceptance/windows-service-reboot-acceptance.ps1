@@ -23,6 +23,23 @@ function Invoke-RunOnMine {
     return $output
 }
 
+function Remove-EmptyDirectoryShell {
+    param([Parameter(Mandatory = $true)] [string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    $files = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction Stop)
+    if ($files.Count -ne 0) {
+        throw "RunOnMine data remained after purge: $Path"
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force
+    $parent = Split-Path -Parent $Path
+    if (
+        (Test-Path -LiteralPath $parent -PathType Container) -and
+        -not (Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop | Select-Object -First 1)
+    ) {
+        Remove-Item -LiteralPath $parent -Force
+    }
+}
+
 function Wait-Health {
     param([int]$Seconds = 30)
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
@@ -109,6 +126,12 @@ switch ($Stage) {
         try { Invoke-RunOnMine service uninstall | Out-Null } catch {}
         try { Invoke-RunOnMine connect local-http disable | Out-Null } catch {}
         Invoke-RunOnMine uninstall --purge --confirm PURGE | Out-Null
+        foreach ($path in @(
+            (Join-Path $env:LOCALAPPDATA "RunOnMine\RunOnMine"),
+            (Join-Path $env:APPDATA "RunOnMine\RunOnMine")
+        )) {
+            Remove-EmptyDirectoryShell -Path $path
+        }
         if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
             throw "RunOnMine scheduled task remained after cleanup"
         }

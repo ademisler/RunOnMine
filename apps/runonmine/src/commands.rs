@@ -765,6 +765,38 @@ fn rotate_lock_credentials(paths: &AppPaths) -> Result<(usize, usize, usize, usi
     })
 }
 
+fn remove_empty_duplicate_project_parent(path: &Path) -> Result<()> {
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.file_name() != Some(name) {
+        return Ok(());
+    }
+    let metadata = match parent.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", parent.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "refusing to remove symlinked RunOnMine parent directory: {}",
+            parent.display()
+        );
+    }
+    let mut entries = std::fs::read_dir(parent)
+        .with_context(|| format!("failed to inspect {}", parent.display()))?;
+    if entries.next().transpose()?.is_none() {
+        std::fs::remove_dir(parent)
+            .with_context(|| format!("failed to remove empty {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 pub(super) fn uninstall(arguments: &UninstallArgs) -> Result<()> {
     let user_service = UserService::discover()?;
     if user_service.status()?.installed {
@@ -842,11 +874,14 @@ pub(super) fn uninstall(arguments: &UninstallArgs) -> Result<()> {
         }
     }
     directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for directory in directories {
+    for directory in &directories {
         if directory.exists() {
-            std::fs::remove_dir_all(&directory)
+            std::fs::remove_dir_all(directory)
                 .with_context(|| format!("failed to remove {}", directory.display()))?;
         }
+    }
+    for directory in &directories {
+        remove_empty_duplicate_project_parent(directory)?;
     }
     println!("RunOnMine user data and connector credentials were permanently removed.");
     println!(
@@ -1064,6 +1099,34 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use runonmine_core::secrets::SecretStore;
+
+    #[test]
+    fn purge_removes_only_empty_duplicate_project_parents() -> Result<()> {
+        let root = tempfile::tempdir()?;
+
+        let duplicate_parent = root.path().join("RunOnMine");
+        let duplicate_child = duplicate_parent.join("RunOnMine");
+        std::fs::create_dir_all(&duplicate_child)?;
+        std::fs::remove_dir(&duplicate_child)?;
+        remove_empty_duplicate_project_parent(&duplicate_child)?;
+        assert!(!duplicate_parent.exists());
+
+        let occupied_parent = root.path().join("Occupied");
+        let occupied_child = occupied_parent.join("Occupied");
+        std::fs::create_dir_all(&occupied_child)?;
+        std::fs::write(occupied_parent.join("keep.txt"), b"keep")?;
+        std::fs::remove_dir(&occupied_child)?;
+        remove_empty_duplicate_project_parent(&occupied_child)?;
+        assert!(occupied_parent.join("keep.txt").is_file());
+
+        let generic_parent = root.path().join("generic");
+        let generic_child = generic_parent.join("child");
+        std::fs::create_dir_all(&generic_child)?;
+        std::fs::remove_dir(&generic_child)?;
+        remove_empty_duplicate_project_parent(&generic_child)?;
+        assert!(generic_parent.is_dir());
+        Ok(())
+    }
 
     #[test]
     fn admin_install_inputs_fail_before_elevation_when_missing_or_relative() {
