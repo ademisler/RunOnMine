@@ -27,9 +27,9 @@ evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "The previous passing report was for an older source revision. Rebuild and rerun the frozen candidate before marking this gate passed."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Windows Server 2025 Desktop Experience clean-install acceptance for static-CRT NSIS SHA-256 da837ae1193371e7ff8a926ec4f685fde9eccf0d0ede6c31d685dc4771cbb7c6 and portable ZIP SHA-256 521dc9c921d4b0902e7fa6e380cff2bba5700b2d02f6f73aaa1b34fc2a9b9f20, including PE resources, seven desktop views, tray and single-instance behavior, CLI, agent, MCP approval and deny, LocalSystem helper owner access, second-user token named-pipe denial, verified reboot recovery, Emergency Lock, uninstall, and zero unexpected residue; content-free ProjectDirs shells were verified empty and removed."
 evidence_file = "acceptance/evidence/windows-x86_64-clean-install.json"
 
 [[gate]]
@@ -44,14 +44,14 @@ id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "The helper boundary is unchanged since the real-VM review that proved LocalSystem service identity, installing-owner access, second-user named-pipe denial, allowlisted execution, and idempotent uninstall. Any helper or platform-boundary change must return this gate to pending."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed real-VM helper review proving LocalSystem service identity, installing-owner access, distinct second-user token named-pipe denial, allowlisted execution, and idempotent uninstall. Any helper or platform-boundary product change must return this gate to pending."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Set passed only after the final frozen-candidate report and unsigned private-beta limitations are recorded in the release issue."
+evidence = "The owner-directed private-beta report records exact-candidate platform evidence, artifact SHA-256 values, complete-history secret scan results, deliberately unsigned Windows distribution, ad-hoc but non-notarized macOS distribution, and all remaining public-beta external blockers."
 
 [[gate]]
 id = "external-security-review"
