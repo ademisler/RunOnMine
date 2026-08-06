@@ -12,6 +12,10 @@ cargo run --locked -p xtask -- release-readiness --profile private-beta
 cargo run --locked -p xtask -- release-readiness --profile public-beta
 ```
 
+Readiness also validates the frozen source fingerprint, rejects any non-evidence
+path touched after the freeze, and requires every passed platform report to name
+the exact candidate revision and a real artifact SHA-256.
+
 ## Automated local smoke test
 
 The debug-only smoke harness redirects the entire RunOnMine user environment to
@@ -91,6 +95,35 @@ sudo ./scripts/acceptance/linux-headless-clean-install-vm.sh \
   "$PWD/dist/runonmine_0.1.0-beta.1_arm64.deb" \
   /var/lib/runonmine-acceptance/evidence/linux-aarch64
 ```
+
+## macOS physical acceptance
+
+The repeatable macOS procedure is split around a real reboot:
+
+```console
+./scripts/acceptance/macos-clean-install.sh prepare \
+  --dmg /absolute/path/to/RunOnMine.dmg \
+  --sbom /absolute/path/to/runonmine-0.1.0-beta.1-universal-apple-darwin-unsigned.sbom.json \
+  --cloudflared /absolute/canonical/path/to/cloudflared \
+  --output /absolute/private/acceptance-directory
+# Reboot, sign back into the same account, then:
+./scripts/acceptance/macos-clean-install.sh verify \
+  --output /absolute/private/acceptance-directory
+```
+
+The harness installs from a read-only DMG into `/Applications`, verifies all four
+universal binaries, runs the seven-view desktop report in arm64 and Rosetta
+x86_64, exercises close-to-menu-bar and single-instance restore, configures
+authenticated Local HTTP plus a temporary Cloudflare Quick Tunnel, verifies the
+LaunchAgent after reboot, performs an owner-approved MCP write while remote
+administrator execution remains denied, tests Emergency Lock, retained-data
+uninstall and full purge, and confirms MacMCP LaunchAgents and loopback port
+45799 are unchanged. `--cloudflared` is optional: omit it to exercise the
+signed-provenance managed download, or provide a canonical non-symlink executable
+when a constrained network cannot complete that official asset download within
+the bounded installer timeout. RunOnMine still checks compatibility and pins the
+external file identity; its SHA-256 is recorded in local acceptance evidence. The
+generated evidence is still reviewed before it is committed.
 
 ## Clean-machine acceptance
 

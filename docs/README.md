@@ -6,6 +6,8 @@ the final authority when a document and implementation disagree.
 
 ## Product and platform operation
 
+- [Secure onboarding](onboarding.md): roots, policy profiles, connectors,
+  approvals, emergency lock, OS permissions, and permanent removal.
 - [macOS](platforms/macos.md): universal application, LaunchAgent, permissions,
   packaging, and uninstall behavior.
 - [Linux and VPS](platforms/linux.md): desktop DEB, per-user service, headless

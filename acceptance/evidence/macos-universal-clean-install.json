@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "platform": "macos-universal",
+  "artifact": "RunOnMine_0.1.0-beta.1_universal.dmg",
+  "artifact_sha256": "a285269ec7919878bc2a59dd278bab56afd54542deae4398f81947ef094bffb0",
+  "source_revision": "1a0ba3d134f40fc95b9e8c52a95132fff061acb0",
+  "tester": "OpenAI automated acceptance on owner-authorized Apple Silicon Mac",
+  "tested_at": "2026-08-05T07:43:43Z",
+  "steps": [
+    {
+      "id": "install",
+      "status": "passed",
+      "evidence": "DMG mounted read-only; RunOnMine.app copied to /Applications; bundle ID, four universal binaries, version and code-signature structure verified"
+    },
+    {
+      "id": "reboot",
+      "status": "passed",
+      "evidence": "macOS boot session UUID changed after the installed per-user LaunchAgent was configured"
+    },
+    {
+      "id": "agent_ready",
+      "status": "passed",
+      "evidence": "LaunchAgent remained loaded and loopback health returned ready after reboot"
+    },
+    {
+      "id": "mcp_initialize",
+      "status": "passed",
+      "evidence": "post-reboot Streamable HTTP client initialized an authenticated MCP session"
+    },
+    {
+      "id": "approved_tool_call",
+      "status": "passed",
+      "evidence": "owner-approved fs_write succeeded once; admin_exec remained denied by the MCP acceptance client"
+    },
+    {
+      "id": "connector",
+      "status": "passed",
+      "evidence": "Cloudflare Quick Tunnel reached ready before and after reboot without recording its secret public URL; the canonical external binary remained pinned to SHA-256 8e8a9d5fd3e30334773745982a9088e20109ccbd4003472a766d20ab9c1c1024"
+    },
+    {
+      "id": "desktop_launch",
+      "status": "passed",
+      "evidence": "installed arm64 desktop launched from the application bundle in the active GUI session"
+    },
+    {
+      "id": "desktop_views",
+      "status": "passed",
+      "evidence": "all seven security-control views rendered in both arm64 and Rosetta x86_64 slices"
+    },
+    {
+      "id": "native_shell",
+      "status": "passed",
+      "evidence": "native menu-bar integration reported available and closing the main window kept the process alive"
+    },
+    {
+      "id": "single_instance",
+      "status": "passed",
+      "evidence": "a second installed desktop process exited and restored the hidden primary window"
+    },
+    {
+      "id": "native_slice_launch",
+      "status": "passed",
+      "evidence": "arm64 slice produced the validated seven-view acceptance report"
+    },
+    {
+      "id": "rosetta_slice_launch",
+      "status": "passed",
+      "evidence": "x86_64 slice launched under Rosetta and produced the validated seven-view acceptance report"
+    },
+    {
+      "id": "privileged_helper_boundary",
+      "status": "passed",
+      "evidence": "a real second local macOS user could not connect to the owner-only privileged-helper socket while the socket owner succeeded; the kernel enforced the denial, and the temporary account, UID lookup, home directory, Directory Services plist, and account-owned processes were removed after the test"
+    },
+    {
+      "id": "uninstall",
+      "status": "passed",
+      "evidence": "LaunchAgent was removed, managed credentials/data were purged, and RunOnMine.app was deleted"
+    },
+    {
+      "id": "residue_check",
+      "status": "passed",
+      "evidence": "no application bundle, LaunchAgent, RunOnMine process, loopback agent listener, or managed data directory remained; MacMCP invariants were unchanged"
+    }
+  ],
+  "residues": []
+}

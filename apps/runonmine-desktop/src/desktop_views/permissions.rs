@@ -96,7 +96,11 @@ impl RunOnMineDesktop {
                                         PolicyPreset::Developer,
                                         "Developer",
                                     );
-                                    ui.selectable_value(&mut selected, PolicyPreset::Full, "Full");
+                                    ui.selectable_value(
+                                        &mut selected,
+                                        PolicyPreset::Full,
+                                        "Automation (Full)",
+                                    );
                                 });
                             if selected != connector.policy_preset {
                                 preset_change = Some((connector.id.clone(), selected));
@@ -112,12 +116,19 @@ impl RunOnMineDesktop {
             }
             ui.add_space(8.0);
             ui.label(
-                    egui::RichText::new(
-                        "Changing a preset clears connector-specific overrides. Remote safety ceilings still apply.",
-                    )
-                    .size(11.0)
-                    .color(theme::MUTED),
-                );
+                egui::RichText::new(
+                    "Safe keeps writes and execution behind local approval. Developer auto-allows file writes and shell inside selected roots. Automation (Full) is the broadest local profile; remote safety ceilings still prevent automatic dangerous actions and deny remote administrator execution.",
+                )
+                .size(11.0)
+                .color(theme::MUTED),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Changing a preset clears connector-specific overrides. Administrator execution also requires a separately installed privileged helper.",
+                )
+                .size(10.5)
+                .color(theme::WARNING),
+            );
         });
 
         ui.add_space(18.0);

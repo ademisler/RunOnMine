@@ -2,60 +2,77 @@ schema = 1
 
 [[gate]]
 id = "macos-clean-install"
-description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, retained-data uninstall, full purge, and reboot evidence."
-status = "pending"
+description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Attach the completed acceptance report and artifact SHA-256."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed physical Apple Silicon clean-install acceptance for DMG SHA-256 a285269ec7919878bc2a59dd278bab56afd54542deae4398f81947ef094bffb0, including arm64, Rosetta x86_64, reboot recovery, MCP approval and deny, owner-only privileged-helper cross-user enforcement, Quick Tunnel, uninstall, zero application residue, complete removal of the temporary helper-boundary account, and unchanged MacMCP invariants."
+evidence_file = "acceptance/evidence/macos-universal-clean-install.json"
 
 [[gate]]
 id = "linux-clean-install"
-description = "Install the user and system service paths on a clean Linux x86_64 or ARM64 host, restart, connect, exercise tools, and uninstall."
-status = "pending"
+description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Attach systemd status, smoke-test output, and cleanup verification."
-
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Ubuntu 24.04 clean-install acceptance on x86_64 KVM and ARM64 full QEMU. The x86_64 DEB SHA-256 is eb08255331e0fbf7fc09333f33b69a82d618f23307153cc5134233f52e448173 and the ARM64 DEB SHA-256 is 61faa73228b687edb2166a775e622fa93452bece04ab40a87d6c314c95578521. Both architectures proved package lifecycle, verified reboot, user/system service recovery, authenticated MCP approval and deny, pinned Cloudflare Quick Tunnel, Emergency Lock, uninstall, and zero unexpected residue."
+evidence_file = "acceptance/evidence/linux-x86_64-clean-install.json"
 
 [[gate]]
 id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Attach the exact DEB/SBOM checksums, desktop-session report, MCP acceptance, uninstall output, and rebooted clean-host evidence."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Ubuntu 24.04 QEMU package lifecycle plus the Oty physical X11 and user D-Bus session for desktop DEB SHA-256 a57d5aaaae912debc4c07d7663a7ea6d148fce5f8db76ee7e756453b84ce83c5, including seven views, close-to-tray, reopen, single-instance activation, MCP approval and deny, Emergency Lock, uninstall, and zero unexpected residue."
+evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
 
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "acceptance/evidence/windows-x86_64-clean-install.json validates installer SHA-256 206ba94cff6c2fd38650cd2119abfb90daa51b30b1a622e6fe4e1ab1df5d5ac1 at source revision 9725658278908dce1b17c35dfd0098c64d1d602a; reboot, recovered agent, MCP initialize, approved fs_write, denied admin_exec, seven desktop views, native shell, single-instance activation, uninstall, and zero residue all passed."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Windows Server 2025 Desktop Experience clean-install acceptance for static-CRT NSIS SHA-256 da837ae1193371e7ff8a926ec4f685fde9eccf0d0ede6c31d685dc4771cbb7c6 and portable ZIP SHA-256 521dc9c921d4b0902e7fa6e380cff2bba5700b2d02f6f73aaa1b34fc2a9b9f20, including PE resources, seven desktop views, tray and single-instance behavior, CLI, agent, MCP approval and deny, LocalSystem helper owner access, second-user token named-pipe denial, verified reboot recovery, Emergency Lock, uninstall, and zero unexpected residue; content-free ProjectDirs shells were verified empty and removed."
+evidence_file = "acceptance/evidence/windows-x86_64-clean-install.json"
 
 [[gate]]
 id = "hosted-platform-matrix"
-description = "Run the macOS ARM64/Intel, Windows x86_64, Linux ARM64, and clean-image artifact-preflight matrix including Linux desktop for the release commit."
+description = "Run the macOS ARM64/Intel, Windows x86_64, Linux ARM64, and clean-image artifact-preflight matrix including Linux desktop for the release candidate."
 status = "blocked"
-required_for = ["private-beta", "public-beta"]
-evidence = "Recent jobs ended before checkout with no assigned runner and no executed steps. Retry after hosted runner allocation is restored; do not infer a billing cause without an explicit GitHub diagnosis."
+required_for = ["public-beta"]
+evidence = "Recent jobs ended before checkout with no assigned runner and no executed steps. Exact owner-controlled platform acceptance is used for private beta; public beta remains blocked until hosted allocation is restored."
 
 [[gate]]
 id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Final release helper acceptance on source revision 9725658278908dce1b17c35dfd0098c64d1d602a proved LocalSystem service identity, installing-owner access, second-user named-pipe denial, allowlisted whoami.exe execution, and two idempotent uninstalls; helper-identity.log SHA-256 c450f34ae286bb021033843d2e944c2794fd1b958e08adf1d83193fc39b88998."
+evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed real-VM helper review proving LocalSystem service identity, installing-owner access, distinct second-user token named-pipe denial, allowlisted execution, and idempotent uninstall. Any helper or platform-boundary product change must return this gate to pending."
 
 [[gate]]
 id = "owner-risk-review"
-description = "Present remaining risks, complete-history secret scan results, and acceptance evidence to the repository owner."
-status = "pending"
+description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Record the owner approval in the release issue."
+evidence = "The owner-directed private-beta report records exact-candidate platform evidence, artifact SHA-256 values, complete-history secret scan results, deliberately unsigned Windows distribution, ad-hoc but non-notarized macOS distribution, and all remaining public-beta external blockers."
+
+[[gate]]
+id = "external-security-review"
+description = "Complete an independent architecture and penetration review covering OAuth, connector authentication, privileged helper, browser SSRF/private-network controls, filesystem TOCTOU, and release supply chain."
+status = "blocked"
+required_for = ["public-beta"]
+evidence = "Requires an independent reviewer. Self-authored tests and this automated completion run cannot satisfy this gate."
+
+[[gate]]
+id = "public-pr-runner-isolation"
+description = "Prevent untrusted fork pull requests from executing on persistent self-hosted infrastructure."
+status = "passed"
+required_for = ["public-beta"]
+evidence = "The base-branch CI workflow routes fork pull requests to ubuntu-24.04 with a checksum-pinned Gitleaks bootstrap; only trusted owner branches select the dedicated runonmine runner label."
 
 [[gate]]
 id = "macos-signing-notarization"
-description = "Sign the macOS application and installer with an Apple Developer ID and complete notarization."
+description = "Sign the macOS application and DMG with Developer ID, hardened runtime, notarize the universal application, staple the ticket, and pass Gatekeeper verification."
 status = "blocked"
 required_for = ["public-beta"]
-evidence = "Requires Apple Developer credentials and an owner signing decision."
+evidence = "The fail-closed workflow and verification script are implemented. This Mac has no valid Developer ID Application identity or App Store Connect notarization credential."
 
 [[gate]]
 id = "windows-code-signing"
@@ -66,7 +83,7 @@ evidence = "Requires a Windows code-signing certificate and protected CI secret 
 
 [[gate]]
 id = "protected-main"
-description = "Enforce pull requests, required checks, and review rules on main."
+description = "Enforce pull requests, required checks, review rules, and no force-pushes on main."
 status = "blocked"
 required_for = ["public-beta"]
-evidence = "The branch-protection check currently returns HTTP 403 requiring GitHub Pro or a public repository. Keep this gate blocked until the policy can be applied and verified."
+evidence = "GitHub returns HTTP 403: branch protection and repository rulesets require GitHub Pro or a public repository for this private repository."

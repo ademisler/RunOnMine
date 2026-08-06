@@ -17,6 +17,7 @@ desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon", "dep:ksni", "dep:wgpu"]
 anyhow.workspace = true
 command-group.workspace = true
 egui = { workspace = true, optional = true }
+image.workspace = true
 runonmine-core.workspace = true
 runonmine-oauth.workspace = true
 runonmine-platform.workspace = true
@@ -44,6 +45,7 @@ windows-sys = { version = "0.61.2", features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 eframe = { workspace = true, optional = true, features = ["glow"] }
+nix.workspace = true
 tray-icon = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "platform": "linux-desktop-x86_64",
+  "artifact": "runonmine-desktop_0.1.0-beta.1_amd64.deb",
+  "artifact_sha256": "a57d5aaaae912debc4c07d7663a7ea6d148fce5f8db76ee7e756453b84ce83c5",
+  "source_revision": "1a0ba3d134f40fc95b9e8c52a95132fff061acb0",
+  "tester": "Oty QEMU Ubuntu 24.04 plus real X11 session",
+  "tested_at": "2026-08-04T21:32:12.216621Z",
+  "steps": [
+    {
+      "id": "install",
+      "status": "passed",
+      "evidence": "linux-result.json: clean install and beta.0 to beta.1 upgrade"
+    },
+    {
+      "id": "reboot",
+      "status": "passed",
+      "evidence": "linux-vm-stage2.txt and linux-vm-stage3.txt: distinct VM boot cycles"
+    },
+    {
+      "id": "agent_ready",
+      "status": "passed",
+      "evidence": "linux-result.json: user and system services recovered"
+    },
+    {
+      "id": "mcp_initialize",
+      "status": "passed",
+      "evidence": "linux-mcp.stdout: Streamable HTTP initialize and tools/list"
+    },
+    {
+      "id": "approved_tool_call",
+      "status": "passed",
+      "evidence": "linux-mcp.stdout: locally approved fs_write"
+    },
+    {
+      "id": "connector",
+      "status": "passed",
+      "evidence": "linux-result.json: Cloudflare Quick runtime discovered"
+    },
+    {
+      "id": "denied_admin_call",
+      "status": "passed",
+      "evidence": "linux-mcp.stdout: direct admin_exec denied"
+    },
+    {
+      "id": "emergency_lock",
+      "status": "passed",
+      "evidence": "linux-result.json: stop, runtime cleanup and stale-token rejection"
+    },
+    {
+      "id": "uninstall",
+      "status": "passed",
+      "evidence": "linux-result.json: package and service removal"
+    },
+    {
+      "id": "residue_check",
+      "status": "passed",
+      "evidence": "linux-result.json: no unexpected RunOnMine residue"
+    },
+    {
+      "id": "desktop_launch",
+      "status": "passed",
+      "evidence": "linux-desktop-session.json"
+    },
+    {
+      "id": "desktop_views",
+      "status": "passed",
+      "evidence": "linux-desktop-parity.out"
+    },
+    {
+      "id": "native_shell",
+      "status": "passed",
+      "evidence": "linux-desktop-session.json"
+    },
+    {
+      "id": "single_instance",
+      "status": "passed",
+      "evidence": "linux-desktop-session.json"
+    }
+  ],
+  "residues": []
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "platform": "linux-aarch64",
+  "artifact": "runonmine_0.1.0-beta.1_arm64.deb",
+  "artifact_sha256": "61faa73228b687edb2166a775e622fa93452bece04ab40a87d6c314c95578521",
+  "source_revision": "1a0ba3d134f40fc95b9e8c52a95132fff061acb0",
+  "tester": "Oty QEMU Ubuntu 24.04 ARM64 acceptance",
+  "tested_at": "2026-08-04T22:01:14.326292Z",
+  "steps": [
+    {
+      "id": "install",
+      "status": "passed",
+      "evidence": "linux-arm64-result.json: clean install and beta.0 to beta.1 upgrade"
+    },
+    {
+      "id": "reboot",
+      "status": "passed",
+      "evidence": "linux-arm64-vm-stage2.txt: distinct ARM64 VM boot IDs"
+    },
+    {
+      "id": "agent_ready",
+      "status": "passed",
+      "evidence": "linux-arm64-result.json: user and system services recovered"
+    },
+    {
+      "id": "mcp_initialize",
+      "status": "passed",
+      "evidence": "linux-arm64-mcp.stdout: Streamable HTTP initialize and tools/list"
+    },
+    {
+      "id": "approved_tool_call",
+      "status": "passed",
+      "evidence": "linux-arm64-mcp.stdout: locally approved fs_write"
+    },
+    {
+      "id": "connector",
+      "status": "passed",
+      "evidence": "linux-arm64-result.json: managed ARM64 Cloudflare Quick runtime discovered"
+    },
+    {
+      "id": "denied_admin_call",
+      "status": "passed",
+      "evidence": "linux-arm64-mcp.stdout: direct admin_exec denied"
+    },
+    {
+      "id": "emergency_lock",
+      "status": "passed",
+      "evidence": "linux-arm64-result.json: stop, runtime cleanup and stale-token rejection"
+    },
+    {
+      "id": "uninstall",
+      "status": "passed",
+      "evidence": "linux-arm64-result.json: package and service removal"
+    },
+    {
+      "id": "residue_check",
+      "status": "passed",
+      "evidence": "linux-arm64-result.json: no unexpected RunOnMine residue"
+    }
+  ],
+  "residues": []
+}

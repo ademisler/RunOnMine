@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -78,6 +78,10 @@ enum XtaskCommand {
         #[arg(long, default_value = "private-beta")]
         profile: String,
     },
+    /// Freeze the current clean commit as the exact release candidate.
+    FreezeReleaseCandidate,
+    /// Print the frozen release-candidate revision for CI checkout.
+    ReleaseCandidateRevision,
 }
 
 fn main() -> Result<()> {
@@ -99,6 +103,8 @@ fn main() -> Result<()> {
             skip_secret_scan,
         } => verify(headless, skip_secret_scan),
         XtaskCommand::ReleaseReadiness { profile } => release_readiness(&profile),
+        XtaskCommand::FreezeReleaseCandidate => freeze_release_candidate(),
+        XtaskCommand::ReleaseCandidateRevision => release_candidate_revision(),
     }
 }
 
@@ -412,6 +418,10 @@ fn run_checked(program: &str, arguments: &[&str]) -> Result<()> {
     Ok(())
 }
 
+const RELEASE_CANDIDATE_FILE: &str = "acceptance/release-candidate.toml";
+const RELEASE_GATES_FILE: &str = "acceptance/release-gates.toml";
+const RELEASE_EVIDENCE_PREFIX: &str = "acceptance/evidence/";
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReleaseGateManifest {
@@ -428,20 +438,41 @@ struct ReleaseGate {
     required_for: Vec<String>,
     #[serde(default)]
     evidence: String,
+    #[serde(default)]
+    evidence_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseCandidateManifest {
+    schema: u32,
+    revision: String,
+    source_fingerprint: String,
 }
 
 fn release_readiness(profile: &str) -> Result<()> {
+    release_readiness_at(&workspace_root()?, profile)
+}
+
+fn release_readiness_at(root: &Path, profile: &str) -> Result<()> {
     if !matches!(profile, "private-beta" | "public-beta") {
         bail!("release profile must be private-beta or public-beta");
     }
-    let path = workspace_root()?.join("acceptance/release-gates.toml");
+    let candidate = validate_release_candidate(root)?;
+    let path = root.join(RELEASE_GATES_FILE);
     let manifest: ReleaseGateManifest = toml::from_str(&fs::read_to_string(&path)?)?;
     if manifest.schema != 1 {
         bail!("unsupported release-gate schema {}", manifest.schema);
     }
+    for gate in &manifest.gate {
+        validate_release_gate_evidence(root, gate, &candidate.revision)?;
+    }
     let pending = pending_release_gates(&manifest, profile)?;
     if pending.is_empty() {
-        println!("All {profile} acceptance gates passed.");
+        println!(
+            "All {profile} acceptance gates passed for frozen candidate {}.",
+            candidate.revision
+        );
         return Ok(());
     }
     for gate in &pending {
@@ -454,6 +485,231 @@ fn release_readiness(profile: &str) -> Result<()> {
         "{} required {profile} acceptance gate(s) are not passed",
         pending.len()
     )
+}
+
+fn freeze_release_candidate() -> Result<()> {
+    freeze_release_candidate_at(&workspace_root()?)
+}
+
+fn freeze_release_candidate_at(root: &Path) -> Result<()> {
+    require_clean_worktree(root)?;
+    let revision = source_revision(root)?;
+    let source_fingerprint = release_source_fingerprint(root, &revision)?;
+    let manifest = ReleaseCandidateManifest {
+        schema: 1,
+        revision: revision.clone(),
+        source_fingerprint,
+    };
+    let path = root.join(RELEASE_CANDIDATE_FILE);
+    fs::write(&path, toml::to_string_pretty(&manifest)?)?;
+    println!("Frozen release candidate {revision} in {}.", path.display());
+    Ok(())
+}
+
+fn release_candidate_revision() -> Result<()> {
+    println!("{}", release_candidate_revision_at(&workspace_root()?)?);
+    Ok(())
+}
+
+fn release_candidate_revision_at(root: &Path) -> Result<String> {
+    Ok(validate_release_candidate(root)?.revision)
+}
+
+fn validate_release_candidate(root: &Path) -> Result<ReleaseCandidateManifest> {
+    require_clean_worktree(root)?;
+    let path = root.join(RELEASE_CANDIDATE_FILE);
+    let manifest: ReleaseCandidateManifest = toml::from_str(&fs::read_to_string(&path)?)?;
+    if manifest.schema != 1 {
+        bail!("unsupported release-candidate schema {}", manifest.schema);
+    }
+    validate_lower_hex(&manifest.revision, 40, "release candidate revision")?;
+    validate_lower_hex(
+        &manifest.source_fingerprint,
+        64,
+        "release candidate source fingerprint",
+    )?;
+    if manifest.revision.chars().all(|character| character == '0')
+        || manifest
+            .source_fingerprint
+            .chars()
+            .all(|character| character == '0')
+    {
+        bail!("release candidate has not been frozen");
+    }
+    git_success(
+        root,
+        &[
+            "cat-file",
+            "-e",
+            &format!("{}^{{commit}}", manifest.revision),
+        ],
+        "release candidate revision does not exist",
+    )?;
+    git_success(
+        root,
+        &["merge-base", "--is-ancestor", &manifest.revision, "HEAD"],
+        "release candidate revision is not an ancestor of HEAD",
+    )?;
+    let frozen = release_source_fingerprint(root, &manifest.revision)?;
+    if frozen != manifest.source_fingerprint {
+        bail!("release candidate manifest fingerprint does not match its revision");
+    }
+    let current = release_source_fingerprint(root, "HEAD")?;
+    if current != manifest.source_fingerprint {
+        bail!(
+            "release source changed after candidate freeze; freeze and rerun all platform acceptance"
+        );
+    }
+    let touched = git_text(
+        root,
+        &[
+            "log",
+            "--format=",
+            "--name-only",
+            &format!("{}..HEAD", manifest.revision),
+        ],
+    )?;
+    let mut forbidden = touched
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| !is_release_metadata_path(path))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    forbidden.sort();
+    forbidden.dedup();
+    if !forbidden.is_empty() {
+        bail!(
+            "non-evidence paths were committed after candidate freeze: {}",
+            forbidden.join(", ")
+        );
+    }
+    Ok(manifest)
+}
+
+fn release_source_fingerprint(root: &Path, revision: &str) -> Result<String> {
+    let tree = git_text(root, &["ls-tree", "-r", "--full-tree", revision])?;
+    let mut hasher = Sha256::new();
+    for line in tree.lines() {
+        let Some((_, path)) = line.split_once('\t') else {
+            bail!("unexpected git ls-tree output while freezing release source");
+        };
+        if is_release_metadata_path(path) {
+            continue;
+        }
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn is_release_metadata_path(path: &str) -> bool {
+    matches!(path, RELEASE_CANDIDATE_FILE | RELEASE_GATES_FILE)
+        || path.starts_with(RELEASE_EVIDENCE_PREFIX)
+}
+
+fn require_clean_worktree(root: &Path) -> Result<()> {
+    if !git_text(root, &["status", "--porcelain"])?
+        .trim()
+        .is_empty()
+    {
+        bail!("release candidate operations require a clean committed worktree");
+    }
+    Ok(())
+}
+
+fn git_text(root: &Path, arguments: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .context("failed to execute git")?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8(output.stdout).context("git output was not UTF-8")
+}
+
+fn git_success(root: &Path, arguments: &[&str], context: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("failed to execute git for {context}"))?;
+    if !output.status.success() {
+        bail!(
+            "{context}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn validate_lower_hex(value: &str, length: usize, label: &str) -> Result<()> {
+    if value.len() != length
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} must be {length} lowercase hexadecimal characters");
+    }
+    Ok(())
+}
+
+fn validate_release_gate_evidence(root: &Path, gate: &ReleaseGate, revision: &str) -> Result<()> {
+    let expected_platform = match gate.id.as_str() {
+        "macos-clean-install" => Some("macos-universal"),
+        "linux-clean-install" => Some("linux-x86_64"),
+        "linux-desktop-clean-install" => Some("linux-desktop-x86_64"),
+        "windows-clean-install" => Some("windows-x86_64"),
+        _ => None,
+    };
+    if gate.status != "passed" {
+        return Ok(());
+    }
+    let Some(expected_platform) = expected_platform else {
+        return Ok(());
+    };
+    let evidence_file = gate
+        .evidence_file
+        .as_deref()
+        .with_context(|| format!("passed gate {} must name an evidence_file", gate.id))?;
+    if !evidence_file.starts_with(RELEASE_EVIDENCE_PREFIX)
+        || evidence_file.contains("..")
+        || Path::new(evidence_file).is_absolute()
+    {
+        bail!(
+            "gate {} evidence_file must stay below acceptance/evidence",
+            gate.id
+        );
+    }
+    let evidence: Value = serde_json::from_slice(&fs::read(root.join(evidence_file))?)?;
+    if evidence["platform"].as_str() != Some(expected_platform) {
+        bail!(
+            "gate {} evidence platform must be {expected_platform}",
+            gate.id
+        );
+    }
+    if evidence["source_revision"].as_str() != Some(revision) {
+        bail!(
+            "gate {} evidence was not produced for frozen candidate {revision}",
+            gate.id
+        );
+    }
+    let artifact_sha256 = evidence["artifact_sha256"].as_str().unwrap_or_default();
+    validate_lower_hex(
+        artifact_sha256,
+        64,
+        &format!("gate {} artifact_sha256", gate.id),
+    )?;
+    if artifact_sha256.chars().all(|character| character == '0') {
+        bail!("gate {} artifact_sha256 cannot be a placeholder", gate.id);
+    }
+    Ok(())
 }
 
 fn pending_release_gates<'a>(
@@ -895,21 +1151,26 @@ fn build_cyclonedx_sbom(
 }
 
 fn source_revision(root: &Path) -> Result<String> {
-    if let Ok(revision) = std::env::var("GITHUB_SHA")
-        && revision.len() == 40
-        && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Ok(revision.to_ascii_lowercase());
-    }
+    let ci_fallback = std::env::var("GITHUB_SHA").ok();
+    source_revision_with_fallback(root, ci_fallback.as_deref())
+}
+
+fn source_revision_with_fallback(root: &Path, ci_fallback: Option<&str>) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root)
         .output()
         .context("git failed while resolving SBOM provenance")?;
-    if !output.status.success() {
-        bail!("git failed while resolving SBOM provenance");
+    if output.status.success() {
+        return normalize_source_revision(String::from_utf8(output.stdout)?.trim());
     }
-    let revision = String::from_utf8(output.stdout)?.trim().to_owned();
+    if let Some(revision) = ci_fallback {
+        return normalize_source_revision(revision.trim());
+    }
+    bail!("git failed while resolving SBOM provenance")
+}
+
+fn normalize_source_revision(revision: &str) -> Result<String> {
     if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("SBOM provenance revision is invalid");
     }
@@ -1239,6 +1500,7 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                     status: "pending".to_owned(),
                     required_for: vec!["private-beta".to_owned(), "public-beta".to_owned()],
                     evidence: String::new(),
+                    evidence_file: None,
                 },
                 ReleaseGate {
                     id: "public".to_owned(),
@@ -1246,6 +1508,7 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                     status: "blocked".to_owned(),
                     required_for: vec!["public-beta".to_owned()],
                     evidence: "certificate required".to_owned(),
+                    evidence_file: None,
                 },
                 ReleaseGate {
                     id: "done".to_owned(),
@@ -1253,6 +1516,7 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                     status: "passed".to_owned(),
                     required_for: vec!["private-beta".to_owned()],
                     evidence: "report".to_owned(),
+                    evidence_file: None,
                 },
             ],
         };
@@ -1271,9 +1535,208 @@ appdata-paths = ['$APPDATA\RunOnMine\RunOnMine', '$LOCALAPPDATA\RunOnMine\RunOnM
                 status: "passed".to_owned(),
                 required_for: vec!["private-beta".to_owned()],
                 evidence: String::new(),
+                evidence_file: None,
             }],
         };
         assert!(pending_release_gates(&manifest, "private-beta").is_err());
+    }
+
+    fn run_git(root: &Path, arguments: &[&str]) -> Result<()> {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .context("failed to execute test git command")?;
+        if !output.status.success() {
+            bail!(
+                "test git {} failed: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    fn commit_all(root: &Path, message: &str) -> Result<()> {
+        run_git(root, &["add", "--all"])?;
+        run_git(root, &["commit", "--quiet", "-m", message])
+    }
+
+    fn release_test_repository() -> Result<tempfile::TempDir> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path();
+        run_git(root, &["init", "--quiet"])?;
+        run_git(root, &["config", "user.name", "RunOnMine Tests"])?;
+        run_git(root, &["config", "user.email", "tests@runonmine.invalid"])?;
+        fs::create_dir_all(root.join(RELEASE_EVIDENCE_PREFIX))?;
+        fs::write(root.join("source.txt"), "release source\n")?;
+        commit_all(root, "source")?;
+        Ok(temporary)
+    }
+
+    fn freeze_and_commit(root: &Path) -> Result<ReleaseCandidateManifest> {
+        freeze_release_candidate_at(root)?;
+        let manifest: ReleaseCandidateManifest =
+            toml::from_str(&fs::read_to_string(root.join(RELEASE_CANDIDATE_FILE))?)?;
+        commit_all(root, "freeze candidate")?;
+        Ok(manifest)
+    }
+
+    fn write_gate_evidence(
+        root: &Path,
+        revision: &str,
+        platform: &str,
+        artifact_sha256: &str,
+    ) -> Result<()> {
+        let evidence = json!({
+            "schema": 1,
+            "platform": platform,
+            "source_revision": revision,
+            "artifact_sha256": artifact_sha256,
+        });
+        fs::write(
+            root.join("acceptance/evidence/macos.json"),
+            serde_json::to_vec_pretty(&evidence)?,
+        )?;
+        Ok(())
+    }
+
+    fn write_gate_manifest(root: &Path, status: &str) -> Result<()> {
+        fs::write(
+            root.join(RELEASE_GATES_FILE),
+            format!(
+                r#"schema = 1
+
+[[gate]]
+id = "macos-clean-install"
+description = "macOS clean install"
+status = "{status}"
+required_for = ["private-beta", "public-beta"]
+evidence = "acceptance/evidence/macos.json"
+evidence_file = "acceptance/evidence/macos.json"
+"#,
+            ),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn release_candidate_allows_only_machine_readable_acceptance_metadata() {
+        assert!(is_release_metadata_path(RELEASE_CANDIDATE_FILE));
+        assert!(is_release_metadata_path(RELEASE_GATES_FILE));
+        assert!(is_release_metadata_path(
+            "acceptance/evidence/macos-universal-clean-install.json"
+        ));
+        assert!(!is_release_metadata_path("Cargo.lock"));
+        assert!(!is_release_metadata_path("docs/releasing.md"));
+        assert!(!is_release_metadata_path("acceptance/README.md"));
+    }
+
+    #[test]
+    fn source_revision_prefers_repository_head_over_ci_fallback() -> Result<()> {
+        let temporary = release_test_repository()?;
+        let root = temporary.path();
+        let expected = git_text(root, &["rev-parse", "HEAD"])?.trim().to_owned();
+        let synthetic_merge_revision = "f".repeat(40);
+        assert_eq!(
+            source_revision_with_fallback(root, Some(&synthetic_merge_revision))?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn frozen_candidate_survives_only_metadata_commits() -> Result<()> {
+        let temporary = release_test_repository()?;
+        let root = temporary.path();
+        let source_revision = source_revision(root)?;
+        let source_fingerprint = release_source_fingerprint(root, &source_revision)?;
+        let frozen = freeze_and_commit(root)?;
+        assert_eq!(frozen.revision, source_revision);
+        assert_eq!(frozen.source_fingerprint, source_fingerprint);
+        assert_eq!(validate_release_candidate(root)?.revision, source_revision);
+        assert_eq!(release_candidate_revision_at(root)?, source_revision);
+
+        write_gate_evidence(root, &source_revision, "macos-universal", &"a".repeat(64))?;
+        write_gate_manifest(root, "passed")?;
+        commit_all(root, "record evidence")?;
+        assert_eq!(
+            release_source_fingerprint(root, "HEAD")?,
+            source_fingerprint
+        );
+        release_readiness_at(root, "private-beta")?;
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_rejects_dirty_source_and_post_freeze_source_changes() -> Result<()> {
+        let temporary = release_test_repository()?;
+        let root = temporary.path();
+        fs::write(root.join("untracked.txt"), "dirty\n")?;
+        assert!(freeze_release_candidate_at(root).is_err());
+        fs::remove_file(root.join("untracked.txt"))?;
+        let _frozen = freeze_and_commit(root)?;
+
+        fs::write(root.join("source.txt"), "changed source\n")?;
+        commit_all(root, "change source")?;
+        assert!(validate_release_candidate(root).is_err());
+        fs::write(root.join("source.txt"), "release source\n")?;
+        commit_all(root, "restore source")?;
+        let error = match validate_release_candidate(root) {
+            Ok(_) => bail!("source history after freeze unexpectedly remained valid"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("non-evidence paths were committed"));
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_manifest_and_evidence_fail_closed() -> Result<()> {
+        let temporary = release_test_repository()?;
+        let root = temporary.path();
+        let frozen = freeze_and_commit(root)?;
+        let gate = ReleaseGate {
+            id: "macos-clean-install".to_owned(),
+            description: "macOS clean install".to_owned(),
+            status: "passed".to_owned(),
+            required_for: vec!["private-beta".to_owned()],
+            evidence: "report".to_owned(),
+            evidence_file: Some("acceptance/evidence/macos.json".to_owned()),
+        };
+
+        write_gate_evidence(root, &frozen.revision, "macos-universal", &"b".repeat(64))?;
+        assert!(validate_release_gate_evidence(root, &gate, &frozen.revision).is_ok());
+        write_gate_evidence(root, &frozen.revision, "linux-x86_64", &"b".repeat(64))?;
+        assert!(validate_release_gate_evidence(root, &gate, &frozen.revision).is_err());
+        write_gate_evidence(root, &"c".repeat(40), "macos-universal", &"b".repeat(64))?;
+        assert!(validate_release_gate_evidence(root, &gate, &frozen.revision).is_err());
+        write_gate_evidence(root, &frozen.revision, "macos-universal", &"0".repeat(64))?;
+        assert!(validate_release_gate_evidence(root, &gate, &frozen.revision).is_err());
+
+        let unsafe_gate = ReleaseGate {
+            evidence_file: Some("acceptance/evidence/../secret.json".to_owned()),
+            ..gate
+        };
+        assert!(validate_release_gate_evidence(root, &unsafe_gate, &frozen.revision).is_err());
+        assert!(validate_lower_hex(&"a".repeat(40), 40, "revision").is_ok());
+        assert!(validate_lower_hex(&"A".repeat(40), 40, "revision").is_err());
+        assert!(validate_lower_hex("abc", 40, "revision").is_err());
+        assert!(git_text(root, &["rev-parse", "missing-reference"]).is_err());
+        assert!(git_success(root, &["rev-parse", "missing-reference"], "missing").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_rejects_pending_gate_and_unknown_profile() -> Result<()> {
+        let temporary = release_test_repository()?;
+        let root = temporary.path();
+        let frozen = freeze_and_commit(root)?;
+        write_gate_evidence(root, &frozen.revision, "macos-universal", &"d".repeat(64))?;
+        write_gate_manifest(root, "pending")?;
+        commit_all(root, "pending gate")?;
+        assert!(release_readiness_at(root, "private-beta").is_err());
+        assert!(release_readiness_at(root, "nightly").is_err());
+        Ok(())
     }
 
     #[test]

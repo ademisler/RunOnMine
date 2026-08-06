@@ -11,6 +11,8 @@ mod desktop_icon;
 #[cfg(feature = "desktop-ui")]
 mod desktop_instance;
 #[cfg(feature = "desktop-ui")]
+mod desktop_lifecycle_acceptance;
+#[cfg(feature = "desktop-ui")]
 mod desktop_process;
 #[cfg(feature = "desktop-ui")]
 mod desktop_shell;

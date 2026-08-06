@@ -102,6 +102,9 @@ pub const USER_SERVICE_NAME: &str = "runonmine-agent";
 const WINDOWS_RECOVERY_COMMAND: &str = "$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -StartWhenAvailable; Set-ScheduledTask -TaskName 'RunOnMine Agent' -Settings $settings | Out-Null";
 #[cfg(target_os = "macos")]
 const MACOS_SERVICE_LOG_LIMIT_BYTES: u64 = 5 * 1_024 * 1_024;
+// Cold starts can include first-run state, keychain, and connector inventory initialization.
+// Keep the wait bounded while allowing a healthy service to publish its verified marker.
+const AGENT_RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ServiceStatus {
@@ -261,7 +264,7 @@ impl LinuxSystemService {
                 status.detail
             );
         }
-        expectation.wait_blocking(Duration::from_secs(15))?;
+        expectation.wait_blocking(AGENT_RESTART_HANDSHAKE_TIMEOUT)?;
         Ok(())
     }
 
@@ -490,7 +493,7 @@ impl UserService {
                 status.detail
             );
         }
-        expectation.wait_blocking(Duration::from_secs(15))?;
+        expectation.wait_blocking(AGENT_RESTART_HANDSHAKE_TIMEOUT)?;
         Ok(())
     }
 
@@ -615,7 +618,7 @@ impl UserService {
                 );
             }
         }
-        expectation.wait_blocking(Duration::from_secs(15))?;
+        expectation.wait_blocking(AGENT_RESTART_HANDSHAKE_TIMEOUT)?;
         Ok(true)
     }
 

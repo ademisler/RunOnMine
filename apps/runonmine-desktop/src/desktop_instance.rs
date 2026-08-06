@@ -6,7 +6,7 @@ pub(crate) enum DesktopInstanceOutcome {
     Secondary,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native {
     use std::fs;
     use std::io::{ErrorKind, Read as _, Write as _};
@@ -500,7 +500,7 @@ mod native {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod native {
     use anyhow::Result;
 

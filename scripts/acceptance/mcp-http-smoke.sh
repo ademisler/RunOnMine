@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 target_root=${CARGO_TARGET_DIR:-"$repo_root/target"}
 cli=${RUNONMINE_BIN:-"$target_root/debug/runonmine"}
 agent=${RUNONMINE_AGENT_BIN:-"$target_root/debug/runonmine-agent"}
@@ -15,7 +15,7 @@ elif [ ! -x "$cli" ] || [ ! -x "$agent" ]; then
 fi
 
 sandbox=$(mktemp -d)
-sandbox=$(CDPATH= cd -- "$sandbox" && pwd -P)
+sandbox=$(CDPATH='' cd -- "$sandbox" && pwd -P)
 agent_pid=""
 stop_agent() {
   [ -n "$agent_pid" ] || return 0

@@ -6,8 +6,8 @@ body:
   - type: input
     id: commit
     attributes:
-      label: Release commit
-      description: Full Git commit SHA under review.
+      label: Frozen release candidate
+      description: Full Git commit SHA from acceptance/release-candidate.toml.
     validations:
       required: true
   - type: checkboxes
@@ -31,7 +31,8 @@ body:
         - label: macOS acceptance evidence attached.
         - label: Linux acceptance evidence attached.
         - label: Windows acceptance evidence attached.
-        - label: Hosted cross-platform matrix passed for this commit.
+        - label: Every evidence file names the frozen candidate and verified artifact hash.
+        - label: Hosted cross-platform matrix passed for the public-beta candidate.
   - type: checkboxes
     id: security
     attributes:
@@ -41,6 +42,8 @@ body:
         - label: Remaining risks were presented to the owner.
         - label: Artifact hashes and SBOMs were verified.
         - label: Signing/notarization status is accurately disclosed.
+        - label: Independent security review is complete for public beta.
+        - label: Fork pull requests cannot execute on persistent self-hosted runners.
   - type: textarea
     id: evidence
     attributes:
