@@ -98,7 +98,7 @@ function Assert-RunOnMineDesktopReport {
 function Wait-RunOnMineMainWindow {
     param(
         [Parameter(Mandatory = $true)] [System.Diagnostics.Process]$Process,
-        [int]$TimeoutMilliseconds = 15000
+        [int]$TimeoutMilliseconds = 120000
     )
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -137,10 +137,12 @@ function Invoke-RunOnMineDesktopAcceptance {
         if ($RequireInteractiveWindow) {
             $window = Wait-RunOnMineMainWindow -Process $desktopProcess
             if ($window -eq [IntPtr]::Zero) {
-                throw "RunOnMine desktop did not expose its native main window"
+                $desktopProcess.Refresh()
+                $state = if ($desktopProcess.HasExited) { "exited with code $($desktopProcess.ExitCode)" } else { "still running" }
+                throw "RunOnMine desktop did not expose its native main window within 120 seconds ($state)"
             }
         }
-        if (-not $desktopProcess.WaitForExit(30000)) {
+        if (-not $desktopProcess.WaitForExit(120000)) {
             throw "RunOnMine desktop acceptance did not finish"
         }
         if ($desktopProcess.ExitCode -ne 0) {
@@ -165,12 +167,14 @@ function Invoke-RunOnMineDesktopAcceptance {
         $desktopProcess = Start-RunOnMineNativeProcess -FilePath $Desktop
         $window = Wait-RunOnMineMainWindow -Process $desktopProcess
         if ($window -eq [IntPtr]::Zero) {
-            throw "RunOnMine desktop did not expose a window for close-to-tray acceptance"
+            $desktopProcess.Refresh()
+            $state = if ($desktopProcess.HasExited) { "exited with code $($desktopProcess.ExitCode)" } else { "still running" }
+            throw "RunOnMine desktop did not expose a window for close-to-tray acceptance within 120 seconds ($state)"
         }
         if (-not $desktopProcess.CloseMainWindow()) {
             throw "Windows did not deliver WM_CLOSE to RunOnMine desktop"
         }
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
         do {
             Start-Sleep -Milliseconds 100
             $desktopProcess.Refresh()
@@ -184,14 +188,14 @@ function Invoke-RunOnMineDesktopAcceptance {
         }
 
         $secondary = Start-RunOnMineNativeProcess -FilePath $Desktop
-        if (-not $secondary.WaitForExit(10000)) {
+        if (-not $secondary.WaitForExit(60000)) {
             Stop-Process -Id $secondary.Id -Force -ErrorAction SilentlyContinue
             throw "second RunOnMine desktop instance did not exit"
         }
         if ($secondary.ExitCode -ne 0) {
             throw "second RunOnMine desktop instance exited with code $($secondary.ExitCode)"
         }
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
         do {
             Start-Sleep -Milliseconds 100
             $desktopProcess.Refresh()

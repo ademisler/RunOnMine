@@ -71,11 +71,45 @@ function Invoke-RunOnMineNativeProcess {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-            $process.Kill()
-            $process.WaitForExit()
-            [void]$stdoutTask.GetAwaiter().GetResult()
-            [void]$stderrTask.GetAwaiter().GetResult()
-            throw "native process timed out after $TimeoutMilliseconds ms: $FilePath"
+            $process.Refresh()
+            if ($process.HasExited) {
+                $process.WaitForExit()
+            }
+            else {
+                $cleanupError = ""
+                try {
+                    $process.Kill()
+                }
+                catch {
+                    $process.Refresh()
+                    if (-not $process.HasExited) {
+                        $cleanupError = $_.Exception.Message
+                        try {
+                            $taskkill = [System.Diagnostics.Process]::Start(
+                                "$env:SystemRoot\System32\taskkill.exe",
+                                "/PID $($process.Id) /T /F"
+                            )
+                            if ($taskkill) {
+                                [void]$taskkill.WaitForExit(30000)
+                                $taskkill.Dispose()
+                            }
+                        }
+                        catch {
+                            $cleanupError = "$cleanupError; taskkill: $($_.Exception.Message)"
+                        }
+                    }
+                }
+                [void]$process.WaitForExit(30000)
+                [void]$stdoutTask.GetAwaiter().GetResult()
+                [void]$stderrTask.GetAwaiter().GetResult()
+                $suffix = if ([string]::IsNullOrWhiteSpace($cleanupError)) {
+                    ""
+                }
+                else {
+                    "; cleanup: $cleanupError"
+                }
+                throw "native process timed out after $TimeoutMilliseconds ms: $FilePath $($ArgumentList -join ' ')$suffix"
+            }
         }
         $process.WaitForExit()
         $stdout = $stdoutTask.GetAwaiter().GetResult()

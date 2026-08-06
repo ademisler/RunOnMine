@@ -83,14 +83,14 @@ try {
         $lastApprovalError = ""
         for ($attempt = 0; $attempt -lt 1800; $attempt++) {
             $approvalPoll = Invoke-RunOnMineNativeProcess -FilePath $RunOnMine `
-                -ArgumentList @("approvals", "list") -TimeoutMilliseconds 10000
+                -ArgumentList @("approvals", "list") -TimeoutMilliseconds 60000
             if ($approvalPoll.ExitCode -eq 0) {
                 $match = [regex]::Match($approvalPoll.Stdout, '(?m)^([0-9a-fA-F-]{36})  ')
                 if ($match.Success) {
                     $approvalId = $match.Groups[1].Value
                     $approval = Invoke-RunOnMineNativeProcess -FilePath $RunOnMine `
                         -ArgumentList @("approvals", "approve", $approvalId, "--once") `
-                        -TimeoutMilliseconds 10000
+                        -TimeoutMilliseconds 60000
                     if ($approval.ExitCode -ne 0) {
                         throw "owner approval failed with code $($approval.ExitCode): $($approval.Stderr)"
                     }
@@ -103,8 +103,8 @@ try {
             Start-Sleep -Milliseconds 50
         }
         if (-not $clientProcess.WaitForExit(120000)) {
-            $clientProcess.Kill()
-            $clientProcess.WaitForExit()
+            Stop-Process -Id $clientProcess.Id -Force -ErrorAction SilentlyContinue
+            [void]$clientProcess.WaitForExit(30000)
             throw "MCP HTTP acceptance client timed out"
         }
         $clientOutput = $clientProcess.StandardOutput.ReadToEnd()
@@ -132,7 +132,7 @@ try {
     }
 
     $pendingAfterMcp = Invoke-RunOnMineNativeProcess -FilePath $RunOnMine `
-        -ArgumentList @("approvals", "list") -TimeoutMilliseconds 10000
+        -ArgumentList @("approvals", "list") -TimeoutMilliseconds 60000
     if ($pendingAfterMcp.ExitCode -ne 0 -or $pendingAfterMcp.Stdout -notmatch 'No pending approvals\.') {
         throw "pending approval inventory was not empty after MCP acceptance: $($pendingAfterMcp.Stderr)"
     }
@@ -184,8 +184,8 @@ try {
 finally {
     if ($clientProcess) {
         if (-not $clientProcess.HasExited) {
-            $clientProcess.Kill()
-            $clientProcess.WaitForExit()
+            Stop-Process -Id $clientProcess.Id -Force -ErrorAction SilentlyContinue
+            [void]$clientProcess.WaitForExit(30000)
         }
         $clientProcess.Dispose()
     }

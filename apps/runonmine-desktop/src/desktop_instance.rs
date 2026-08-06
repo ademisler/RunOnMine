@@ -225,6 +225,15 @@ mod native {
             let socket = temporary.path().join("instance.sock");
             let listener = UnixListener::bind(&socket)?;
             drop(listener);
+            let mut stale = false;
+            for _ in 0..40 {
+                if UnixStream::connect(&socket).is_err() {
+                    stale = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(stale, "closed Unix listener did not become stale");
             let outcome = DesktopInstance::acquire_at(&socket)?;
             assert!(matches!(outcome, DesktopInstanceOutcome::Primary(_)));
             Ok(())
