@@ -161,3 +161,10 @@ residue. A Wine x86_64 run remains useful supplemental evidence for PE launch,
 tray creation, seven-view rendering, standard Windows data paths, and
 GUI-subsystem compatibility, but it does not claim physical Windows
 installation, Authenticode signing, reboot, or release clean-install acceptance.
+
+When Windows is fully emulated under QEMU TCG, WGPU/Direct3D may fall back to a
+software renderer. Use at least four virtual CPUs for authoritative interactive
+acceptance on that path. A `wgpu-core` queue timeout from an otherwise clean
+2-vCPU TCG run is infrastructure evidence, not a pass; preserve the failure and
+rerun the same frozen artifact on a clean overlay with adequate CPU. Only the
+complete clean retry may satisfy the gate.

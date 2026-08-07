@@ -52,13 +52,17 @@ explicit installation and is never installed by setup. See the
 
 ## Status
 
-The exact `0.1.0-beta.1` candidate recorded in
-`acceptance/release-candidate.toml` completed owner-controlled private-beta
-acceptance on macOS, Linux x86_64/aarch64, Linux desktop, and Windows x86_64.
-Its artifact hashes and redacted reports are committed below
-`acceptance/evidence/`. Current `main` also contains post-candidate hardening;
-a new tag must freeze that newer source and repeat the applicable platform gates
-instead of reusing older evidence. There is no supported public or production
+Release status is machine-readable. `acceptance/release-candidate.toml` names the
+only source revision that may be tagged, while `acceptance/release-gates.toml`
+records which candidate-scoped platform and security gates have actually passed.
+Evidence below `acceptance/evidence/` is valid only when its `source_revision`
+and artifact SHA-256 match that frozen candidate. Historical evidence must never
+be relabeled for a newer source revision.
+
+RunOnMine intentionally includes documentation in the frozen source fingerprint.
+Commit product, workflow, packaging, and narrative-documentation changes before
+freezing a candidate; any later non-evidence change requires a new freeze and
+fresh applicable platform acceptance. There is no supported public or production
 release yet.
 
 Implemented connection modes:

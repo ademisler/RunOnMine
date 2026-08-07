@@ -16,18 +16,19 @@ Readiness also validates the frozen source fingerprint, rejects any non-evidence
 path touched after the freeze, and requires every passed platform report to name
 the exact candidate revision and a real artifact SHA-256.
 
-## Recorded private-beta candidate
+## Candidate-scoped evidence
 
-Frozen source `1a0ba3d134f40fc95b9e8c52a95132fff061acb0` completed the
-owner-controlled private-beta gate set. The committed evidence covers macOS
-universal arm64/Rosetta, Linux x86_64 headless and desktop, Linux ARM64 headless,
-and Windows x86_64. It records real reboots, MCP approval and denied
-administrator execution, native desktop lifecycle where applicable, helper
-identity boundaries, uninstall, and residue inspection.
+Do not infer current release readiness from a prose snapshot or an old commit.
+The source of truth is the revision in `acceptance/release-candidate.toml` plus
+the gate states in `acceptance/release-gates.toml`. A platform report counts only
+when its `source_revision` exactly matches the frozen candidate and its artifact
+SHA-256 identifies the artifact that was actually exercised.
 
-That evidence belongs only to the recorded source and artifact hashes. Current
-or future `main` changes require a new freeze and fresh applicable acceptance;
-copying the old JSON or changing only its revision is invalid.
+Historical accepted candidates remain useful audit history, but their JSON must
+never be copied forward or edited to name a newer revision. Any committed
+production, dependency, workflow, packaging, or narrative-documentation change
+outside release metadata changes the frozen source fingerprint and requires a
+new candidate plus fresh applicable platform acceptance.
 
 ## Automated local smoke test
 

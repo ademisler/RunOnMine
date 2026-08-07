@@ -5,16 +5,17 @@ separate owner decision and is never changed by CI.
 
 ## Current repository status
 
-Frozen source `1a0ba3d134f40fc95b9e8c52a95132fff061acb0` completed the
-owner-controlled private-beta gate set, with artifact identities and redacted
-reports committed under `acceptance/evidence/`. Later hardening and documentation
-changes are now present on `main`; they do not retroactively change that evidence,
-but they do invalidate it for a new tag. The next candidate must be frozen from
-the intended tag source and rerun through every applicable platform gate.
+Current release status is defined by `acceptance/release-candidate.toml` and
+`acceptance/release-gates.toml`, not by a remembered candidate hash in this
+document. Only evidence produced for the exact frozen revision and recorded
+artifact SHA-256 may satisfy a candidate-scoped gate. Any non-evidence commit
+after a freeze invalidates readiness and requires a new freeze plus fresh
+applicable platform acceptance.
 
-Public beta remains blocked on independent security review, Apple Developer ID
-and notarization credentials, Windows publisher signing, hosted-platform runner
-allocation, and protected-main availability.
+Public beta additionally remains fail-closed on independent security review,
+publisher signing/notarization, hosted-platform execution, and protected-main
+evidence. A blocked external gate must stay blocked until its actual external
+requirement is satisfied; owner-controlled acceptance is not a substitute.
 
 ## Required gates
 

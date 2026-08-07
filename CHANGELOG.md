@@ -5,6 +5,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Record a fresh Windows Server 2025 acceptance cycle for the hardened static-CRT package, including PE resources, interactive seven-view/tray/single-instance behavior, CLI/agent/MCP approval and denied administrator execution, LocalSystem helper second-user denial, verified reboot recovery, Emergency Lock, uninstall, and zero unexpected residue; preserve a CPU-starved TCG WGPU failure separately from the clean 4-vCPU retry.
+- Make release-status documentation candidate-agnostic: the frozen manifest, machine-readable gates, source revision, and artifact hashes are the only release-readiness authority, and narrative documentation changes remain candidate-invalidating by design.
 - Merge the complete exact-candidate private-beta evidence into `main`, recording rebooted macOS, Linux x86_64/aarch64, Linux desktop, and Windows x86_64 acceptance while keeping all public-beta external gates explicit.
 - Make Windows release binaries self-contained by statically linking MSVC/UCRT, harden native-process acceptance against PowerShell 5.1 exit/cleanup races, prove the LocalSystem helper boundary with a distinct non-admin token, and remove only empty duplicate ProjectDirs parent shells after purge.
 - Align loopback-health property generation with URL default-port normalization and make Unix stale-socket recovery tests wait for kernel listener teardown, preserving the fail-closed product contracts without flaky assertions.

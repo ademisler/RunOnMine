@@ -151,6 +151,13 @@ manifest, version resource, or GUI subsystem from a runtime tray problem. Use
 `windows-installer-smoke.ps1` only on a disposable account without an existing
 RunOnMine installation or user-data root.
 
+For a fully emulated Windows VM, a panic containing `wgpu-core` and `timed out
+while waiting on the last successful submission` can indicate that the software
+Direct3D path is CPU-starved. Preserve the failed run, verify the same artifact
+passes PE/resource checks, and retry from a clean overlay with at least four
+vCPUs. Do not weaken the interactive desktop assertions or relabel the failed
+run as product acceptance.
+
 ## Hosted workflow failed before checkout
 
 Inspect the job's runner name and step list. If the job completed with no runner

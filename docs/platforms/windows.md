@@ -124,9 +124,11 @@ for SCM to report `STOPPED`, and restore the previous files, registration, start
 type, and running state after a failed start or health validation.
 
 The private-beta installer is unsigned. Windows may show an unrecognized
-publisher warning. Verify its SHA-256 file before running it. The recorded frozen
-candidate passed rebooted Windows Server 2025 clean-install acceptance, including
-the native desktop, Scheduled Task recovery, MCP approval/deny, LocalSystem
-helper boundary, uninstall, and zero unexpected residue. Public release remains
-blocked until Authenticode publisher signing and the other public-beta gates are
-implemented and recorded.
+publisher warning. Verify its SHA-256 file before running it. A candidate may
+pass the Windows clean-install gate only after rebooted Windows Server 2025 or
+equivalent owner-controlled acceptance proves the native desktop, Scheduled Task
+recovery, MCP approval/deny, LocalSystem helper boundary, uninstall, and zero
+unexpected residue for that exact source and artifact hash. Current status is
+recorded in `acceptance/release-gates.toml`. Public release remains blocked until
+Authenticode publisher signing and the other public-beta gates are implemented
+and recorded.
