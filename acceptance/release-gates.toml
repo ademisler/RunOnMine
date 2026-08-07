@@ -5,30 +5,28 @@ id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 has not yet completed fresh physical macOS clean-install acceptance. macOS is intentionally deferred until the owner connects the required Mac environment; historical evidence is not reusable."
+evidence = "Final candidate has not yet completed fresh candidate-scoped acceptance; evidence from earlier source revisions remains historical and must not be reused."
 
 [[gate]]
 id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 passed Ubuntu 24.04 full-QEMU clean-install acceptance on x86_64 and ARM64. The x86_64 DEB SHA-256 is 7fe00b40073301fd4e4d8036f0027ac3e2bec00e4094efdffe1c775de4f7699a and the ARM64 DEB SHA-256 is a9e3050a8b5c87dd6f7e1d93baa81c1062c828ee4b2aa8988d1a8eabe8479396. Both architectures proved package lifecycle, verified reboot, user/system service recovery, authenticated MCP approval and deny, managed or verified Cloudflare Quick Tunnel operation, Emergency Lock, uninstall, and zero unexpected residue."
-evidence_file = "acceptance/evidence/linux-x86_64-clean-install.json"
+evidence = "Final candidate has not yet completed fresh candidate-scoped acceptance; evidence from earlier source revisions remains historical and must not be reused."
 
 [[gate]]
 id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 passed Ubuntu 24.04 full-QEMU package lifecycle plus the Oty physical X11 and user D-Bus session for desktop DEB SHA-256 7e5258a30417bd49f2d9ac3eb4add2c7ba2a621a6ce16ef304cf354337089286, including all seven views after the long-function refactor, close-to-tray, reopen, single-instance activation, MCP approval and deny, Emergency Lock, uninstall, and zero unexpected residue."
-evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
+evidence = "Final candidate has not yet completed fresh candidate-scoped acceptance; evidence from earlier source revisions remains historical and must not be reused."
 
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
+evidence = "Final candidate has not yet completed fresh candidate-scoped acceptance; evidence from earlier source revisions remains historical and must not be reused."
 
 [[gate]]
 id = "hosted-platform-matrix"
@@ -42,14 +40,14 @@ id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 requires a fresh Windows LocalSystem/owner/second-user helper-boundary run before this gate can pass; prior evidence remains historical."
+evidence = "Final candidate requires a fresh Windows LocalSystem/owner/second-user helper-boundary run; prior evidence remains historical."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Complete the owner risk review after frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 has fresh candidate-scoped Linux and Windows evidence and the final full-history secret scan result is recorded."
+evidence = "Complete the owner risk review after the final candidate has fresh platform evidence and the final full-history secret scan result is recorded."
 
 [[gate]]
 id = "external-security-review"
