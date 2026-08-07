@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "platform": "linux-desktop-x86_64",
-  "artifact": "runonmine-desktop_0.1.0-beta.1_amd64.deb",
-  "artifact_sha256": "a57d5aaaae912debc4c07d7663a7ea6d148fce5f8db76ee7e756453b84ce83c5",
-  "source_revision": "1a0ba3d134f40fc95b9e8c52a95132fff061acb0",
+  "artifact": "runonmine-candidate-desktop-amd64.deb",
+  "artifact_sha256": "5604b12222730670fe5634293240e9e795231addcdb93cdf45c46db4cbd95040",
+  "source_revision": "6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a",
   "tester": "Oty QEMU Ubuntu 24.04 plus real X11 session",
-  "tested_at": "2026-08-04T21:32:12.216621Z",
+  "tested_at": "2026-08-07T09:59:35.040411Z",
   "steps": [
     {
       "id": "install",

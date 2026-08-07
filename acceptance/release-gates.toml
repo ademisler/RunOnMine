@@ -3,17 +3,16 @@ schema = 1
 [[gate]]
 id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed physical Apple Silicon clean-install acceptance for DMG SHA-256 a285269ec7919878bc2a59dd278bab56afd54542deae4398f81947ef094bffb0, including arm64, Rosetta x86_64, reboot recovery, MCP approval and deny, owner-only privileged-helper cross-user enforcement, Quick Tunnel, uninstall, zero application residue, complete removal of the temporary helper-boundary account, and unchanged MacMCP invariants."
-evidence_file = "acceptance/evidence/macos-universal-clean-install.json"
+evidence = "Frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a has not yet completed fresh physical macOS clean-install acceptance. The prior 1a0ba3d evidence is historical and is not reusable for this candidate."
 
 [[gate]]
 id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Ubuntu 24.04 clean-install acceptance on x86_64 KVM and ARM64 full QEMU. The x86_64 DEB SHA-256 is eb08255331e0fbf7fc09333f33b69a82d618f23307153cc5134233f52e448173 and the ARM64 DEB SHA-256 is 61faa73228b687edb2166a775e622fa93452bece04ab40a87d6c314c95578521. Both architectures proved package lifecycle, verified reboot, user/system service recovery, authenticated MCP approval and deny, pinned Cloudflare Quick Tunnel, Emergency Lock, uninstall, and zero unexpected residue."
+evidence = "Exact source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a passed Ubuntu 24.04 full-QEMU clean-install acceptance on x86_64 and ARM64. The x86_64 DEB SHA-256 is 2098f507b9f66dc233d8b62efd10dc001f295e7a5a51cfa031142594c16716e3 and the ARM64 DEB SHA-256 is 39a3bd281695d8e0235bc553847d301d16634472f426261aa1bb223c37345ea9. Both architectures proved package lifecycle, verified reboot, user/system service recovery, authenticated MCP approval and deny, managed or verified Cloudflare Quick Tunnel operation, Emergency Lock, uninstall, and zero unexpected residue."
 evidence_file = "acceptance/evidence/linux-x86_64-clean-install.json"
 
 [[gate]]
@@ -21,37 +20,36 @@ id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Ubuntu 24.04 QEMU package lifecycle plus the Oty physical X11 and user D-Bus session for desktop DEB SHA-256 a57d5aaaae912debc4c07d7663a7ea6d148fce5f8db76ee7e756453b84ce83c5, including seven views, close-to-tray, reopen, single-instance activation, MCP approval and deny, Emergency Lock, uninstall, and zero unexpected residue."
+evidence = "Exact source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a passed Ubuntu 24.04 full-QEMU package lifecycle plus the Oty physical X11 and user D-Bus session for desktop DEB SHA-256 5604b12222730670fe5634293240e9e795231addcdb93cdf45c46db4cbd95040, including seven views, close-to-tray, reopen, single-instance activation, MCP approval and deny, Emergency Lock, uninstall, and zero unexpected residue."
 evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
 
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed Windows Server 2025 Desktop Experience clean-install acceptance for static-CRT NSIS SHA-256 da837ae1193371e7ff8a926ec4f685fde9eccf0d0ede6c31d685dc4771cbb7c6 and portable ZIP SHA-256 521dc9c921d4b0902e7fa6e380cff2bba5700b2d02f6f73aaa1b34fc2a9b9f20, including PE resources, seven desktop views, tray and single-instance behavior, CLI, agent, MCP approval and deny, LocalSystem helper owner access, second-user token named-pipe denial, verified reboot recovery, Emergency Lock, uninstall, and zero unexpected residue; content-free ProjectDirs shells were verified empty and removed."
-evidence_file = "acceptance/evidence/windows-x86_64-clean-install.json"
+evidence = "Frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a has not yet completed fresh Windows clean-install acceptance. The prior 1a0ba3d evidence is historical; hosted Windows preflight for the new freeze was blocked before checkout by GitHub account payment/spending limits."
 
 [[gate]]
 id = "hosted-platform-matrix"
 description = "Run the macOS ARM64/Intel, Windows x86_64, Linux ARM64, and clean-image artifact-preflight matrix including Linux desktop for the release candidate."
 status = "blocked"
 required_for = ["public-beta"]
-evidence = "Recent jobs ended before checkout with no assigned runner and no executed steps. Exact owner-controlled platform acceptance is used for private beta; public beta remains blocked until hosted allocation is restored."
+evidence = "Artifact preflight run 31165628252 for freeze commit c5dc9ed ended before checkout on macOS, Windows, Linux x86_64, Linux ARM64, and Linux desktop. GitHub explicitly reported that the jobs were not started because recent account payments failed or the spending limit must be increased; public beta remains blocked until hosted execution is restored."
 
 [[gate]]
 id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 1a0ba3d134f40fc95b9e8c52a95132fff061acb0 passed real-VM helper review proving LocalSystem service identity, installing-owner access, distinct second-user token named-pipe denial, allowlisted execution, and idempotent uninstall. Any helper or platform-boundary product change must return this gate to pending."
+evidence = "The prior real-Windows helper review belongs to source 1a0ba3d. Frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a changes Windows runtime linkage and therefore requires fresh LocalSystem/owner/second-user helper-boundary evidence before this gate can pass."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "The owner-directed private-beta report records exact-candidate platform evidence, artifact SHA-256 values, complete-history secret scan results, deliberately unsigned Windows distribution, ad-hoc but non-notarized macOS distribution, and all remaining public-beta external blockers."
+evidence = "Owner-directed review for frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a records full local verification, a complete-history Gitleaks scan with no leaks, fresh Linux x86_64/desktop/ARM64 artifact hashes and clean-install evidence, and the remaining macOS, Windows, hosted-CI, signing, independent-review, and protected-main blockers. No old candidate evidence is treated as current."
 
 [[gate]]
 id = "external-security-review"
