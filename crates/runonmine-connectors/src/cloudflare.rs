@@ -5,6 +5,7 @@ use std::{fs, io::Write};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use url::{Host, Url};
 
 use crate::binary::{BinaryKind, InstalledBinary};
@@ -12,6 +13,8 @@ use crate::health::HealthCheck;
 use crate::process::{CommandSpec, SecretValue};
 
 const LEGACY_MACMCP_PORT: u16 = 45_799;
+const QUICK_TUNNEL_METRICS_MAX_BYTES: usize = 256 * 1_024;
+const QUICK_TUNNEL_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +75,10 @@ impl QuickTunnelConfig {
 
     pub fn origin(&self) -> &Url {
         &self.origin
+    }
+
+    pub fn metrics_address(&self) -> SocketAddr {
+        self.metrics_address
     }
 }
 
@@ -299,24 +306,97 @@ pub fn parse_quick_tunnel_url(line: &str) -> Option<Url> {
                 '`' | '\'' | '"' | '(' | ')' | '[' | ']' | ',' | ';'
             )
         });
-        let url = Url::parse(candidate).ok()?;
-        let host = url.host_str()?;
-        if url.scheme() == "https"
-            && host.ends_with(".trycloudflare.com")
-            && host.len() > ".trycloudflare.com".len()
-            && !host[..host.len() - ".trycloudflare.com".len()].contains('.')
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.port().is_none()
-            && url.path() == "/"
-            && url.query().is_none()
-            && url.fragment().is_none()
-        {
-            Some(url)
-        } else {
-            None
-        }
+        validated_quick_tunnel_url(candidate)
     })
+}
+
+/// Recovers the Quick Tunnel public URL from cloudflared's loopback-only metrics endpoint.
+/// This is a bounded fallback for the one-shot startup log line used by the normal observer.
+pub async fn discover_quick_tunnel_url_from_metrics(
+    metrics_address: SocketAddr,
+) -> Result<Option<Url>> {
+    validate_runonmine_loopback(metrics_address, "Quick Tunnel metrics")?;
+    let response = tokio::time::timeout(QUICK_TUNNEL_METRICS_TIMEOUT, async move {
+        let mut stream = tokio::net::TcpStream::connect(metrics_address)
+            .await
+            .context("failed to connect to Quick Tunnel metrics")?;
+        let request = format!(
+            "GET /metrics HTTP/1.0\r\nHost: {metrics_address}\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .context("failed to request Quick Tunnel metrics")?;
+        let mut response = Vec::with_capacity(16 * 1_024);
+        let mut chunk = [0_u8; 8 * 1_024];
+        loop {
+            let count = stream
+                .read(&mut chunk)
+                .await
+                .context("failed to read Quick Tunnel metrics")?;
+            if count == 0 {
+                break;
+            }
+            if response.len().saturating_add(count) > QUICK_TUNNEL_METRICS_MAX_BYTES {
+                bail!("Quick Tunnel metrics response exceeds the size limit");
+            }
+            response.extend_from_slice(&chunk[..count]);
+        }
+        Ok::<Vec<u8>, anyhow::Error>(response)
+    })
+    .await
+    .context("Quick Tunnel metrics request timed out")??;
+
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("Quick Tunnel metrics response is malformed")?;
+    let headers = std::str::from_utf8(&response[..split])
+        .context("Quick Tunnel metrics headers are not UTF-8")?;
+    let status = headers
+        .lines()
+        .next()
+        .context("Quick Tunnel metrics status line is missing")?;
+    if !(status.starts_with("HTTP/1.0 200 ") || status.starts_with("HTTP/1.1 200 ")) {
+        bail!("Quick Tunnel metrics endpoint returned a non-success status");
+    }
+    let body = std::str::from_utf8(&response[split + 4..])
+        .context("Quick Tunnel metrics body is not UTF-8")?;
+    Ok(parse_quick_tunnel_metrics(body))
+}
+
+fn parse_quick_tunnel_metrics(metrics: &str) -> Option<Url> {
+    const METRIC: &str = "cloudflared_tunnel_user_hostnames_counts{";
+    const LABEL: &str = "userHostname=\"";
+    metrics.lines().find_map(|line| {
+        if !line.starts_with(METRIC) {
+            return None;
+        }
+        let start = line.find(LABEL)? + LABEL.len();
+        let tail = &line[start..];
+        let end = tail.find('\"')?;
+        validated_quick_tunnel_url(&tail[..end])
+    })
+}
+
+fn validated_quick_tunnel_url(candidate: &str) -> Option<Url> {
+    let url = Url::parse(candidate).ok()?;
+    let host = url.host_str()?;
+    if url.scheme() == "https"
+        && host.ends_with(".trycloudflare.com")
+        && host.len() > ".trycloudflare.com".len()
+        && !host[..host.len() - ".trycloudflare.com".len()].contains('.')
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+    {
+        Some(url)
+    } else {
+        None
+    }
 }
 
 fn require_cloudflared(binary: &InstalledBinary) -> Result<()> {
@@ -453,6 +533,98 @@ mod tests {
         assert!(parse_quick_tunnel_url("https://a.b.trycloudflare.com").is_none());
         assert!(parse_quick_tunnel_url("http://quiet-bird.trycloudflare.com").is_none());
         assert!(parse_quick_tunnel_url("https://quiet-bird.trycloudflare.com/mcp").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn quick_metrics_parser_rejects_lookalikes() -> Result<()> {
+        let valid = parse_quick_tunnel_metrics(
+            r#"cloudflared_tunnel_user_hostnames_counts{userHostname="https://metrics-recovery.trycloudflare.com"} 1"#,
+        )
+        .context("valid Quick Tunnel metrics hostname was not parsed")?;
+        assert_eq!(
+            valid,
+            Url::parse("https://metrics-recovery.trycloudflare.com/")?
+        );
+        for value in [
+            r#"cloudflared_tunnel_user_hostnames_counts{userHostname="https://a.b.trycloudflare.com"} 1"#,
+            r#"cloudflared_tunnel_user_hostnames_counts{userHostname="http://metrics-recovery.trycloudflare.com"} 1"#,
+            r#"cloudflared_tunnel_user_hostnames_counts{userHostname="https://metrics-recovery.trycloudflare.com/path"} 1"#,
+            r#"cloudflared_tunnel_user_hostnames_counts{userHostname="https://metrics-recovery.trycloudflare.com.evil.example"} 1"#,
+            r#"unrelated_metric{userHostname="https://metrics-recovery.trycloudflare.com"} 1"#,
+        ] {
+            assert!(
+                parse_quick_tunnel_metrics(value).is_none(),
+                "accepted {value}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quick_metrics_probe_is_loopback_bounded_and_parses_hostname() -> Result<()> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 4 * 1_024];
+            let count = stream.read(&mut request).await?;
+            let request = std::str::from_utf8(&request[..count])?;
+            assert!(request.starts_with("GET /metrics HTTP/1.0\r\n"));
+            let body = concat!(
+                "# HELP cloudflared_tunnel_user_hostnames_counts Which user hostnames cloudflared is serving\n",
+                "cloudflared_tunnel_user_hostnames_counts{userHostname=\"https://metrics-probe.trycloudflare.com\"} 1\n",
+            );
+            let response = format!(
+                "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let discovered = discover_quick_tunnel_url_from_metrics(address)
+            .await?
+            .context("Quick Tunnel metrics fallback returned no hostname")?;
+        assert_eq!(
+            discovered,
+            Url::parse("https://metrics-probe.trycloudflare.com/")?
+        );
+        server.await??;
+        assert!(
+            discover_quick_tunnel_url_from_metrics("192.168.10.20:47822".parse()?)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quick_metrics_probe_rejects_oversized_response() -> Result<()> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 4 * 1_024];
+            let _count = stream.read(&mut request).await?;
+            let body = vec![b'x'; QUICK_TUNNEL_METRICS_MAX_BYTES + 8 * 1_024];
+            let header = format!(
+                "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await?;
+            let _ignored = stream.write_all(&body).await;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let result = discover_quick_tunnel_url_from_metrics(address).await;
+        assert!(result.is_err());
+        server.await??;
         Ok(())
     }
 

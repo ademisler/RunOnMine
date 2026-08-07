@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Make Cloudflare Quick Tunnel runtime discovery resilient to a missed one-shot cloudflared startup URL: when the loopback readiness endpoint is healthy but generation state still has no public URL, recover the strictly validated `trycloudflare.com` hostname from a two-second, 256 KiB-bounded loopback metrics read; retain restart/backoff clearing and generation-bound state semantics.
 - Clarify release evidence boundaries after exercising the owner Mac and hosted workflows: native universal macOS package/CLI/MCP/desktop smoke may pass independently, but FileVault preboot authentication still gates physical reboot acceptance; GitHub billing/spending refusal before checkout remains infrastructure evidence rather than a product failure.
 - Keep the desktop launch smoke portable on macOS by placing its isolated HOME under a short `/tmp` path, preventing Unix-domain single-instance sockets from exceeding the platform `SUN_LEN` limit.
 - Remove the final desktop `too_many_lines` suppressions by decomposing sidebar, overview, approval, connection, permission, OAuth, audit, connector-wizard, policy-editor, and icon rendering into focused helpers; preserve behavior with desktop unit tests, warnings-denied Clippy, and seven-view parity acceptance.

@@ -57,6 +57,7 @@ Status markers:
 - [x] **P1-23 — Distinguish and harden unmanaged external binaries.** CLI and startup distinguish verified managed, pinned external, and unpinned external binaries; optional pins bind canonical path, digest, owner, mode, size, and modification time.
 - [x] **P1-24 — Strengthen connector binary supply-chain verification.** Managed downloads resolve only from embedded 2-of-2 Ed25519 provenance envelopes signed by a shared RunOnMine root plus a provider-specific root; manifests bind the official source repository/commit, release tag and exact platform asset URL/digest/size/format, and signed evidence is retained in new receipts.
 - [x] **P1-25 — Enforce connector-client compatibility ranges.** Setup, doctor, update and startup probe supported stable ranges before activation and preserve the known-good active version on rejection.
+- [x] **P1-26 — Recover missed Quick Tunnel runtime discovery safely.** Keep process output as the normal discovery path, then recover a still-missing generation URL only from bounded loopback cloudflared metrics after readiness; revalidate the hostname against the strict single-label HTTPS `trycloudflare.com` contract and keep restart/backoff cleanup fail-closed.
 
 ## P2 — Architecture, reliability and maintainability
 

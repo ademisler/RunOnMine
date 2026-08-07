@@ -1,6 +1,7 @@
 //! External connector process lifecycle and managed connector artifacts.
 
 use std::collections::{BTreeMap, HashSet};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +9,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures::FutureExt as _;
 use runonmine_connectors::cloudflare::{
-    NamedTunnelConfig, QuickTunnelConfig, parse_quick_tunnel_url,
+    NamedTunnelConfig, QuickTunnelConfig, discover_quick_tunnel_url_from_metrics,
+    parse_quick_tunnel_url,
 };
 use runonmine_connectors::openai::{OpenAiMcpTarget, OpenAiTunnelProfile};
 use runonmine_connectors::{
@@ -229,6 +231,7 @@ struct PendingQuickObserver {
     events: tokio::sync::broadcast::Receiver<ProcessEvent>,
     store: QuickTunnelRuntimeStore,
     generation: QuickTunnelGeneration,
+    metrics_address: SocketAddr,
 }
 
 impl ManagedConnectors {
@@ -315,7 +318,12 @@ impl ManagedConnectors {
 
     fn activate_quick_observers(&mut self, pending: Vec<PendingQuickObserver>) {
         self.observers.extend(pending.into_iter().map(|observer| {
-            spawn_quick_url_observer(observer.events, observer.store, observer.generation)
+            spawn_quick_url_observer(
+                observer.events,
+                observer.store,
+                observer.generation,
+                observer.metrics_address,
+            )
         }));
     }
 
@@ -424,6 +432,7 @@ async fn start_quick_connector(
     let tunnel = QuickTunnelConfig::builder(context.origin.clone())
         .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
         .build()?;
+    let metrics_address = tunnel.metrics_address();
     let mut handle = context.supervisor.start(
         tunnel.command(&binary)?,
         tunnel.health_check()?,
@@ -443,6 +452,7 @@ async fn start_quick_connector(
         events,
         store: context.quick_runtime.clone(),
         generation,
+        metrics_address,
     });
     managed.handles.push(handle);
     Ok(())
@@ -915,6 +925,7 @@ fn spawn_quick_url_observer(
     mut events: tokio::sync::broadcast::Receiver<ProcessEvent>,
     store: QuickTunnelRuntimeStore,
     generation: QuickTunnelGeneration,
+    metrics_address: SocketAddr,
 ) -> QuickObserverHandle {
     let handle_store = store.clone();
     let handle_generation = generation.clone();
@@ -937,6 +948,45 @@ fn spawn_quick_url_observer(
                         );
                     }
                 }
+                Ok(ProcessEvent::HealthChanged { healthy: true, .. }) => {
+                    let missing_url = match store.get(generation.connector_id()) {
+                        Ok(Some(record)) => record.public_url.is_none(),
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::warn!(
+                                connector_id = generation.connector_id(),
+                                %error,
+                                "failed to inspect Quick Tunnel runtime state"
+                            );
+                            false
+                        }
+                    };
+                    if missing_url {
+                        match discover_quick_tunnel_url_from_metrics(metrics_address).await {
+                            Ok(Some(url)) => {
+                                if store.set_url(&generation, &url).is_err() {
+                                    tracing::warn!(
+                                        connector_id = generation.connector_id(),
+                                        "failed to persist Quick Tunnel runtime URL recovered from metrics"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        connector_id = generation.connector_id(),
+                                        "Quick Tunnel runtime URL recovered from loopback metrics"
+                                    );
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::debug!(
+                                    connector_id = generation.connector_id(),
+                                    %error,
+                                    "Quick Tunnel metrics did not yield a runtime URL"
+                                );
+                            }
+                        }
+                    }
+                }
                 Ok(
                     ProcessEvent::HealthChanged { healthy: false, .. }
                     | ProcessEvent::RestartScheduled { .. }
@@ -950,7 +1000,7 @@ fn spawn_quick_url_observer(
                     state: ProcessState::Failed { .. } | ProcessState::Stopped { .. },
                 })
                 | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Ok(ProcessEvent::HealthChanged { .. } | ProcessEvent::StateChanged { .. }) => {}
+                Ok(ProcessEvent::StateChanged { .. }) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(
                         connector_id = generation.connector_id(),
@@ -1633,6 +1683,7 @@ exit 1
             events: sender.subscribe(),
             store: store.clone(),
             generation: generation.clone(),
+            metrics_address: "127.0.0.1:47822".parse()?,
         }];
         let mut managed = ManagedConnectors::default();
         managed.activate_quick_observers(pending);
@@ -1678,6 +1729,52 @@ exit 1
     }
 
     #[tokio::test]
+    async fn quick_url_observer_recovers_missing_url_from_healthy_metrics() -> Result<()> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let temporary = tempfile::tempdir()?;
+        let paths = AppPaths::under(temporary.path().join("runonmine"));
+        paths.ensure()?;
+        let store = QuickTunnelRuntimeStore::new(&paths);
+        let generation = store.begin("metrics-recovery-quick")?;
+        let (sender, _) = tokio::sync::broadcast::channel(16);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let metrics_address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 4 * 1_024];
+            let count = stream.read(&mut request).await?;
+            let request = std::str::from_utf8(&request[..count])?;
+            assert!(request.starts_with("GET /metrics HTTP/1.0\r\n"));
+            let body = "cloudflared_tunnel_user_hostnames_counts{userHostname=\"https://metrics-observer.trycloudflare.com\"} 1\n";
+            let response = format!(
+                "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            Ok::<(), anyhow::Error>(())
+        });
+        let mut managed = ManagedConnectors::default();
+        managed.activate_quick_observers(vec![PendingQuickObserver {
+            events: sender.subscribe(),
+            store: store.clone(),
+            generation,
+            metrics_address,
+        }]);
+
+        sender.send(ProcessEvent::HealthChanged {
+            healthy: true,
+            detail: "ready".to_owned(),
+        })?;
+        let expected = Url::parse("https://metrics-observer.trycloudflare.com/")?;
+        wait_for_quick_url(&store, "metrics-recovery-quick", Some(&expected)).await?;
+        server.await??;
+        managed.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn aborting_quick_observer_removes_generation_state() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let paths = AppPaths::under(temporary.path().join("runonmine"));
@@ -1690,6 +1787,7 @@ exit 1
             events: receiver,
             store: store.clone(),
             generation,
+            metrics_address: "127.0.0.1:47822".parse()?,
         }]);
         managed.stop().await;
         assert!(store.get("aborted-quick")?.is_none());

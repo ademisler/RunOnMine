@@ -177,7 +177,11 @@ detailed endpoint rejects forwarded/public-host requests and never includes
 credentials, child-process output, command lines, or generated public URLs.
 Cloudflare Quick Tunnel discovery is kept separately in private,
 generation-bound runtime state rather than durable configuration; it is cleared
-on restart/backoff and removed on process stop.
+on restart/backoff and removed on process stop. The normal observer consumes the
+public URL from cloudflared process output. If that one-shot line is missed after
+cloudflared reports healthy, RunOnMine can recover the same strictly validated
+`trycloudflare.com` hostname from cloudflared's loopback-only metrics endpoint
+with a two-second, 256 KiB response bound.
 
 ## Security model
 

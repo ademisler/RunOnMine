@@ -104,7 +104,10 @@ real-session validation.
 ARM64 headless acceptance uses an Ubuntu ARM64 cloud image and the canonical
 arm64 DEB. It validates the same headless service and MCP security lifecycle,
 including RunOnMine's managed download and verification of the ARM64
-`cloudflared` binary:
+`cloudflared` binary. Quick Tunnel acceptance requires generation-bound public URL
+discovery; the normal process-output observer may recover a missed one-shot URL
+from cloudflared's healthy loopback metrics endpoint, with the same strict
+`trycloudflare.com` validation and bounded local response contract:
 
 ```console
 sudo ./scripts/acceptance/linux-headless-clean-install-vm.sh \
