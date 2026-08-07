@@ -5,28 +5,28 @@ id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 has not yet completed fresh physical macOS clean-install acceptance. macOS is intentionally deferred until the owner connects the required Mac environment; historical evidence is not reusable."
+evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 has not yet completed fresh physical macOS clean-install acceptance. macOS is intentionally deferred until the owner connects the required Mac environment; historical evidence is not reusable."
 
 [[gate]]
 id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
+evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
 
 [[gate]]
 id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
+evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
 
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
+evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
 
 [[gate]]
 id = "hosted-platform-matrix"
@@ -40,14 +40,14 @@ id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires a fresh Windows LocalSystem/owner/second-user helper-boundary run before this gate can pass; prior evidence remains historical."
+evidence = "Frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 requires a fresh Windows LocalSystem/owner/second-user helper-boundary run before this gate can pass; prior evidence remains historical."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Complete the owner risk review after frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 has fresh candidate-scoped Linux and Windows evidence and the final full-history secret scan result is recorded."
+evidence = "Complete the owner risk review after frozen source 4ee93695430dc7e52e4a61324677cdbedb85ebd1 has fresh candidate-scoped Linux and Windows evidence and the final full-history secret scan result is recorded."
 
 [[gate]]
 id = "external-security-review"
