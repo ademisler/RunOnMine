@@ -5,31 +5,28 @@ id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Narrative documentation changed after the previous freeze. Freeze the intended tag source and rerun this platform acceptance; prior evidence remains historical and must not be reused."
+evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 has not yet completed fresh physical macOS clean-install acceptance. macOS is intentionally deferred until the owner connects the required Mac environment; historical evidence is not reusable."
 
 [[gate]]
 id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 294c80fa7d20f5ed2c1291489201cc4f64e7cbb5 passed Ubuntu 24.04 full-QEMU clean-install acceptance on x86_64 and ARM64. The x86_64 DEB SHA-256 is 6c6bfb75d9206d67226a0e469dff525618871c412b24193474ba7bc07e6c15b3 and the ARM64 DEB SHA-256 is ed60a1235129db03d362d80597dd079a44c7c501a47a1e494e2c89e5f95fdca9. Both architectures proved package lifecycle, verified reboot, user/system service recovery, authenticated MCP approval and deny, managed or verified Cloudflare Quick Tunnel operation, Emergency Lock, uninstall, and zero unexpected residue."
-evidence_file = "acceptance/evidence/linux-x86_64-clean-install.json"
+evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
 
 [[gate]]
 id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 294c80fa7d20f5ed2c1291489201cc4f64e7cbb5 passed Ubuntu 24.04 full-QEMU package lifecycle plus the Oty physical X11 and user D-Bus session for desktop DEB SHA-256 d9303931fbdb4063fdad1f7282cbbacf5da070403b833cba270f681e15780fe0, including seven views, close-to-tray, reopen, single-instance activation, MCP approval and deny, Emergency Lock, uninstall, and zero unexpected residue."
-evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
+evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
 
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 294c80fa7d20f5ed2c1291489201cc4f64e7cbb5 passed owner-controlled Windows Server 2025 Desktop Experience clean-install acceptance for NSIS SHA-256 9186af32cdae50639eda20a5f22c83f6b2b7cc156b0489b6bc587a5a09cdc7bf and portable ZIP SHA-256 7a2e3e705b53063d406d552ac36d0e0bae6a0b085634e4ff9d15111166bc0242. The clean 4-vCPU TCG run proved SDK-independent PE resources, static CRT compatibility, current-user NSIS lifecycle, seven security-control views, native HWND/tray/single-instance behavior, isolated CLI/agent/MCP approval and denied admin execution, verified reboot and Scheduled Task recovery, post-reboot authenticated MCP, Emergency Lock, helper cleanup, uninstall, and zero unexpected residue."
-evidence_file = "acceptance/evidence/windows-x86_64-clean-install.json"
+evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires fresh candidate-scoped acceptance; historical evidence from earlier source revisions remains audit history and must not be reused."
 
 [[gate]]
 id = "hosted-platform-matrix"
@@ -41,16 +38,16 @@ evidence = "Artifact preflight run 31165628252 for freeze commit c5dc9ed ended b
 [[gate]]
 id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
-status = "passed"
+status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Exact source 294c80fa7d20f5ed2c1291489201cc4f64e7cbb5 passed the Windows helper boundary on the owner-authorized Windows Server 2025 VM: the helper ran as LocalSystem, the installing owner connected successfully, a distinct temporary non-admin user token was denied by the named pipe, and repeated helper uninstall was idempotent with the temporary account removed."
+evidence = "Frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 requires a fresh Windows LocalSystem/owner/second-user helper-boundary run before this gate can pass; prior evidence remains historical."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Complete the owner risk review after the next freeze records its exact source revision and fresh candidate-scoped platform evidence."
+evidence = "Complete the owner risk review after frozen source 4fdf7b54457d1c23cbc7b3928ddaad4e8c1a7921 has fresh candidate-scoped Linux and Windows evidence and the final full-history secret scan result is recorded."
 
 [[gate]]
 id = "external-security-review"
