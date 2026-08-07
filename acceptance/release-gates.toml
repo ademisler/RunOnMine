@@ -5,28 +5,28 @@ id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source c1b43350507819ae8ce6358808d20290429e799d has not completed a physical macOS reboot acceptance because FileVault requires interactive preboot owner authentication; build, package, native CLI/MCP, and desktop-smoke evidence may be recorded separately, but historical clean-install evidence is not reusable."
+evidence = "Fresh physical macOS clean-install acceptance is required for the new documentation checkpoint; native package/CLI/MCP/desktop smoke is supplemental until the FileVault-protected reboot cycle completes."
 
 [[gate]]
 id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source c1b43350507819ae8ce6358808d20290429e799d requires fresh candidate-scoped Linux x86_64 and ARM64 clean-install acceptance; historical evidence is not reusable."
+evidence = "Fresh candidate-scoped Linux x86_64 and ARM64 clean-install acceptance is required; historical evidence is retained only as audit history."
 
 [[gate]]
 id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source c1b43350507819ae8ce6358808d20290429e799d requires fresh candidate-scoped Linux desktop acceptance; historical evidence is not reusable."
+evidence = "Fresh candidate-scoped Linux desktop acceptance is required; historical evidence is retained only as audit history."
 
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source c1b43350507819ae8ce6358808d20290429e799d requires fresh candidate-scoped Windows clean-install acceptance; historical evidence is not reusable."
+evidence = "Fresh candidate-scoped Windows clean-install acceptance is required; historical evidence is retained only as audit history."
 
 [[gate]]
 id = "hosted-platform-matrix"
@@ -40,14 +40,14 @@ id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source c1b43350507819ae8ce6358808d20290429e799d requires a fresh Windows LocalSystem/owner/second-user helper-boundary run; prior evidence remains historical."
+evidence = "Fresh candidate-scoped Windows LocalSystem/owner/second-user helper-boundary acceptance is required; historical evidence is retained only as audit history."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Complete the owner risk review after frozen source c1b43350507819ae8ce6358808d20290429e799d has fresh Linux and Windows evidence and the final full-history secret scan result is recorded."
+evidence = "Complete the owner risk review after the new frozen candidate has fresh Linux and Windows evidence and a final complete-history secret scan."
 
 [[gate]]
 id = "external-security-review"
