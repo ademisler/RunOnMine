@@ -5,49 +5,49 @@ id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 60c9836d41b9329484be2560c8e3f67cefd601ce requires physical macOS clean-install acceptance. Native universal package/CLI/MCP/desktop smoke is supplemental until the FileVault-protected reboot cycle completes."
+evidence = "Fresh physical macOS clean-install acceptance is required after the Quick Tunnel recovery fix. Native universal package/CLI/MCP/desktop smoke is supplemental until the FileVault-protected reboot cycle completes."
 
 [[gate]]
 id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 60c9836d41b9329484be2560c8e3f67cefd601ce requires fresh Linux x86_64 and ARM64 clean-install acceptance; historical evidence remains audit history only."
+evidence = "Fresh candidate-scoped Linux x86_64 and ARM64 clean-install acceptance is required after the Quick Tunnel recovery fix; historical evidence remains audit history only."
 
 [[gate]]
 id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 60c9836d41b9329484be2560c8e3f67cefd601ce requires fresh Linux desktop acceptance; historical evidence remains audit history only."
+evidence = "Fresh candidate-scoped Linux desktop acceptance is required after the Quick Tunnel recovery fix; historical evidence remains audit history only."
 
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 60c9836d41b9329484be2560c8e3f67cefd601ce requires fresh Windows clean-install acceptance; historical evidence remains audit history only."
+evidence = "Fresh candidate-scoped Windows clean-install acceptance is required after the Quick Tunnel recovery fix; historical evidence remains audit history only."
 
 [[gate]]
 id = "hosted-platform-matrix"
 description = "Run the macOS ARM64/Intel, Windows x86_64, Linux ARM64, and clean-image artifact-preflight matrix including Linux desktop for the release candidate."
 status = "blocked"
 required_for = ["public-beta"]
-evidence = "Artifact preflight run 31165628252 for freeze commit c5dc9ed ended before checkout on macOS, Windows, Linux x86_64, Linux ARM64, and Linux desktop. GitHub explicitly reported that the jobs were not started because recent account payments failed or the spending limit must be increased; public beta remains blocked until hosted execution is restored."
+evidence = "Artifact preflight run 31207574340 for freeze commit 9d02067 ended before checkout on macOS, Windows, Linux x86_64, Linux ARM64, and Linux desktop. GitHub explicitly reported that the jobs were not started because recent account payments failed or the spending limit must be increased; public beta remains blocked until hosted execution is restored."
 
 [[gate]]
 id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 60c9836d41b9329484be2560c8e3f67cefd601ce requires a fresh Windows LocalSystem/owner/second-user helper-boundary run; historical evidence remains audit history only."
+evidence = "Fresh candidate-scoped Windows LocalSystem/owner/second-user helper-boundary acceptance is required after the Quick Tunnel recovery fix; historical evidence remains audit history only."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "pending"
 required_for = ["private-beta", "public-beta"]
-evidence = "Complete the owner risk review after frozen source 60c9836d41b9329484be2560c8e3f67cefd601ce has fresh Linux and Windows evidence and the final complete-history secret scan is recorded."
+evidence = "Complete the owner risk review after the new frozen candidate has fresh Linux and Windows evidence and the final complete-history secret scan is recorded."
 
 [[gate]]
 id = "external-security-review"
