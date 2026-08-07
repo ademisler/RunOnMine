@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "platform": "linux-x86_64",
-  "artifact": "runonmine-candidate-headless-amd64.deb",
-  "artifact_sha256": "2098f507b9f66dc233d8b62efd10dc001f295e7a5a51cfa031142594c16716e3",
-  "source_revision": "6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a",
+  "artifact": "runonmine_0.1.0-beta.1_amd64.deb",
+  "artifact_sha256": "6c6bfb75d9206d67226a0e469dff525618871c412b24193474ba7bc07e6c15b3",
+  "source_revision": "294c80fa7d20f5ed2c1291489201cc4f64e7cbb5",
   "tester": "Oty QEMU Ubuntu 24.04 acceptance",
-  "tested_at": "2026-08-07T09:59:35.040411Z",
+  "tested_at": "2026-08-07T14:30:21.206906Z",
   "steps": [
     {
       "id": "install",
