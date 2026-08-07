@@ -135,5 +135,5 @@ Status markers:
 - [x] External blockers are explicitly marked `[!]` with owner/platform requirements.
 - [x] Full headless verification passes.
 - [x] CLI and real Streamable HTTP MCP acceptance pass.
-- [x] Exact-candidate evidence is accepted only through the machine-readable release manifest and gates; historical macOS/Linux/Windows reports are never reused for a newer freeze. Publisher signing/notarization, independent security review, hosted-runner allocation, and protected-main availability remain explicit public-beta external gates and are not fabricated by repository CI.
+- [x] Exact-candidate evidence is accepted only through the machine-readable release manifest and gates; historical macOS/Linux/Windows reports are never reused for a newer freeze. Owner-controlled macOS build/package, CLI/MCP, and desktop smoke evidence remains supplemental until the FileVault-protected physical reboot cycle is completed by the owner. Publisher signing/notarization, independent security review, GitHub-hosted execution/billing availability, and protected-main availability remain explicit external gates and are not fabricated by repository CI.
 - [x] `Task.md`, `CHANGELOG.md`, architecture, connections, threat model and platform docs match the implementation.

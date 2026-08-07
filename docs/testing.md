@@ -89,9 +89,11 @@ non-purge uninstall, full purge, and restoration of the pre-existing user
 state.
 
 This acceptance does not substitute for Developer ID signing, Apple
-notarization, or a real operating-system reboot. Unsigned local artifacts are
-expected to fail Gatekeeper assessment until the release credentials are
-provided.
+notarization, or a real operating-system reboot. On a FileVault-enabled owner Mac,
+preboot authentication is deliberately a human step; native universal packaging,
+CLI/MCP smoke, and desktop smoke can be automated before that reboot but cannot
+satisfy the clean-install reboot gate. Unsigned local artifacts are expected to
+fail Gatekeeper assessment until the release credentials are provided.
 
 ## Cross-platform desktop parity acceptance
 

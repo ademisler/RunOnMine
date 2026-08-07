@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Clarify release evidence boundaries after exercising the owner Mac and hosted workflows: native universal macOS package/CLI/MCP/desktop smoke may pass independently, but FileVault preboot authentication still gates physical reboot acceptance; GitHub billing/spending refusal before checkout remains infrastructure evidence rather than a product failure.
 - Keep the desktop launch smoke portable on macOS by placing its isolated HOME under a short `/tmp` path, preventing Unix-domain single-instance sockets from exceeding the platform `SUN_LEN` limit.
 - Remove the final desktop `too_many_lines` suppressions by decomposing sidebar, overview, approval, connection, permission, OAuth, audit, connector-wizard, policy-editor, and icon rendering into focused helpers; preserve behavior with desktop unit tests, warnings-denied Clippy, and seven-view parity acceptance.
 - Record a fresh Windows Server 2025 acceptance cycle for the hardened static-CRT package, including PE resources, interactive seven-view/tray/single-instance behavior, CLI/agent/MCP approval and denied administrator execution, LocalSystem helper second-user denial, verified reboot recovery, Emergency Lock, uninstall, and zero unexpected residue; preserve a CPU-starved TCG WGPU failure separately from the clean 4-vCPU retry.

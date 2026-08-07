@@ -142,6 +142,13 @@ the bounded installer timeout. RunOnMine still checks compatibility and pins the
 external file identity; its SHA-256 is recorded in local acceptance evidence. The
 generated evidence is still reviewed before it is committed.
 
+A FileVault-enabled acceptance Mac cannot complete this procedure unattended. If
+FileVault is on and automatic login is unavailable, `prepare` must not be treated
+as a completed gate: the owner must authenticate at the preboot screen, sign back
+into the same GUI account, and only then run `verify`. Universal package
+verification plus native CLI, MCP, and desktop smoke results are useful
+supplemental evidence, but they do not prove reboot/LaunchAgent recovery.
+
 ## Clean-machine acceptance
 
 For each release artifact, record the exact artifact SHA-256, operating system,

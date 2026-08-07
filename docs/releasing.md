@@ -15,7 +15,10 @@ applicable platform acceptance.
 Public beta additionally remains fail-closed on independent security review,
 publisher signing/notarization, hosted-platform execution, and protected-main
 evidence. A blocked external gate must stay blocked until its actual external
-requirement is satisfied; owner-controlled acceptance is not a substitute.
+requirement is satisfied; owner-controlled acceptance is not a substitute. The
+physical macOS reboot gate is also not equivalent to native smoke: a FileVault
+preboot screen requires owner authentication before post-reboot LaunchAgent/MCP
+recovery can be verified.
 
 ## Required gates
 
@@ -87,8 +90,10 @@ Linux desktop UI dependencies remain outside the headless Linux target.
 
 A hosted job that ends before checkout with no runner name and an empty step list
 is an infrastructure-allocation failure, not product acceptance evidence. Do not
-record it as a passed or failed application test, and do not infer a billing
-cause unless GitHub reports that cause explicitly.
+record it as a passed or failed application test. When GitHub explicitly reports
+failed account payments or an exceeded spending limit, keep the hosted-platform
+gate blocked with that diagnosis until billing/execution is restored; do not
+misclassify the run as a source-code failure.
 
 ## Local packaging helpers
 

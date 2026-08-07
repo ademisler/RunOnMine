@@ -62,8 +62,12 @@ be relabeled for a newer source revision.
 RunOnMine intentionally includes documentation in the frozen source fingerprint.
 Commit product, workflow, packaging, and narrative-documentation changes before
 freezing a candidate; any later non-evidence change requires a new freeze and
-fresh applicable platform acceptance. There is no supported public or production
-release yet.
+fresh applicable platform acceptance. Owner-controlled native macOS build/package,
+CLI, MCP, and desktop smoke results do not replace the physical reboot gate: on a
+FileVault-enabled Mac, that gate requires the owner to complete preboot
+authentication and sign back into the same account. Hosted jobs that GitHub refuses
+to start for account billing/spending reasons likewise remain external blockers,
+not product failures. There is no supported public or production release yet.
 
 Implemented connection modes:
 

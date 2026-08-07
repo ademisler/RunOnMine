@@ -158,6 +158,15 @@ passes PE/resource checks, and retry from a clean overlay with at least four
 vCPUs. Do not weaken the interactive desktop assertions or relabel the failed
 run as product acceptance.
 
+## FileVault blocks unattended macOS reboot acceptance
+
+If the acceptance Mac has FileVault enabled, automatic login is disabled and a
+real reboot stops at the preboot authentication screen. Do not disable FileVault
+or weaken login security for acceptance. Complete the owner login physically,
+return to the same GUI account, and run the `verify` half of
+`macos-clean-install.sh`. Package verification or native smoke before that login
+does not prove reboot recovery.
+
 ## Hosted workflow failed before checkout
 
 Inspect the job's runner name and step list. If the job completed with no runner
