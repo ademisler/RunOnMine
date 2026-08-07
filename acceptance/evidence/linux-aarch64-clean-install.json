@@ -2,10 +2,10 @@
   "schema_version": 1,
   "platform": "linux-aarch64",
   "artifact": "runonmine_0.1.0-beta.1_arm64.deb",
-  "artifact_sha256": "ed60a1235129db03d362d80597dd079a44c7c501a47a1e494e2c89e5f95fdca9",
-  "source_revision": "294c80fa7d20f5ed2c1291489201cc4f64e7cbb5",
+  "artifact_sha256": "a9e3050a8b5c87dd6f7e1d93baa81c1062c828ee4b2aa8988d1a8eabe8479396",
+  "source_revision": "4ee93695430dc7e52e4a61324677cdbedb85ebd1",
   "tester": "Oty QEMU Ubuntu 24.04 ARM64 acceptance",
-  "tested_at": "2026-08-07T14:53:02.731753Z",
+  "tested_at": "2026-08-07T17:11:11.764983Z",
   "steps": [
     {
       "id": "install",
