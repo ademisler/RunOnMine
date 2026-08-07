@@ -61,7 +61,7 @@ Status markers:
 ## P2 — Architecture, reliability and maintainability
 
 - [x] **P2-01 — Split oversized modules.** Desktop rendering is split into a shell plus per-screen view modules; StateStore keeps its public worker/approval surface separate from audit/checkpoint logic, schema migration and tests; MCP keeps the macro-bound tool router separate from runtime identity, server authorization/bootstrap and tests. The connector CLI now routes through typed command-family handlers instead of one monolithic dispatcher.
-- [-] **P2-02 — Break down very long functions.** MCP authorization, connector startup, approval-preview formatting and CLI connector setup use typed requests and focused helpers. Desktop rendering is split by screen, but several isolated legacy screen/form/icon functions retain narrow documented `too_many_lines` suppressions until their sections are extracted with regression coverage; full macOS and headless Clippy otherwise pass with warnings denied.
+- [x] **P2-02 — Break down very long functions.** MCP authorization, connector startup, approval-preview formatting and CLI connector setup use typed requests and focused helpers. Desktop sidebar, overview, approvals, connections, permissions, OAuth, audit, connector-wizard, policy-editor, and icon rendering are split into focused section/action/geometry helpers with no `too_many_lines` suppressions; desktop tests and seven-view parity acceptance guard the refactor while Clippy runs with warnings denied.
 - [x] **P2-03 — Separate desktop model/update/effects/views.** Desktop bootstrap, state model, update/orchestration, background snapshot effects and views live in separate modules; credential and process effects remain outside rendering.
 - [x] **P2-04 — Move desktop refresh work off the UI thread.** Config/secret recovery, SQLite/OAuth reads, incremental audit verification, Quick runtime discovery and bounded connector-health HTTP run in one non-overlapping background snapshot; audit history is incrementally paged to 10,000 records.
 - [x] **P2-05 — Zeroize desktop credential inputs.** Every desktop field whose identity denotes a secret, token, password, API key or credential now uses `Zeroizing<String>`; existing submit/cancel/reset paths perform explicit zeroization and drop wipes remaining capacity.
@@ -131,7 +131,7 @@ Status markers:
 
 ## Final gate
 
-- [-] Release-blocking in-repository tasks are complete; P2-02 remains tracked as non-security maintainability debt.
+- [x] Release-blocking in-repository tasks are complete, including the final desktop long-function decomposition tracked by P2-02.
 - [x] External blockers are explicitly marked `[!]` with owner/platform requirements.
 - [x] Full headless verification passes.
 - [x] CLI and real Streamable HTTP MCP acceptance pass.

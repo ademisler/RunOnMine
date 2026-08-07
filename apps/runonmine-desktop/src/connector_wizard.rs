@@ -33,7 +33,6 @@ pub(crate) struct ConnectorCommand {
 }
 
 impl ConnectorWizardState {
-    #[allow(clippy::too_many_lines)] // Connector form extraction remains tracked in P2-02.
     pub(crate) fn show(
         &mut self,
         context: &egui::Context,
@@ -49,101 +48,186 @@ impl ConnectorWizardState {
             .collapsible(false)
             .resizable(false)
             .default_width(620.0)
-            .show(context, |ui| {
-                theme::section_header(
-                    ui,
-                    "Connect this machine",
-                    "Choose a transport. Sensitive values go to the local CLI over stdin and are never placed in process arguments.",
-                );
-
-                ui.horizontal(|ui| {
-                    connector_choice(
-                        ui,
-                        &mut self.kind,
-                        WizardKind::Quick,
-                        "Quick tunnel",
-                        "Temporary testing",
-                    );
-                    connector_choice(
-                        ui,
-                        &mut self.kind,
-                        WizardKind::CloudflareOAuth,
-                        "Cloudflare OAuth",
-                        "Recommended remote",
-                    );
-                    connector_choice(
-                        ui,
-                        &mut self.kind,
-                        WizardKind::OpenAi,
-                        "OpenAI tunnel",
-                        "Official client",
-                    );
-                });
-                ui.add_space(16.0);
-
-                theme::card(ui, |ui| match self.kind {
-                    WizardKind::Quick => {
-                        theme::section_header(
-                            ui,
-                            "Cloudflare Quick Tunnel",
-                            "Creates a temporary public URL with a random 256-bit secret path.",
-                        );
-                        ui.label(
-                            egui::RichText::new(
-                                "Use this for short tests only. It does not provide a durable user identity layer.",
-                            )
-                            .size(12.0)
-                            .color(theme::WARNING),
-                        );
-                    }
-                    WizardKind::CloudflareOAuth => {
-                        theme::section_header(
-                            ui,
-                            "Cloudflare Named Tunnel + OAuth",
-                            "GitHub verifies the configured machine owner while RunOnMine owns the OAuth flow.",
-                        );
-                        field(ui, "Public hostname", &mut self.hostname, false, "mcp.example.com");
-                        field(ui, "Cloudflare tunnel UUID", &mut self.tunnel_id, false, "00000000-0000-0000-0000-000000000000");
-                        field(ui, "Credentials JSON path", &mut self.credentials_file, false, "/absolute/path/credentials.json");
-                        field(ui, "GitHub OAuth client ID", &mut self.github_client_id, false, "Client ID");
-                        field(ui, "GitHub OAuth client secret", &mut self.github_client_secret, true, "Stored securely");
-                        field(ui, "GitHub owner display login", &mut self.github_owner, false, "username");
-                        field(ui, "GitHub owner numeric ID", &mut self.github_owner_id, false, "123456");
-                    }
-                    WizardKind::OpenAi => {
-                        theme::section_header(
-                            ui,
-                            "OpenAI Secure MCP Tunnel",
-                            "Initializes the official tunnel client against the local stdio connector.",
-                        );
-                        field(ui, "OpenAI tunnel ID", &mut self.tunnel_id, false, "Tunnel ID");
-                        field(ui, "Profile name", &mut self.openai_profile, false, "runonmine");
-                        field(ui, "Runtime API key", &mut self.openai_api_key, true, "Stored securely");
-                    }
-                });
-
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !running,
-                            theme::primary_button(if running {
-                                "Creating connector…"
-                            } else {
-                                "Create connector"
-                            }),
-                        )
-                        .clicked()
-                    {
-                        command = Some(self.command());
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.open = false;
-                    }
-                });
-            });
+            .show(context, |ui| self.show_window(ui, running, &mut command));
         self.open = open && self.open;
         command
+    }
+
+    fn show_window(
+        &mut self,
+        ui: &mut egui::Ui,
+        running: bool,
+        command: &mut Option<ConnectorCommand>,
+    ) {
+        theme::section_header(
+            ui,
+            "Connect this machine",
+            "Choose a transport. Sensitive values go to the local CLI over stdin and are never placed in process arguments.",
+        );
+        self.show_kind_choices(ui);
+        ui.add_space(16.0);
+        theme::card(ui, |ui| self.show_connector_form(ui));
+        ui.add_space(14.0);
+        self.show_actions(ui, running, command);
+    }
+
+    fn show_kind_choices(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            connector_choice(
+                ui,
+                &mut self.kind,
+                WizardKind::Quick,
+                "Quick tunnel",
+                "Temporary testing",
+            );
+            connector_choice(
+                ui,
+                &mut self.kind,
+                WizardKind::CloudflareOAuth,
+                "Cloudflare OAuth",
+                "Recommended remote",
+            );
+            connector_choice(
+                ui,
+                &mut self.kind,
+                WizardKind::OpenAi,
+                "OpenAI tunnel",
+                "Official client",
+            );
+        });
+    }
+
+    fn show_connector_form(&mut self, ui: &mut egui::Ui) {
+        match self.kind {
+            WizardKind::Quick => {
+                theme::section_header(
+                    ui,
+                    "Cloudflare Quick Tunnel",
+                    "Creates a temporary public URL with a random 256-bit secret path.",
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Use this for short tests only. It does not provide a durable user identity layer.",
+                    )
+                    .size(12.0)
+                    .color(theme::WARNING),
+                );
+            }
+            WizardKind::CloudflareOAuth => self.show_cloudflare_oauth_fields(ui),
+            WizardKind::OpenAi => self.show_openai_fields(ui),
+        }
+    }
+
+    fn show_cloudflare_oauth_fields(&mut self, ui: &mut egui::Ui) {
+        theme::section_header(
+            ui,
+            "Cloudflare Named Tunnel + OAuth",
+            "GitHub verifies the configured machine owner while RunOnMine owns the OAuth flow.",
+        );
+        field(
+            ui,
+            "Public hostname",
+            &mut self.hostname,
+            false,
+            "mcp.example.com",
+        );
+        field(
+            ui,
+            "Cloudflare tunnel UUID",
+            &mut self.tunnel_id,
+            false,
+            "00000000-0000-0000-0000-000000000000",
+        );
+        field(
+            ui,
+            "Credentials JSON path",
+            &mut self.credentials_file,
+            false,
+            "/absolute/path/credentials.json",
+        );
+        field(
+            ui,
+            "GitHub OAuth client ID",
+            &mut self.github_client_id,
+            false,
+            "Client ID",
+        );
+        field(
+            ui,
+            "GitHub OAuth client secret",
+            &mut self.github_client_secret,
+            true,
+            "Stored securely",
+        );
+        field(
+            ui,
+            "GitHub owner display login",
+            &mut self.github_owner,
+            false,
+            "username",
+        );
+        field(
+            ui,
+            "GitHub owner numeric ID",
+            &mut self.github_owner_id,
+            false,
+            "123456",
+        );
+    }
+
+    fn show_openai_fields(&mut self, ui: &mut egui::Ui) {
+        theme::section_header(
+            ui,
+            "OpenAI Secure MCP Tunnel",
+            "Initializes the official tunnel client against the local stdio connector.",
+        );
+        field(
+            ui,
+            "OpenAI tunnel ID",
+            &mut self.tunnel_id,
+            false,
+            "Tunnel ID",
+        );
+        field(
+            ui,
+            "Profile name",
+            &mut self.openai_profile,
+            false,
+            "runonmine",
+        );
+        field(
+            ui,
+            "Runtime API key",
+            &mut self.openai_api_key,
+            true,
+            "Stored securely",
+        );
+    }
+
+    fn show_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        running: bool,
+        command: &mut Option<ConnectorCommand>,
+    ) {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !running,
+                    theme::primary_button(if running {
+                        "Creating connector…"
+                    } else {
+                        "Create connector"
+                    }),
+                )
+                .clicked()
+            {
+                *command = Some(self.command());
+            }
+            if ui.button("Cancel").clicked() {
+                self.open = false;
+            }
+        });
     }
 
     pub(crate) fn clear_secrets(&mut self) {

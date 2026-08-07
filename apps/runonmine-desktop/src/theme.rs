@@ -404,7 +404,6 @@ pub(crate) fn ring_gauge(ui: &mut egui::Ui, score: u32, label: &str) {
     );
 }
 
-#[allow(clippy::too_many_lines)] // Icon variants stay centralized while extraction is tracked in P2-02.
 fn paint_icon(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -412,8 +411,30 @@ fn paint_icon(
     color: egui::Color32,
     width: f32,
 ) {
+    match icon {
+        Icon::Home | Icon::Clipboard | Icon::Link | Icon::Shield | Icon::Key => {
+            paint_navigation_icon(painter, rect, icon, color, width);
+        }
+        Icon::FileText | Icon::Wrench | Icon::Lock | Icon::Monitor | Icon::Folder => {
+            paint_resource_icon(painter, rect, icon, color, width);
+        }
+        Icon::Activity
+        | Icon::AlertTriangle
+        | Icon::Refresh
+        | Icon::ChevronRight
+        | Icon::Check
+        | Icon::Server => paint_status_icon(painter, rect, icon, color, width),
+    }
+}
+
+fn paint_navigation_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    icon: Icon,
+    color: egui::Color32,
+    width: f32,
+) {
     let stroke = egui::Stroke::new(width, color);
-    let c = rect.center();
     let w = rect.width();
     let h = rect.height();
     let p = |x: f32, y: f32| egui::pos2(rect.left() + x * w, rect.top() + y * h);
@@ -472,6 +493,22 @@ fn paint_icon(
             painter.line_segment([p(0.68, 0.70), p(0.77, 0.61)], stroke);
             painter.line_segment([p(0.75, 0.77), p(0.84, 0.68)], stroke);
         }
+        _ => {}
+    }
+}
+
+fn paint_resource_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    icon: Icon,
+    color: egui::Color32,
+    width: f32,
+) {
+    let stroke = egui::Stroke::new(width, color);
+    let w = rect.width();
+    let h = rect.height();
+    let p = |x: f32, y: f32| egui::pos2(rect.left() + x * w, rect.top() + y * h);
+    match icon {
         Icon::FileText => {
             painter.rect_stroke(
                 egui::Rect::from_min_max(p(0.22, 0.10), p(0.78, 0.90)),
@@ -533,6 +570,23 @@ fn paint_icon(
                 stroke,
             ));
         }
+        _ => {}
+    }
+}
+
+fn paint_status_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    icon: Icon,
+    color: egui::Color32,
+    width: f32,
+) {
+    let stroke = egui::Stroke::new(width, color);
+    let center = rect.center();
+    let w = rect.width();
+    let h = rect.height();
+    let p = |x: f32, y: f32| egui::pos2(rect.left() + x * w, rect.top() + y * h);
+    match icon {
         Icon::Activity => {
             painter.line_segment([p(0.08, 0.58), p(0.28, 0.58)], stroke);
             painter.line_segment([p(0.28, 0.58), p(0.40, 0.28)], stroke);
@@ -548,42 +602,13 @@ fn paint_icon(
             painter.line_segment([p(0.50, 0.32), p(0.50, 0.59)], stroke);
             painter.circle_filled(p(0.50, 0.71), width * 0.75, color);
         }
-        Icon::Refresh => {
-            painter.add(egui::epaint::PathShape::line(
-                vec![p(0.78, 0.36), p(0.88, 0.20), p(0.69, 0.18)],
-                stroke,
-            ));
-            painter.add(egui::epaint::PathShape::line(
-                vec![
-                    p(0.83, 0.28),
-                    p(0.66, 0.13),
-                    p(0.44, 0.10),
-                    p(0.24, 0.22),
-                    p(0.14, 0.42),
-                ],
-                stroke,
-            ));
-            painter.add(egui::epaint::PathShape::line(
-                vec![p(0.22, 0.64), p(0.12, 0.80), p(0.31, 0.82)],
-                stroke,
-            ));
-            painter.add(egui::epaint::PathShape::line(
-                vec![
-                    p(0.17, 0.72),
-                    p(0.34, 0.87),
-                    p(0.56, 0.90),
-                    p(0.76, 0.78),
-                    p(0.86, 0.58),
-                ],
-                stroke,
-            ));
-        }
+        Icon::Refresh => paint_refresh_icon(painter, stroke, &p),
         Icon::ChevronRight => {
             painter.line_segment([p(0.34, 0.18), p(0.66, 0.50)], stroke);
             painter.line_segment([p(0.66, 0.50), p(0.34, 0.82)], stroke);
         }
         Icon::Check => {
-            painter.circle_stroke(c, w * 0.42, stroke);
+            painter.circle_stroke(center, w * 0.42, stroke);
             painter.line_segment([p(0.28, 0.51), p(0.44, 0.67)], stroke);
             painter.line_segment([p(0.44, 0.67), p(0.73, 0.35)], stroke);
         }
@@ -603,5 +628,41 @@ fn paint_icon(
             painter.circle_filled(p(0.27, 0.30), width, color);
             painter.circle_filled(p(0.27, 0.70), width, color);
         }
+        _ => {}
     }
+}
+
+fn paint_refresh_icon(
+    painter: &egui::Painter,
+    stroke: egui::Stroke,
+    p: &impl Fn(f32, f32) -> egui::Pos2,
+) {
+    painter.add(egui::epaint::PathShape::line(
+        vec![p(0.78, 0.36), p(0.88, 0.20), p(0.69, 0.18)],
+        stroke,
+    ));
+    painter.add(egui::epaint::PathShape::line(
+        vec![
+            p(0.83, 0.28),
+            p(0.66, 0.13),
+            p(0.44, 0.10),
+            p(0.24, 0.22),
+            p(0.14, 0.42),
+        ],
+        stroke,
+    ));
+    painter.add(egui::epaint::PathShape::line(
+        vec![p(0.22, 0.64), p(0.12, 0.80), p(0.31, 0.82)],
+        stroke,
+    ));
+    painter.add(egui::epaint::PathShape::line(
+        vec![
+            p(0.17, 0.72),
+            p(0.34, 0.87),
+            p(0.56, 0.90),
+            p(0.76, 0.78),
+            p(0.86, 0.58),
+        ],
+        stroke,
+    ));
 }

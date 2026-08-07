@@ -1,58 +1,64 @@
 use super::super::{RunOnMineDesktop, StatusTone, UiIcon, egui, theme};
 
 impl RunOnMineDesktop {
-    #[allow(clippy::too_many_lines)] // Screen-section extraction remains tracked in P2-02.
     pub(super) fn show_audit(&mut self, ui: &mut egui::Ui) {
+        self.show_audit_integrity(ui);
+        ui.add_space(18.0);
+        self.show_audit_records(ui);
+    }
+
+    fn show_audit_integrity(&self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Audit integrity")
+                            .size(17.0)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Records are linked through a tamper-evident hash chain.",
+                        )
+                        .size(12.0)
+                        .color(theme::MUTED),
+                    );
+                    if let Some(report) = self.audit_verification {
                         ui.label(
-                            egui::RichText::new("Audit integrity")
-                                .size(17.0)
-                                .strong()
-                                .color(theme::TEXT),
-                        );
-                        ui.label(
-                            egui::RichText::new(
-                                "Records are linked through a tamper-evident hash chain.",
-                            )
-                            .size(12.0)
+                            egui::RichText::new(format!(
+                                "{} verification · {} new record(s) checked · checkpoint #{} · tail #{}",
+                                if report.full { "Full" } else { "Incremental" },
+                                report.records_verified,
+                                report.checkpoint_sequence,
+                                report.tail_sequence,
+                            ))
+                            .size(10.5)
+                            .monospace()
                             .color(theme::MUTED),
                         );
-                        if let Some(report) = self.audit_verification {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} verification · {} new record(s) checked · checkpoint #{} · tail #{}",
-                                    if report.full { "Full" } else { "Incremental" },
-                                    report.records_verified,
-                                    report.checkpoint_sequence,
-                                    report.tail_sequence,
-                                ))
-                                .size(10.5)
-                                .monospace()
-                                .color(theme::MUTED),
-                            );
-                        }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        theme::status_badge(
-                            ui,
-                            match self.audit_valid {
-                                Some(true) => "Verified",
-                                Some(false) => "Failed",
-                                None => "Unknown",
-                            },
-                            match self.audit_valid {
-                                Some(true) => StatusTone::Success,
-                                Some(false) => StatusTone::Danger,
-                                None => StatusTone::Warning,
-                            },
-                        );
-                    });
+                    }
                 });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::status_badge(
+                        ui,
+                        match self.audit_valid {
+                            Some(true) => "Verified",
+                            Some(false) => "Failed",
+                            None => "Unknown",
+                        },
+                        match self.audit_valid {
+                            Some(true) => StatusTone::Success,
+                            Some(false) => StatusTone::Danger,
+                            None => StatusTone::Warning,
+                        },
+                    );
+                });
+            });
         });
-        ui.add_space(18.0);
+    }
 
+    fn show_audit_records(&mut self, ui: &mut egui::Ui) {
         if self.audit.is_empty() {
             theme::empty_state(
                 ui,

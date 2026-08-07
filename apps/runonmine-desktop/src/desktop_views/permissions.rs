@@ -1,8 +1,15 @@
 use super::super::{PolicyPreset, RunOnMineDesktop, egui, theme};
 
 impl RunOnMineDesktop {
-    #[allow(clippy::too_many_lines)] // Screen-section extraction remains tracked in P2-02.
     pub(super) fn show_permissions(&mut self, ui: &mut egui::Ui) {
+        self.show_filesystem_roots(ui);
+        ui.add_space(18.0);
+        self.show_policy_presets(ui);
+        ui.add_space(18.0);
+        self.show_policy_editor(ui);
+    }
+
+    fn show_filesystem_roots(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
             theme::section_header(
                 ui,
@@ -55,8 +62,9 @@ impl RunOnMineDesktop {
                 self.apply_result(result);
             }
         });
+    }
 
-        ui.add_space(18.0);
+    fn show_policy_presets(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
             theme::section_header(
                 ui,
@@ -130,17 +138,19 @@ impl RunOnMineDesktop {
                 .color(theme::WARNING),
             );
         });
+    }
 
-        ui.add_space(18.0);
-        if let Some(config) = self.config.clone() {
-            match self.policy_editor.show(ui, &config) {
-                Ok(Some(action)) => {
-                    let result = self.apply_policy_action(action);
-                    self.apply_result(result);
-                }
-                Ok(None) => {}
-                Err(error) => self.error = Some(error.to_string()),
+    fn show_policy_editor(&mut self, ui: &mut egui::Ui) {
+        let Some(config) = self.config.clone() else {
+            return;
+        };
+        match self.policy_editor.show(ui, &config) {
+            Ok(Some(action)) => {
+                let result = self.apply_policy_action(action);
+                self.apply_result(result);
             }
+            Ok(None) => {}
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
 }

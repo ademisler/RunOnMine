@@ -16,7 +16,6 @@ mod overview;
 mod permissions;
 
 impl RunOnMineDesktop {
-    #[allow(clippy::too_many_lines)] // Sidebar section extraction remains tracked in P2-02.
     fn render_sidebar(&mut self, ui: &mut egui::Ui, sidebar_rect: egui::Rect) -> bool {
         let sidebar_inner = sidebar_rect.shrink2(egui::vec2(17.0, 18.0));
         let mut sidebar = ui.new_child(
@@ -27,6 +26,26 @@ impl RunOnMineDesktop {
         sidebar.set_width(sidebar_inner.width());
         sidebar.set_height(sidebar_inner.height());
 
+        Self::render_sidebar_brand(&mut sidebar);
+        sidebar.add_space(20.0);
+        let setup_required = self.sidebar_setup_required();
+        self.render_sidebar_status(&mut sidebar, setup_required);
+
+        let navigation_top = sidebar.cursor().top() + 18.0;
+        let footer_height = 76.0;
+        let footer_rect = egui::Rect::from_min_max(
+            egui::pos2(sidebar_inner.left(), sidebar_inner.bottom() - footer_height),
+            sidebar_inner.max,
+        );
+        let navigation_rect = egui::Rect::from_min_max(
+            egui::pos2(sidebar_inner.left(), navigation_top),
+            egui::pos2(sidebar_inner.right(), footer_rect.top() - 8.0),
+        );
+        self.render_sidebar_navigation(ui, navigation_rect);
+        Self::render_sidebar_footer(ui, footer_rect)
+    }
+
+    fn render_sidebar_brand(sidebar: &mut egui::Ui) {
         sidebar.horizontal(|ui| {
             egui::Frame::new()
                 .fill(theme::ACCENT)
@@ -55,18 +74,21 @@ impl RunOnMineDesktop {
                 );
             });
         });
-        sidebar.add_space(20.0);
+    }
 
-        let setup_required = self
-            .config
+    fn sidebar_setup_required(&self) -> bool {
+        self.config
             .as_ref()
-            .is_none_or(|config| config.allowed_roots.is_empty());
+            .is_none_or(|config| config.allowed_roots.is_empty())
+    }
+
+    fn render_sidebar_status(&mut self, sidebar: &mut egui::Ui, setup_required: bool) {
         let setup_response = egui::Frame::new()
             .fill(theme::SURFACE_ALT)
             .stroke(egui::Stroke::new(1.0, theme::BORDER))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 11))
-            .show(&mut sidebar, |ui| {
+            .show(sidebar, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     theme::icon_box(
@@ -84,17 +106,18 @@ impl RunOnMineDesktop {
                     );
                     ui.add_space(3.0);
                     ui.vertical(|ui| {
+                        let title = if setup_required {
+                            "Setup required"
+                        } else if self.agent_reachable {
+                            "System ready"
+                        } else {
+                            "Agent offline"
+                        };
                         ui.label(
-                            egui::RichText::new(if setup_required {
-                                "Setup required"
-                            } else if self.agent_reachable {
-                                "System ready"
-                            } else {
-                                "Agent offline"
-                            })
-                            .size(12.5)
-                            .strong()
-                            .color(theme::TEXT),
+                            egui::RichText::new(title)
+                                .size(12.5)
+                                .strong()
+                                .color(theme::TEXT),
                         );
                         ui.label(
                             egui::RichText::new(if setup_required {
@@ -120,43 +143,36 @@ impl RunOnMineDesktop {
                 Tab::Overview
             };
         }
-        let navigation_top = sidebar.cursor().top() + 18.0;
-        let footer_height = 76.0;
-        let footer_rect = egui::Rect::from_min_max(
-            egui::pos2(sidebar_inner.left(), sidebar_inner.bottom() - footer_height),
-            sidebar_inner.max,
-        );
-        let navigation_rect = egui::Rect::from_min_max(
-            egui::pos2(sidebar_inner.left(), navigation_top),
-            egui::pos2(sidebar_inner.right(), footer_rect.top() - 8.0),
-        );
-        if navigation_rect.height() > 1.0 {
-            let mut navigation = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(navigation_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            navigation.set_clip_rect(navigation_rect);
-            navigation.set_width(navigation_rect.width());
-            egui::ScrollArea::vertical()
-                .id_salt("sidebar-navigation")
-                .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(&mut navigation, |ui| {
-                    ui.set_width(ui.available_width());
-                    for (tab, icon, label) in Tab::ALL {
-                        let badge = (tab == Tab::Approvals).then_some(self.pending.len());
-                        if theme::nav_item(ui, icon, label, self.selected_tab == tab, badge)
-                            .clicked()
-                        {
-                            self.selected_tab = tab;
-                        }
-                        ui.add_space(4.0);
-                    }
-                });
-        }
+    }
 
-        let mut lock_requested = false;
+    fn render_sidebar_navigation(&mut self, ui: &mut egui::Ui, navigation_rect: egui::Rect) {
+        if navigation_rect.height() <= 1.0 {
+            return;
+        }
+        let mut navigation = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(navigation_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        navigation.set_clip_rect(navigation_rect);
+        navigation.set_width(navigation_rect.width());
+        egui::ScrollArea::vertical()
+            .id_salt("sidebar-navigation")
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(&mut navigation, |ui| {
+                ui.set_width(ui.available_width());
+                for (tab, icon, label) in Tab::ALL {
+                    let badge = (tab == Tab::Approvals).then_some(self.pending.len());
+                    if theme::nav_item(ui, icon, label, self.selected_tab == tab, badge).clicked() {
+                        self.selected_tab = tab;
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+    }
+
+    fn render_sidebar_footer(ui: &mut egui::Ui, footer_rect: egui::Rect) -> bool {
         let mut footer = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(footer_rect)
@@ -183,17 +199,13 @@ impl RunOnMineDesktop {
             })
             .response
             .interact(egui::Sense::click());
-        if lock.clicked() {
-            lock_requested = true;
-        }
         footer.add_space(9.0);
         footer.label(
             egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                 .size(10.5)
                 .color(theme::MUTED),
         );
-
-        lock_requested
+        lock.clicked()
     }
 
     fn render_content(&mut self, ui: &mut egui::Ui, content_rect: egui::Rect) {

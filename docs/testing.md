@@ -132,6 +132,9 @@ entry, launches `/usr/bin/runonmine-desktop`, removes the package, and verifies
 that its executable and menu entry are gone. The headless Linux package remains
 a separate artifact and is not replaced by this acceptance path.
 
+
+Desktop screen, form, sidebar, and icon rendering is intentionally decomposed into focused helpers rather than suppressing `clippy::too_many_lines`. Warnings-denied desktop Clippy, the desktop unit suite, and this seven-view parity smoke are the regression guards for structure-only UI refactors.
+
 ## Windows desktop and NSIS acceptance
 
 The Windows smoke test defaults to interactive acceptance: it starts the native
