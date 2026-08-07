@@ -26,9 +26,10 @@ evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Narrative documentation changed after the previous freeze. Freeze the intended tag source and rerun this platform acceptance; prior evidence remains historical and must not be reused."
+evidence = "Exact source 294c80fa7d20f5ed2c1291489201cc4f64e7cbb5 passed owner-controlled Windows Server 2025 Desktop Experience clean-install acceptance for NSIS SHA-256 9186af32cdae50639eda20a5f22c83f6b2b7cc156b0489b6bc587a5a09cdc7bf and portable ZIP SHA-256 7a2e3e705b53063d406d552ac36d0e0bae6a0b085634e4ff9d15111166bc0242. The clean 4-vCPU TCG run proved SDK-independent PE resources, static CRT compatibility, current-user NSIS lifecycle, seven security-control views, native HWND/tray/single-instance behavior, isolated CLI/agent/MCP approval and denied admin execution, verified reboot and Scheduled Task recovery, post-reboot authenticated MCP, Emergency Lock, helper cleanup, uninstall, and zero unexpected residue."
+evidence_file = "acceptance/evidence/windows-x86_64-clean-install.json"
 
 [[gate]]
 id = "hosted-platform-matrix"
@@ -40,9 +41,9 @@ evidence = "Artifact preflight run 31165628252 for freeze commit c5dc9ed ended b
 [[gate]]
 id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "A fresh frozen candidate requires a matching Windows helper-boundary run before this gate can pass; prior LocalSystem/owner/second-user evidence remains historical."
+evidence = "Exact source 294c80fa7d20f5ed2c1291489201cc4f64e7cbb5 passed the Windows helper boundary on the owner-authorized Windows Server 2025 VM: the helper ran as LocalSystem, the installing owner connected successfully, a distinct temporary non-admin user token was denied by the named pipe, and repeated helper uninstall was idempotent with the temporary account removed."
 
 [[gate]]
 id = "owner-risk-review"
