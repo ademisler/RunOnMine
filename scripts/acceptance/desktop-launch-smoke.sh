@@ -5,7 +5,14 @@ if [[ ! -x "$binary" ]]; then
   echo "desktop binary is missing or not executable" >&2
   exit 2
 fi
-sandbox=$(mktemp -d)
+if [[ $(uname -s) == Darwin ]]; then
+  # macOS Unix-domain sockets have a short sockaddr_un path limit. Keep the
+  # isolated HOME under /tmp so the desktop single-instance socket remains
+  # below SUN_LEN while preserving the same filesystem isolation contract.
+  sandbox=$(mktemp -d /tmp/rm.XXXXXX)
+else
+  sandbox=$(mktemp -d)
+fi
 pid=""
 cleanup() {
   if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi

@@ -95,6 +95,8 @@ provided.
 
 ## Cross-platform desktop parity acceptance
 
+`desktop-launch-smoke.sh` uses a deliberately short `/tmp` sandbox on macOS because the native single-instance transport is a Unix-domain socket and Darwin enforces a small socket-path limit; Linux keeps the platform-default temporary directory.
+
 `desktop-parity-smoke.sh` launches the actual desktop binary under an isolated
 D-Bus/Xvfb session. The application renders Overview, Approvals, Connections,
 Permissions, OAuth, Audit, and Diagnostics in order, keeps the final frame alive
