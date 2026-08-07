@@ -26,9 +26,10 @@ evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
 [[gate]]
 id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a has not yet completed fresh Windows clean-install acceptance. The prior 1a0ba3d evidence is historical; hosted Windows preflight for the new freeze was blocked before checkout by GitHub account payment/spending limits."
+evidence = "Exact source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a passed owner-controlled Windows Server 2025 Desktop Experience clean-install acceptance for NSIS SHA-256 6f190c6bc85bdc3c3a9bfa1a43fe7a802e7ccc454dc8a4759d24c8d2bcfdd0f7 and portable ZIP SHA-256 f527c81b8cefaedd038ffc02bc2d1a28cc7c1c2f1775355da510ec8569b657a6. The run proved PE resources and static CRT compatibility, seven desktop views, tray and single-instance behavior, CLI/agent/MCP approval and denied admin execution, verified reboot recovery, Emergency Lock, uninstall, and zero unexpected residue."
+evidence_file = "acceptance/evidence/windows-x86_64-clean-install.json"
 
 [[gate]]
 id = "hosted-platform-matrix"
@@ -40,16 +41,16 @@ evidence = "Artifact preflight run 31165628252 for freeze commit c5dc9ed ended b
 [[gate]]
 id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "The prior real-Windows helper review belongs to source 1a0ba3d. Frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a changes Windows runtime linkage and therefore requires fresh LocalSystem/owner/second-user helper-boundary evidence before this gate can pass."
+evidence = "Exact source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a passed the Windows helper boundary on the owner-authorized Windows Server 2025 VM: the helper ran as LocalSystem, the installing owner connected successfully, a distinct temporary non-admin user token was denied by the named pipe, and repeated helper uninstall was idempotent with the temporary account removed."
 
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Owner-directed review for frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a records full local verification, a complete-history Gitleaks scan with no leaks, fresh Linux x86_64/desktop/ARM64 artifact hashes and clean-install evidence, and the remaining macOS, Windows, hosted-CI, signing, independent-review, and protected-main blockers. No old candidate evidence is treated as current."
+evidence = "Owner-directed review for frozen source 6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a records full local verification, a complete-history Gitleaks scan with no leaks, fresh Linux x86_64/desktop/ARM64 and Windows clean-install evidence, the fresh Windows helper boundary, and the remaining macOS, hosted-CI, signing, independent-review, and protected-main blockers. No old candidate evidence is treated as current."
 
 [[gate]]
 id = "external-security-review"

@@ -2,14 +2,14 @@
   "schema_version": 1,
   "platform": "windows-x86_64",
   "artifact": "runonmine-desktop_0.1.0-beta.1_x64-setup.exe",
-  "artifact_sha256": "da837ae1193371e7ff8a926ec4f685fde9eccf0d0ede6c31d685dc4771cbb7c6",
-  "source_revision": "1a0ba3d134f40fc95b9e8c52a95132fff061acb0",
+  "artifact_sha256": "6f190c6bc85bdc3c3a9bfa1a43fe7a802e7ccc454dc8a4759d24c8d2bcfdd0f7",
+  "source_revision": "6d93b2ff0f7c82a672eb00eb20e60c1b89e2e95a",
   "tester": "OpenAI automated acceptance on owner-authorized Windows Server 2025 Desktop Experience VM",
-  "tested_at": "2026-08-06T12:49:34.3722672Z",
+  "tested_at": "2026-08-07T13:36:48.8740258Z",
   "steps": [
     {
       "status": "passed",
-      "evidence": "current-user NSIS metadata, four static-CRT binaries, shortcuts and installed application flow verified",
+      "evidence": "current-user NSIS metadata, four binaries, shortcuts and installed application flow verified",
       "id": "install"
     },
     {
@@ -34,7 +34,7 @@
     },
     {
       "status": "passed",
-      "evidence": "LocalHttp connector served authenticated MCP after reboot and the session was deleted",
+      "evidence": "LocalHttp connector served authenticated MCP after reboot",
       "id": "connector"
     },
     {
@@ -59,12 +59,12 @@
     },
     {
       "status": "passed",
-      "evidence": "helper, Scheduled Task, connector, user data and NSIS package were removed; helper uninstall was idempotent",
+      "evidence": "helper, Scheduled Task, user data and NSIS package were removed; helper uninstall was idempotent",
       "id": "uninstall"
     },
     {
       "status": "passed",
-      "evidence": "uninstall record, managed files, tasks, helper, data files, processes and port 47821 were absent; empty application directories were removed",
+      "evidence": "uninstall record, install files, tasks, helper, data, processes and port 47821 were absent",
       "id": "residue_check"
     }
   ],
