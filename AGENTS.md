@@ -19,6 +19,7 @@ Before opening a pull request, run:
 
 ```console
 python3 scripts/ci/check-docs.py
+python3 scripts/release/check-duplicate-dependencies.py
 cargo run --locked -p xtask -- verify
 ```
 
