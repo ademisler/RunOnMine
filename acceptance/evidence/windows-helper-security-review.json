@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "platform": "windows-x86_64-helper",
+  "source_revision": "03db4cbcf733c406f71dbc8a0870de34187cd268",
+  "artifact_sha256": "1fe65be5a130443cfaf99ef48d3c8b87ca7424883ed2f527fc62f0318f22b584",
+  "tested_at": "2026-08-08T02:47:17.1259869Z",
+  "raw_helper_log_sha256": "9d1cdac5d82da5daa0e2d385901c3ed64c1cb0eccc6e7eb0ab2106797a1a1e06",
+  "assertions": [
+    {
+      "id": "service_identity",
+      "status": "passed",
+      "evidence": "RunOnMineHelper was registered and observed running as LocalSystem before the cross-user IPC test."
+    },
+    {
+      "id": "owner_access",
+      "status": "passed",
+      "evidence": "The installing Administrator owner completed the helper health path successfully."
+    },
+    {
+      "id": "second_user_pipe_denial",
+      "status": "passed",
+      "evidence": "A real temporary non-admin second-user token was denied by the RunOnMine.Helper named pipe."
+    },
+    {
+      "id": "idempotent_uninstall",
+      "status": "passed",
+      "evidence": "Two consecutive helper uninstall operations completed successfully."
+    },
+    {
+      "id": "cleanup",
+      "status": "passed",
+      "evidence": "The temporary second user and RunOnMineHelper service were absent after the test; helper stderr was empty."
+    }
+  ],
+  "stderr_bytes": 0,
+  "residues": []
+}
