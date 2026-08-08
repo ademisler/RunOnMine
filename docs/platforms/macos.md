@@ -63,9 +63,10 @@ The release workflow performs the same universal merge and package contract.
 The private-beta DMG and every bundled Mach-O use ad-hoc code signatures with
 hardened runtime, and the application resource envelope is sealed. This proves
 bundle integrity but does not establish a publisher identity or Apple trust.
-The private beta is not Developer ID signed or notarized, so Gatekeeper
+Unsigned/ad-hoc beta builds are not Developer ID signed or notarized, so Gatekeeper
 rejection remains expected on quarantined downloads. Do not remove quarantine
-attributes as a substitute for a signed public release. Setting
+attributes as a substitute for publisher trust. Public beta may remain unsigned
+when this limitation is explicit and all required release gates pass. Setting
 `RUNONMINE_APPLE_SIGNING_IDENTITY` switches the same script to the fail-closed
 Developer ID/notarization path and requires the documented Apple credentials.
 

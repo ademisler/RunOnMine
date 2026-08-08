@@ -42,8 +42,10 @@ A beta candidate must pass formatting, Clippy, tests, dependency policy, full
 Git-history secret scanning, the enforced coverage floor, scheduled fuzzing,
 platform builds, clean-machine acceptance tests, and an owner risk review. The
 tag workflow reads `acceptance/release-gates.toml` and fails while required
-evidence is pending or blocked. The recorded frozen candidate completed the
-private-beta platform gates, but its artifacts remain unsigned and limited to
-owner-authorized testing. Public or production support remains blocked until
-publisher signing and every public-beta gate are complete. Changes after a
-freeze require a new candidate and may not reuse prior platform evidence.
+evidence is pending or blocked. The previously recorded frozen candidate completed its then-applicable private-beta
+platform gates, but later source changes invalidated that freeze. Public beta may
+ship unsigned when that limitation is explicit; publisher signing, notarization,
+and independent external review are recommended hardening rather than mandatory
+beta gates. Every gate declared for the selected release profile must still pass.
+Changes after a freeze require a new candidate and may not reuse prior platform
+evidence.

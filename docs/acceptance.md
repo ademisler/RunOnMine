@@ -2,8 +2,8 @@
 
 RunOnMine controls real machines. Unit tests and package creation are necessary,
 but they are not sufficient evidence for a beta release. A release tag is
-blocked until the machine-readable gates in `acceptance/release-gates.toml` are
-marked `passed` with evidence.
+blocked until every machine-readable gate required for the selected profile in
+`acceptance/release-gates.toml` is marked `passed` with evidence.
 
 Check the current state with:
 
@@ -209,4 +209,6 @@ where applicable, uninstall, and residue checks. A job that ends before checkout
 with no assigned runner and no executed steps is not acceptance evidence. Its
 report type is `artifact_preflight_not_release_acceptance` and explicitly does
 not claim an operating-system reboot, publisher signature or notarization.
-Those items remain required evidence for the release clean-install gate.
+Reboot and clean-install behavior require separate exact-candidate acceptance.
+Publisher signature/notarization are recorded when present but are not mandatory
+for an explicitly unsigned beta.

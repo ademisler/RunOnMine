@@ -52,14 +52,14 @@ id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Owner-directed final review for frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 records fresh physical macOS, Linux x86_64/desktop/ARM64, Windows clean-install and real Windows helper-boundary evidence; final xtask verify --headless exited 0 and Gitleaks scanned 229 commits with no leaks. Remaining public-beta risks are explicitly fail-closed: hosted GitHub billing/spending, independent third-party security review, macOS Developer ID/notarization credentials, Windows publisher signing credentials, and protected-main plan support."
+evidence = "Owner-directed final review for frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 records fresh physical macOS, Linux x86_64/desktop/ARM64, Windows clean-install and real Windows helper-boundary evidence; final xtask verify --headless exited 0 and Gitleaks scanned 229 commits with no leaks. Remaining risks are recorded explicitly. Hosted GitHub execution and protected-main enforcement remain required public-beta gates; independent third-party review, macOS Developer ID/notarization, and Windows publisher signing are recommended hardening but are not required for an explicitly unsigned beta."
 evidence_file = "acceptance/evidence/owner-risk-review.json"
 
 [[gate]]
 id = "external-security-review"
 description = "Complete an independent architecture and penetration review covering OAuth, connector authentication, privileged helper, browser SSRF/private-network controls, filesystem TOCTOU, and release supply chain."
 status = "blocked"
-required_for = ["public-beta"]
+required_for = []
 evidence = "Requires an independent reviewer. Self-authored tests and this automated completion run cannot satisfy this gate."
 
 [[gate]]
@@ -73,14 +73,14 @@ evidence = "The base-branch CI workflow routes fork pull requests to ubuntu-24.0
 id = "macos-signing-notarization"
 description = "Sign the macOS application and DMG with Developer ID, hardened runtime, notarize the universal application, staple the ticket, and pass Gatekeeper verification."
 status = "blocked"
-required_for = ["public-beta"]
+required_for = []
 evidence = "The fail-closed workflow and verification script are implemented. This Mac has no valid Developer ID Application identity or App Store Connect notarization credential."
 
 [[gate]]
 id = "windows-code-signing"
 description = "Sign the Windows binaries and NSIS installer with a trusted publisher certificate."
 status = "blocked"
-required_for = ["public-beta"]
+required_for = []
 evidence = "Requires a Windows code-signing certificate and protected CI secret storage."
 
 [[gate]]

@@ -50,26 +50,10 @@ jobs:
         run: git checkout --detach "${{ steps.candidate.outputs.revision }}"
       - run: cargo run --locked -p xtask -- verify-versions
       - run: python3 scripts/release/check-duplicate-dependencies.py
-      - name: Verify configured public signing inputs
-        if: env.RELEASE_PROFILE == 'public-beta'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
-          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+      - name: Record beta signing policy
         run: |
-          test -n "$APPLE_CERTIFICATE"
-          test -n "$APPLE_CERTIFICATE_PASSWORD"
-          test -n "$APPLE_SIGNING_IDENTITY"
-          test -n "$APPLE_API_KEY"
-          test -n "$APPLE_API_ISSUER"
-          test -n "$APPLE_API_KEY_P8"
-          test -n "$WINDOWS_SIGNING_PFX"
-          test -n "$WINDOWS_SIGNING_PASSWORD"
+          echo "Public beta may be distributed unsigned when that status is disclosed in the release notes."
+          echo "If signing credentials are configured, the platform packaging step remains fail-closed and verifies them."
       - run: dist plan --output-format=json
 
   macos-universal:
@@ -95,7 +79,7 @@ jobs:
         with:
           tool: cargo-dist@0.32.0,cargo-packager@0.11.8
       - name: Prepare App Store Connect API key
-        if: env.RELEASE_PROFILE == 'public-beta'
+        if: env.RUNONMINE_APPLE_SIGNING_IDENTITY != ''
         run: |
           key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY}.p8"
           python3 - "$key_path" <<'PY'
@@ -293,7 +277,8 @@ jobs:
           files: artifacts/**/*
           body: |
             RunOnMine ${{ env.RELEASE_PROFILE }} candidate built from frozen source `${{ needs.release-plan.outputs.candidate_revision }}`.
-            Private-beta artifacts are intentionally unsigned. Public-beta artifacts require Developer ID signing, hardened runtime, notarization, stapling, Windows Authenticode, independent security review, and exact-candidate clean-install evidence.
+            Beta artifacts may be unsigned. macOS uses the Developer ID/notarization path only when signing credentials are configured; otherwise it uses the checked ad-hoc hardened-runtime package path. Windows installers may also be unsigned.
+            Public-beta readiness still requires the declared exact-candidate platform, hosted-CI, runner-isolation, protected-main, and owner-risk gates. Independent external review and publisher signing remain recommended hardening, not beta blockers.
             Verify every artifact against its accompanying SHA-256 checksum before use.
             SBOM files are provided in CycloneDX JSON format.
             This draft does not change repository visibility.

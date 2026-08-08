@@ -129,6 +129,7 @@ pass the Windows clean-install gate only after rebooted Windows Server 2025 or
 equivalent owner-controlled acceptance proves the native desktop, Scheduled Task
 recovery, MCP approval/deny, LocalSystem helper boundary, uninstall, and zero
 unexpected residue for that exact source and artifact hash. Current status is
-recorded in `acceptance/release-gates.toml`. Public release remains blocked until
-Authenticode publisher signing and the other public-beta gates are implemented
-and recorded.
+recorded in `acceptance/release-gates.toml`. An unsigned public beta is permitted
+when the release notes state the unrecognized-publisher/SmartScreen limitation
+and every required public-beta gate passes; Authenticode remains recommended
+publisher-trust hardening.

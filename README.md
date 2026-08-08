@@ -67,7 +67,7 @@ connectors, and OpenAI Secure MCP Tunnel. See
 | **Windows x86_64** | Current-user NSIS desktop installer from Releases |
 | **Linux x86_64** | Desktop DEB or headless DEB from Releases |
 | **Linux ARM64** | Headless DEB from Releases |
-| **macOS 12+** | Native source build; public signed/notarized DMG is pending |
+| **macOS 12+** | Native source build today; beta DMGs may be unsigned when explicitly disclosed |
 
 Private-beta installers are not publisher-signed production builds. Verify the
 adjacent SHA-256 checksum asset before running a downloaded package.
@@ -108,8 +108,7 @@ service assumptions to a server.
 
 ### macOS 12+
 
-Until the public notarized installer is available, build the native app from
-source. You need Xcode Command Line Tools and Rust; the repository pins Rust
+For the current beta, build the native app from source. You need Xcode Command Line Tools and Rust; the repository pins Rust
 `1.95.0` in `rust-toolchain.toml`.
 
 ```console
