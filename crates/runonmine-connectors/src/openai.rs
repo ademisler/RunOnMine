@@ -486,7 +486,7 @@ mod tests {
             "local-stdio",
             "tunnel_0123456789abcdef0123456789abcdef",
             OpenAiMcpTarget::Stdio {
-                executable: PathBuf::from("/opt/runonmine/bin/runonmine"),
+                executable: std::env::current_exe()?,
                 args: Vec::new(),
             },
         )

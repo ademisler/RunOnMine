@@ -196,7 +196,13 @@ fn shell_command(command: &str) -> (&'static str, Vec<&str>) {
     {
         (
             "powershell.exe",
-            vec!["-NoLogo", "-NonInteractive", "-Command", command],
+            vec![
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
         )
     }
     #[cfg(target_os = "macos")]
@@ -228,6 +234,7 @@ mod tests {
         .await?;
         assert_eq!(result.stdout, "hello");
         assert_eq!(result.exit_code, Some(0));
+        assert!(!result.timed_out);
         Ok(())
     }
 
@@ -249,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn output_below_the_combined_budget_is_not_truncated() -> Result<()> {
         #[cfg(windows)]
-        let command = "Write-Output 'out'; [Console]::Error.Write('err')";
+        let command = "[Console]::Out.Write('out'); [Console]::Error.Write('err')";
         #[cfg(not(windows))]
         let command = "printf out; printf err >&2";
         let result = execute_shell(&ProcessRequest {
@@ -262,6 +269,7 @@ mod tests {
         assert_eq!(result.stdout.trim(), "out");
         assert_eq!(result.stderr, "err");
         assert!(!result.truncated);
+        assert!(!result.timed_out);
         Ok(())
     }
 
@@ -303,6 +311,7 @@ mod tests {
         })
         .await?;
         assert_eq!(result.stdout.trim(), "missing");
+        assert!(!result.timed_out);
         Ok(())
     }
 

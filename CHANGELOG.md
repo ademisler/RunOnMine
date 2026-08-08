@@ -5,6 +5,15 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Preserve the canonical selected-root identity on Windows while also accepting the exact normalized root spelling the owner selected (including short/verbatim alias differences); requests still execute descriptor-relative through the already-open canonical capability.
+- Make the combined process-output budget test use direct console streams on Windows so it measures RunOnMine capture rather than PowerShell output-stream formatting.
+- Launch Windows PowerShell commands with `-NoProfile` so owner or runner profiles cannot inject background descendants into RunOnMine process groups or delay output capture until timeout.
+
+- Start core state-schema migrations with an immediate SQLite transaction so concurrent agent writes are waited out instead of producing `SQLITE_BUSY_SNAPSHOT` during short-lived CLI opens; keep the existing bounded busy timeout and migration lock.
+- Make the arbitrary loopback-port OpenAI profile test use the current platform executable so the accepted-port regression is portable to Windows.
+
+- Make Linux browser security tests deterministic on cold GitHub-hosted runners by waiting for the complete Chromium lease identity and separating startup budget from the intentionally short timeout-recovery deadline; production browser deadlines and match criteria are unchanged.
+
 - Make protected-main enforcement match the public workflow surface: add stable Platform matrix and Dependency review checks, keep external Actions SHA-pinned, and support a solo-maintainer PR policy with zero mandatory reviewers until a second trusted maintainer is available.
 
 - Prepare the repository for public contribution with canonical Apache-2.0 licensing, official website package metadata, a support policy, public-beta security wording, and explicit owner-only controls for visibility and release publication.

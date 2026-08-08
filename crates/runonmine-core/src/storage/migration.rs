@@ -1,12 +1,24 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::audit_store::audit_anchor;
 use super::{ApprovalPrincipal, AuditMacKey, STATE_SCHEMA_VERSION};
 
-pub(super) fn migrate(connection: &Connection, audit_mac: &AuditMacKey) -> Result<()> {
-    let transaction = connection.unchecked_transaction()?;
+pub(super) fn migrate(connection: &mut Connection, audit_mac: &AuditMacKey) -> Result<()> {
+    if let Some(current) = current_state_schema_version(connection)? {
+        if current > STATE_SCHEMA_VERSION {
+            bail!(
+                "state database schema version {current} is newer than supported version {STATE_SCHEMA_VERSION}"
+            );
+        }
+        if current == STATE_SCHEMA_VERSION {
+            validate_current_schema(connection)?;
+            return Ok(());
+        }
+    }
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_versions (
             component TEXT PRIMARY KEY,
@@ -43,6 +55,50 @@ pub(super) fn migrate(connection: &Connection, audit_mac: &AuditMacKey) -> Resul
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+fn current_state_schema_version(connection: &Connection) -> Result<Option<i64>> {
+    if !table_exists(connection, "schema_versions")? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT version FROM schema_versions WHERE component = 'core_state'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn validate_current_schema(connection: &Connection) -> Result<()> {
+    for table in [
+        "approvals",
+        "temporary_grants",
+        "persistent_grants",
+        "audit_events",
+        "audit_chain_state",
+        "audit_verification_checkpoint",
+    ] {
+        if !table_exists(connection, table)? {
+            bail!("current state schema is missing required table {table}");
+        }
+    }
+    for (table, column) in [
+        ("approvals", "principal_fingerprint"),
+        ("temporary_grants", "principal_fingerprint"),
+        ("persistent_grants", "principal_fingerprint"),
+        ("audit_verification_checkpoint", "sequence"),
+        ("audit_verification_checkpoint", "record_hash"),
+        ("audit_verification_checkpoint", "record_mac"),
+        ("audit_verification_checkpoint", "checkpoint_mac"),
+        ("audit_verification_checkpoint", "verified_at"),
+    ] {
+        if !table_has_column(connection, table, column)? {
+            bail!("current state schema is missing required column {table}.{column}");
+        }
+    }
+    validate_audit_integrity_v3_schema(connection)
 }
 
 fn migrate_principal_bound_approvals(connection: &Connection) -> Result<()> {

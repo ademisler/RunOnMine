@@ -1806,7 +1806,7 @@ mod tests {
             false,
             1_024 * 1_024,
             Some(detected.path.clone()),
-            Duration::from_secs(10),
+            DEFAULT_BROWSER_OPERATION_TIMEOUT,
         );
 
         let before = session.info().await?;
@@ -1848,15 +1848,16 @@ mod tests {
         }
         let temporary = tempfile::tempdir()?;
         let profile = temporary.path().join("profile");
-        let session = BrowserSession::with_operation_timeout(
+        let mut session = BrowserSession::with_operation_timeout(
             BrowserProfile::isolated_ephemeral(profile.clone()),
             true,
             false,
             1_024 * 1_024,
-            Duration::from_secs(5),
+            DEFAULT_BROWSER_OPERATION_TIMEOUT,
         );
 
         assert_eq!(session.open("about:blank").await?, "about:blank");
+        session.operation_timeout = Duration::from_millis(250);
         let result = session
             .run_with_deadline("test_active_hang", async {
                 let _slot = session.active.lock().await;
@@ -1877,6 +1878,7 @@ mod tests {
         );
         assert!(!profile.exists());
 
+        session.operation_timeout = DEFAULT_BROWSER_OPERATION_TIMEOUT;
         assert_eq!(session.open("about:blank").await?, "about:blank");
         assert!(session.info().await?.active);
         session.close().await?;

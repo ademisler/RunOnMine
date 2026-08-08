@@ -219,6 +219,7 @@ machine automation is harmless:
 - MCP is never bound directly to a public network interface.
 - Remote connectors cannot approve their own dangerous requests.
 - Remote administrator execution is denied by a non-bypassable safety ceiling.
+- Shell processes start from a cleared environment; Windows PowerShell profiles are disabled.
 - The optional privileged helper is **absent by default** and requires separate,
   explicit installation.
 - Filesystem tools operate inside explicitly selected roots.

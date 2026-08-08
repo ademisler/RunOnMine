@@ -17,6 +17,8 @@ pub struct ScopedFilesystem {
 #[derive(Clone)]
 struct RootCapability {
     path: PathBuf,
+    #[cfg(windows)]
+    requested_path: PathBuf,
     dir: Arc<Dir>,
 }
 
@@ -68,6 +70,8 @@ impl ScopedFilesystem {
                 bail!("allowed root is not a directory: {}", resolved.display());
             }
             let identity = root_identity_path(&requested, &resolved);
+            #[cfg(windows)]
+            let requested_identity = filesystem_identity_path(&requested);
             if canonical_roots.contains(&identity) {
                 continue;
             }
@@ -79,6 +83,8 @@ impl ScopedFilesystem {
             canonical_roots.push(identity.clone());
             capabilities.push(RootCapability {
                 path: identity,
+                #[cfg(windows)]
+                requested_path: requested_identity,
                 dir: Arc::new(dir),
             });
         }
@@ -341,7 +347,14 @@ impl ScopedFilesystem {
         let absolute = filesystem_identity_path(&absolute);
         let mut selected: Option<(&RootCapability, PathBuf)> = None;
         for root in &self.roots {
-            if let Ok(relative) = absolute.strip_prefix(&root.path) {
+            #[cfg(windows)]
+            let relative = absolute
+                .strip_prefix(&root.path)
+                .ok()
+                .or(absolute.strip_prefix(&root.requested_path).ok());
+            #[cfg(not(windows))]
+            let relative = absolute.strip_prefix(&root.path).ok();
+            if let Some(relative) = relative {
                 let relative = relative.to_path_buf();
                 if selected.as_ref().is_none_or(|(current, _)| {
                     root.path.as_os_str().len() > current.path.as_os_str().len()
@@ -603,6 +616,27 @@ mod tests {
             scoped.resolve_existing(Path::new("private/report.txt"))?
         );
         assert!(scoped.resolve_policy_path(Path::new("../outside")).is_err());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn requested_windows_root_spelling_maps_to_canonical_selected_root() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let scoped = ScopedFilesystem::new(&[root.path().to_path_buf()])?;
+        let canonical = scoped
+            .roots()
+            .into_iter()
+            .next()
+            .context("selected filesystem root is missing")?;
+        let requested_target = root.path().join("mapped.txt");
+
+        assert_eq!(
+            scoped.resolve_policy_path(&requested_target)?,
+            canonical.join("mapped.txt")
+        );
+        scoped.write_atomic(&requested_target, b"mapped")?;
+        assert_eq!(std::fs::read(canonical.join("mapped.txt"))?, b"mapped");
         Ok(())
     }
 
