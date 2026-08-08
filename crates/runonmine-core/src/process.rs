@@ -249,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn output_below_the_combined_budget_is_not_truncated() -> Result<()> {
         #[cfg(windows)]
-        let command = "Write-Output 'out'; [Console]::Error.Write('err')";
+        let command = "[Console]::Out.Write('out'); [Console]::Error.Write('err')";
         #[cfg(not(windows))]
         let command = "printf out; printf err >&2";
         let result = execute_shell(&ProcessRequest {

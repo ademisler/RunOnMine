@@ -26,6 +26,14 @@ manifest, Per-Monitor V2 DPI awareness, and long-path awareness. The NSIS packag
 The helper binary being present does not install or activate the LocalSystem
 helper. That requires a separate explicitly elevated `runonmine admin install`.
 
+Selected filesystem roots keep one canonical execution identity. Windows may
+report the same directory with a verbatim or expanded spelling that differs
+from the absolute path originally selected by the owner; RunOnMine accepts that
+exact selected-root spelling as an alias only to derive the relative path, then
+performs the operation through the already-open canonical directory capability.
+Changing an alias later cannot retarget the capability outside the selected
+root.
+
 ## User service
 
 The normal agent is copied into the immutable per-user versioned service-binary
