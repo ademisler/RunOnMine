@@ -124,9 +124,11 @@ program. Its executable handle uses `FILE_FLAG_OPEN_REPARSE_POINT` and
 `FILE_SHARE_READ` only; reparse attributes, volume serial, file index, size,
 last-write identity, and digest are rechecked before process creation.
 
-Desktop capture and input require an interactive session. The Windows-specific
-PowerShell tool starts the fixed system PowerShell executable with no profile and
-non-interactive flags, then passes the script over stdin. Privileged helper
+Desktop capture and input require an interactive session. Windows shell tool calls
+start the fixed system PowerShell executable with `-NoLogo`, `-NoProfile`, and
+`-NonInteractive`, then pass the already-authorized command through `-Command`.
+This keeps owner or runner profiles from injecting descendants into the bounded
+process group or delaying output capture. Privileged helper
 upgrades stage executable and policy before stopping the Windows service, wait
 for SCM to report `STOPPED`, and restore the previous files, registration, start
 type, and running state after a failed start or health validation.
