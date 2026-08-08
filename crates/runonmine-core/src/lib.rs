@@ -57,7 +57,7 @@ pub use storage::{
 
 /// Product identifier used for OS integration and MCP metadata.
 pub const PRODUCT_NAME: &str = "RunOnMine";
-/// Default loopback port for the RunOnMine agent.
+/// Default loopback port for the `RunOnMine` agent.
 pub const DEFAULT_PORT: u16 = 47_821;
 /// Current configuration schema version.
 pub const CONFIG_VERSION: u32 = 1;
