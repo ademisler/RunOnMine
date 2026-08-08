@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Resolve tag-triggered release builds as `public-beta` instead of silently falling back to `private-beta`; manual release dispatches retain their explicit profile selection.
 - Preserve the canonical selected-root identity on Windows while also accepting the exact normalized root spelling the owner selected (including short/verbatim alias differences); requests still execute descriptor-relative through the already-open canonical capability.
 - Make the combined process-output budget test use direct console streams on Windows so it measures RunOnMine capture rather than PowerShell output-stream formatting.
 - Launch Windows PowerShell commands with `-NoProfile` so owner or runner profiles cannot inject background descendants into RunOnMine process groups or delay output capture until timeout.
