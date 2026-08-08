@@ -1,9 +1,10 @@
 <div align="center">
   <img src="packaging/assets/runonmine.svg" width="108" alt="RunOnMine logo">
   <h1>RunOnMine</h1>
-  <p><strong>Let AI work on the machines you own — through a local security boundary you control.</strong></p>
+  <p><strong>Let AI work. Keep control local.</strong></p>
   <p>A local-first Model Context Protocol (MCP) gateway and desktop control center for macOS, Linux, and Windows.</p>
   <p>
+    <a href="https://runonmine.github.io/">Website</a> ·
     <a href="#install">Install</a> ·
     <a href="#quick-start">Quick start</a> ·
     <a href="#how-it-works">How it works</a> ·
