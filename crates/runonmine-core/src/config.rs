@@ -596,9 +596,6 @@ fn validate_app_endpoint(config: &AppConfig) -> Result<()> {
             config.bind_host
         );
     }
-    if config.port == 45_799 {
-        bail!("port 45799 is reserved for the existing MacMCP installation");
-    }
     if config.port == 0 {
         bail!("RunOnMine agent port must be non-zero");
     }
@@ -952,7 +949,7 @@ fn is_private_regular_file(path: &Path) -> Result<bool> {
 }
 
 fn validate_auxiliary_port(port: u16, agent_port: u16) -> Result<()> {
-    if port == 0 || port == agent_port || port == 45_799 {
+    if port == 0 || port == agent_port {
         bail!("connector auxiliary port is invalid or reserved");
     }
     Ok(())
@@ -976,12 +973,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refuses_legacy_port() {
+    fn accepts_arbitrary_nonzero_loopback_port() {
         let config = AppConfig {
-            port: 45_799,
+            port: 49_152,
             ..AppConfig::default()
         };
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
     }
 
     fn test_openai_connector(id: &str, enabled: bool, health_port: u16) -> ConnectorConfig {

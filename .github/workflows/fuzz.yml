@@ -13,18 +13,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HOME: /home/runonmine-ci
-  USER: runonmine-ci
-  LOGNAME: runonmine-ci
-  CARGO_HOME: /home/runonmine-ci/.cargo
-  RUSTUP_HOME: /home/runonmine-ci/.rustup
-  PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   RUSTFLAGS: -C target-feature=-crt-static
   CARGO_INCREMENTAL: 0
 
 jobs:
   fuzz-target:
-    runs-on: [self-hosted, Linux, X64, runonmine]
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:
       group: fuzz-${{ matrix.target }}
@@ -45,8 +39,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
-      - name: Verify isolated runner environment
-        run: ./scripts/ci/verify-runner-environment.sh
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh nightly-2026-07-18
       - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5

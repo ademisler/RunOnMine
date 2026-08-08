@@ -5,6 +5,12 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Prepare the repository for public contribution with canonical Apache-2.0 licensing, official website package metadata, a support policy, public-beta security wording, and explicit owner-only controls for visibility and release publication.
+
+- Move all repository Linux quality, security, coverage, fuzz, mutation, and soak jobs from the persistent RunOnMine runner to ephemeral GitHub-hosted Ubuntu; install pinned Gitleaks explicitly and remove owner-specific runner HOME/PATH assumptions before public visibility.
+
+- Define public beta as an exact-candidate, hosted-CI and protected-main quality profile that may ship explicitly unsigned; Developer ID/notarization, Windows Authenticode, and independent external review remain recommended hardening and become fail-closed only when their signing paths are configured.
+
 - Make Cloudflare Quick Tunnel runtime discovery resilient to a missed one-shot cloudflared startup URL: when the loopback readiness endpoint is healthy but generation state still has no public URL, recover the strictly validated `trycloudflare.com` hostname from a two-second, 256 KiB-bounded loopback metrics read; retain restart/backoff clearing and generation-bound state semantics.
 - Clarify release evidence boundaries after exercising the owner Mac and hosted workflows: native universal macOS package/CLI/MCP/desktop smoke may pass independently, but FileVault preboot authentication still gates physical reboot acceptance; GitHub billing/spending refusal before checkout remains infrastructure evidence rather than a product failure.
 - Keep the desktop launch smoke portable on macOS by placing its isolated HOME under a short `/tmp` path, preventing Unix-domain single-instance sockets from exceeding the platform `SUN_LEN` limit.
@@ -17,7 +23,7 @@ pre-release development and does not yet provide compatibility guarantees.
 - Synchronize status, security, platform, testing, acceptance, release, and audit-task documentation with the recorded candidate and the requirement to refreeze after post-candidate changes.
 
 - Freeze release candidates to an exact committed source fingerprint, invalidate acceptance after any later production/workflow/package/documentation change, require passed platform evidence to name that candidate and artifact hash, and make release jobs build the frozen revision instead of evidence-only commits.
-- Complete the macOS product lifecycle: enable the owner-private Unix-socket single-instance contract, add a universal DMG/reboot/LaunchAgent/MCP/Quick-Tunnel/lock/uninstall/residue harness with an optional canonical pinned cloudflared input for constrained networks, package DMGs without Finder automation prompts, and preserve MacMCP services and loopback port 45799 as explicit acceptance invariants.
+- Complete the macOS product lifecycle: enable the owner-private Unix-socket single-instance contract, add a universal DMG/reboot/LaunchAgent/MCP/Quick-Tunnel/lock/uninstall/residue harness with an optional canonical pinned cloudflared input for constrained networks, package DMGs without Finder automation prompts, and preserve unrelated pre-existing local services and listeners as explicit acceptance invariants.
 - Add a fail-closed Apple distribution path using Developer ID, hardened runtime, App Store Connect notarization, stapling, signed DMG and Gatekeeper verification; private-beta artifacts use ad-hoc hardened-runtime signatures and sealed resources without claiming publisher identity or notarization.
 - Route untrusted fork pull requests to GitHub-hosted Ubuntu while reserving the persistent self-hosted `runonmine` runner for trusted owner branches, with checksum-pinned Gitleaks bootstrap on the hosted path.
 - Add source-controlled RunOnMine artwork, a macOS ICNS, a secure first-run desktop card, Safe/Developer/Automation product-profile guidance, a concise security-flow diagram, and a dedicated onboarding guide that makes privileged-helper separation and Emergency Lock visible.

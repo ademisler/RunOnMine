@@ -33,9 +33,8 @@ Use `local-http rotate --token-output <new-absolute-file>` to replace and export
 a token, `local-http status --token-output <new-absolute-file>` to recover the
 current credential through the same secure channel, or `local-http disable` to
 remove access. Omitting `--token-output` keeps the token only in the credential
-store. The agent listens on `127.0.0.1:47821`;
-configuration rejects public bind addresses and reserves port `45799` for the
-existing MacMCP installation.
+store. The agent listens on `127.0.0.1:47821` by default; configuration rejects public
+bind addresses and requires a non-zero loopback port.
 
 ## Degraded connector startup
 

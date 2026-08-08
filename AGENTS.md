@@ -9,7 +9,7 @@
 - Approval grants must be scoped to the exact connector, tool, and argument hash unless a separately reviewed policy feature explicitly narrows a resource boundary.
 - Dangerous actions must fail closed when authorization or audit persistence is unavailable.
 - Do not weaken selected-root filesystem checks, managed-binary receipt verification, process environment clearing, output limits, or process-tree termination.
-- Port `45799` belongs to the existing MacMCP installation and must remain untouched.
+- Do not stop, rewrite, or claim ownership of unrelated local services, listeners, or application data during development or acceptance.
 
 ## Development workflow
 
@@ -35,5 +35,5 @@ Dependency advisories are release blockers. Do not add an advisory exception wit
 - Keep migrations forward-compatible and reject unknown future schema versions.
 - Update `README.md`, `CHANGELOG.md`, and the relevant file under `docs/` when behavior changes.
 - Do not commit generated `target/`, local state databases, credentials, browser profiles, release artifacts, or machine-specific configuration.
-- Keep the repository private unless the owner explicitly changes that decision.
-- Do not change the consolidated self-hosted Linux quality and scheduled-job runner strategy without an explicit owner request; migration of those Linux jobs is planned separately.
+- Do not change repository visibility, publish a release, or transfer repository ownership without explicit owner approval.
+- Do not attach persistent self-hosted runners to the public repository. CI and scheduled repository workflows must use ephemeral GitHub-hosted runners unless a separately reviewed isolation design is introduced.

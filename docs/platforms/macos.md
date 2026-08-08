@@ -60,12 +60,13 @@ cargo run --locked -p xtask -- checksums
 
 The release workflow performs the same universal merge and package contract.
 
-The private-beta DMG and every bundled Mach-O use ad-hoc code signatures with
+The unsigned beta DMG path and every bundled Mach-O use ad-hoc code signatures with
 hardened runtime, and the application resource envelope is sealed. This proves
 bundle integrity but does not establish a publisher identity or Apple trust.
-The private beta is not Developer ID signed or notarized, so Gatekeeper
+Unsigned/ad-hoc beta builds are not Developer ID signed or notarized, so Gatekeeper
 rejection remains expected on quarantined downloads. Do not remove quarantine
-attributes as a substitute for a signed public release. Setting
+attributes as a substitute for publisher trust. Public beta may remain unsigned
+when this limitation is explicit and all required release gates pass. Setting
 `RUNONMINE_APPLE_SIGNING_IDENTITY` switches the same script to the fail-closed
 Developer ID/notarization path and requires the documented Apple credentials.
 
@@ -90,7 +91,7 @@ secrets. The separately elevated privileged helper is not removed by either
 operation; run `sudo runonmine admin uninstall` before deleting the bundle when
 that helper was explicitly installed.
 
-## Privileged helper and MacMCP boundary
+## Privileged helper and service ownership
 
 The optional privileged helper is installed only through `sudo runonmine admin
 install` and authenticates the local peer with `getpeereid`. It accepts only
@@ -105,5 +106,5 @@ not claim descriptor-path execution. Helper upgrades stage the executable,
 policy, and launchd plist before booting out the old daemon. A failed bootstrap
 or health check restores prior files and the former loaded/running state.
 
-The existing `com.idemasler.macmcp.*` services, port `45799`, and MacMCP config,
-logs, and data are outside RunOnMine's ownership and must not be modified.
+Unrelated launchd services, listeners, configuration, logs, and application data
+are outside RunOnMine's ownership and must not be modified.

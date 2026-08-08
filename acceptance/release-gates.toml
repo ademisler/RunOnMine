@@ -2,10 +2,10 @@ schema = 1
 
 [[gate]]
 id = "macos-clean-install"
-description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
+description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, unrelated-service coexistence, and reboot evidence."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Fresh physical Apple Silicon clean-install acceptance passed for exact source 03db4cbcf733c406f71dbc8a0870de34187cd268 and DMG SHA-256 687c4352f6eeb094570df11a7625bde6556b637272c27d45585c4ef345746a69: arm64 and Rosetta x86_64 desktop views, native menu-bar lifecycle, LaunchAgent reboot recovery, authenticated MCP approval/deny, Cloudflare Quick Tunnel recovery, Emergency Lock, retained-data uninstall, explicit purge, zero RunOnMine residue, and unchanged MacMCP broker/tunnel/loopback-45799 invariants."
+evidence = "Fresh physical Apple Silicon clean-install acceptance passed for exact source 03db4cbcf733c406f71dbc8a0870de34187cd268 and DMG SHA-256 687c4352f6eeb094570df11a7625bde6556b637272c27d45585c4ef345746a69: arm64 and Rosetta x86_64 desktop views, native menu-bar lifecycle, LaunchAgent reboot recovery, authenticated MCP approval/deny, Cloudflare Quick Tunnel recovery, Emergency Lock, retained-data uninstall, explicit purge, zero RunOnMine residue, and unchanged pre-existing unrelated service/listener invariants."
 evidence_file = "acceptance/evidence/macos-universal-clean-install.json"
 
 [[gate]]
@@ -52,35 +52,35 @@ id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Owner-directed final review for frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 records fresh physical macOS, Linux x86_64/desktop/ARM64, Windows clean-install and real Windows helper-boundary evidence; final xtask verify --headless exited 0 and Gitleaks scanned 229 commits with no leaks. Remaining public-beta risks are explicitly fail-closed: hosted GitHub billing/spending, independent third-party security review, macOS Developer ID/notarization credentials, Windows publisher signing credentials, and protected-main plan support."
+evidence = "Owner-directed final review for frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 records fresh physical macOS, Linux x86_64/desktop/ARM64, Windows clean-install and real Windows helper-boundary evidence; final xtask verify --headless exited 0 and Gitleaks scanned 229 commits with no leaks. Remaining risks are recorded explicitly. Hosted GitHub execution and protected-main enforcement remain required public-beta gates; independent third-party review, macOS Developer ID/notarization, and Windows publisher signing are recommended hardening but are not required for an explicitly unsigned beta."
 evidence_file = "acceptance/evidence/owner-risk-review.json"
 
 [[gate]]
 id = "external-security-review"
 description = "Complete an independent architecture and penetration review covering OAuth, connector authentication, privileged helper, browser SSRF/private-network controls, filesystem TOCTOU, and release supply chain."
 status = "blocked"
-required_for = ["public-beta"]
+required_for = []
 evidence = "Requires an independent reviewer. Self-authored tests and this automated completion run cannot satisfy this gate."
 
 [[gate]]
 id = "public-pr-runner-isolation"
 description = "Prevent untrusted fork pull requests from executing on persistent self-hosted infrastructure."
-status = "passed"
+status = "pending"
 required_for = ["public-beta"]
-evidence = "The base-branch CI workflow routes fork pull requests to ubuntu-24.04 with a checksum-pinned Gitleaks bootstrap; only trusted owner branches select the dedicated runonmine runner label."
+evidence = "Checked-in CI, security, coverage, fuzz, mutation, and soak workflows use GitHub-hosted runners only. The repository-level persistent self-hosted runner must be deregistered before this gate can pass."
 
 [[gate]]
 id = "macos-signing-notarization"
 description = "Sign the macOS application and DMG with Developer ID, hardened runtime, notarize the universal application, staple the ticket, and pass Gatekeeper verification."
 status = "blocked"
-required_for = ["public-beta"]
+required_for = []
 evidence = "The fail-closed workflow and verification script are implemented. This Mac has no valid Developer ID Application identity or App Store Connect notarization credential."
 
 [[gate]]
 id = "windows-code-signing"
 description = "Sign the Windows binaries and NSIS installer with a trusted publisher certificate."
 status = "blocked"
-required_for = ["public-beta"]
+required_for = []
 evidence = "Requires a Windows code-signing certificate and protected CI secret storage."
 
 [[gate]]

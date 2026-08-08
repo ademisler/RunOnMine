@@ -119,10 +119,11 @@ The `--system` form is Linux-only. The system unit runs as the account selected
 at installation; initialize RunOnMine and inject headless secrets for that same
 account.
 
-## Existing MacMCP installation
+## Local port conflicts
 
-RunOnMine never uses port `45799` and does not own `com.idemasler.macmcp.*`.
-A problem with the separate MacMCP service must be diagnosed independently.
+RunOnMine defaults to loopback port `47821`. If another local service already
+owns the configured port, choose a different non-zero loopback port rather than
+stopping or modifying the unrelated service.
 
 
 ## Desktop window or tray integration

@@ -20,9 +20,9 @@ edition = "2024"
 rust-version = "1.95"  # rust-toolchain.toml pins 1.95.0
 license = "Apache-2.0"
 repository = "https://github.com/ademisler/RunOnMine"
-homepage = "https://github.com/ademisler/RunOnMine"
+homepage = "https://runonmine.github.io/"
 authors = ["RunOnMine contributors"]
-description = "Local-first security control plane for AI tools on machines you own."
+description = "Local-first MCP security gateway for controlled AI access to machines you own."
 publish = false
 
 [workspace.dependencies]

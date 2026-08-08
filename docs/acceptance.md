@@ -2,8 +2,8 @@
 
 RunOnMine controls real machines. Unit tests and package creation are necessary,
 but they are not sufficient evidence for a beta release. A release tag is
-blocked until the machine-readable gates in `acceptance/release-gates.toml` are
-marked `passed` with evidence.
+blocked until every machine-readable gate required for the selected profile in
+`acceptance/release-gates.toml` is marked `passed` with evidence.
 
 Check the current state with:
 
@@ -136,9 +136,8 @@ universal binaries, runs the seven-view desktop report in arm64 and Rosetta
 x86_64, exercises close-to-menu-bar and single-instance restore, configures
 authenticated Local HTTP plus a temporary Cloudflare Quick Tunnel, verifies the
 LaunchAgent after reboot, performs an owner-approved MCP write while remote
-administrator execution remains denied, tests Emergency Lock, retained-data
-uninstall and full purge, and confirms MacMCP LaunchAgents and loopback port
-45799 are unchanged. `--cloudflared` is optional: omit it to exercise the
+administrator execution remains denied, and tests Emergency Lock, retained-data
+uninstall, and full purge. `--cloudflared` is optional: omit it to exercise the
 signed-provenance managed download, or provide a canonical non-symlink executable
 when a constrained network cannot complete that official asset download within
 the bounded installer timeout. RunOnMine still checks compatibility and pins the
@@ -173,7 +172,7 @@ also requires native and Rosetta slice launches.
 7. Exercise one supported remote connector without recording its credentials.
 8. Uninstall, then verify services, sockets, tasks, files, and credentials are
    removed or deliberately retained according to the documented mode.
-9. Confirm the existing MacMCP port, services, files, and configuration were not changed.
+9. Confirm unrelated pre-existing services, listeners, files, and configuration were not changed.
 
 Inspect a portable archive and SBOM with the matching package prefix. The
 standalone Linux desktop files use `runonmine-desktop-...`; headless and
@@ -209,4 +208,6 @@ where applicable, uninstall, and residue checks. A job that ends before checkout
 with no assigned runner and no executed steps is not acceptance evidence. Its
 report type is `artifact_preflight_not_release_acceptance` and explicitly does
 not claim an operating-system reboot, publisher signature or notarization.
-Those items remain required evidence for the release clean-install gate.
+Reboot and clean-install behavior require separate exact-candidate acceptance.
+Publisher signature/notarization are recorded when present but are not mandatory
+for an explicitly unsigned beta.

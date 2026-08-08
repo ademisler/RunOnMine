@@ -1,5 +1,1 @@
-self-hosted-runner:
-  labels:
-    - runonmine
-
 config-variables: null

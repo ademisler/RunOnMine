@@ -1,53 +1,41 @@
-# Self-hosted CI runner
+# GitHub-hosted CI
 
-RunOnMine's consolidated Linux quality job and the self-hosted Linux portions
-of scheduled security, coverage, fuzz, mutation, and soak workflows use a
-dedicated unprivileged
-`runonmine-ci` account. Hosted macOS, Windows, Linux ARM, and artifact-preflight
-jobs do not use this account. Pull requests from forks also never use this
-account: the stable `Linux quality` job selects a GitHub-hosted Ubuntu runner
-for untrusted fork code and selects only the dedicated `runonmine` label for
-pushes, manual runs, and branches in the owner repository. The account must not inherit HOME, Cargo
-directories, or PATH entries from an administrator or another user.
+RunOnMine repository workflows use ephemeral GitHub-hosted runners. The stable
+`Linux quality` job, scheduled security/coverage/fuzz/mutation/soak jobs, hosted
+platform matrix, and artifact preflight must not select a persistent repository
+self-hosted runner.
 
-The runner service must define:
+## Trust boundary
 
-```ini
-[Service]
-Environment="HOME=/home/runonmine-ci"
-Environment="USER=runonmine-ci"
-Environment="LOGNAME=runonmine-ci"
-Environment="CARGO_HOME=/home/runonmine-ci/.cargo"
-Environment="RUSTUP_HOME=/home/runonmine-ci/.rustup"
-Environment="PATH=/home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-```
+Pull requests from forks are untrusted code. They receive only the permissions
+explicitly declared by the workflow and must never receive repository secrets or
+access to a long-lived machine. `actions/checkout` disables credential
+persistence, workflow permissions default to read-only, and third-party actions
+are pinned to exact commit SHAs.
 
-The runner's captured `.env` and `.path` files must be owned by
-`runonmine-ci:runonmine-ci`, use mode `0600`, and contain no path under another
-user's home directory. Restart the runner after changing either file.
+The Linux quality and Security jobs install Gitleaks 8.24.3 through
+`scripts/ci/install-gitleaks.sh`. That bootstrap accepts only Linux x86_64,
+downloads the exact upstream archive, verifies the checked-in SHA-256, installs
+into the ephemeral runner home, and verifies the installed version before use.
 
-Every self-hosted workflow sets the same environment defensively and runs
-`scripts/ci/verify-runner-environment.sh`. The verifier fails closed on a wrong
-account, wrong HOME/Cargo directories, relative or empty PATH entries,
-cross-user home paths, symlinked captured environment files, or permissive file
-modes.
+## Build isolation
 
-Build outputs use a job-specific directory below `RUNNER_TEMP` and are removed
-with an `always()` cleanup step. A completed job must not leave a workspace
-`target/` directory or a `runonmine-*` target directory under runner temp.
+Jobs that produce large Rust outputs place `CARGO_TARGET_DIR` below
+`RUNNER_TEMP` when practical and remove those outputs with `always()` cleanup.
+GitHub-hosted runners are discarded after the job, so no build state or tool
+credential should be relied on across runs. Workflows must install every
+non-standard tool they need and must not assume a preconfigured user HOME,
+Cargo directory, PATH entry, daemon, secret, or browser profile.
 
+## Platform evidence
 
-## Hosted runner distinction
+A successful hosted job proves only the checks it actually executed. A job that
+never receives a runner and has no executed steps is infrastructure-allocation
+evidence, not product acceptance. macOS, Windows, Linux ARM, clean-package, and
+physical clean-install requirements remain separate gates where declared in
+`acceptance/release-gates.toml`.
 
-The `pull_request` workflow is evaluated from the protected base branch. Fork
-pull requests select `ubuntu-24.04`, install the pinned Gitleaks binary only
-after verifying its checked-in SHA-256, and receive no self-hosted runner or
-repository secrets. Trusted branches retain the isolated self-hosted path and
-its environment verifier. The job name remains `Linux quality` in both cases so
-branch policy does not depend on the submitter's trust level.
-
-A self-hosted job proves only the checks it executes on the isolated Linux
-runner. It does not substitute for hosted macOS, Windows, ARM, or clean-image
-artifact jobs. Conversely, a hosted job that has no runner name and no executed
-steps did not test RunOnMine; record it as a runner-allocation blocker and retain
-the platform gate as pending or blocked.
+Repository visibility, branch protection, and security settings are owner-side
+GitHub controls. Before public beta, confirm the repository has no registered
+persistent self-hosted runner and apply the protected-main policy documented in
+[releasing.md](releasing.md).

@@ -12,13 +12,14 @@ artifact SHA-256 may satisfy a candidate-scoped gate. Any non-evidence commit
 after a freeze invalidates readiness and requires a new freeze plus fresh
 applicable platform acceptance.
 
-Public beta additionally remains fail-closed on independent security review,
-publisher signing/notarization, hosted-platform execution, and protected-main
-evidence. A blocked external gate must stay blocked until its actual external
-requirement is satisfied; owner-controlled acceptance is not a substitute. The
-physical macOS reboot gate is also not equivalent to native smoke: a FileVault
-preboot screen requires owner authentication before post-reboot LaunchAgent/MCP
-recovery can be verified.
+Public beta remains fail-closed on the gates declared for `public-beta`, including
+hosted-platform execution, untrusted-fork isolation, protected-main enforcement,
+exact-candidate platform acceptance, and owner risk review. Publisher signing,
+Apple notarization, and an independent external security review are strongly
+recommended hardening, but an explicitly unsigned beta may ship without them.
+The physical macOS reboot gate is still not equivalent to native smoke: a
+FileVault preboot screen requires owner authentication before post-reboot
+LaunchAgent/MCP recovery can be verified.
 
 ## Required gates
 
@@ -28,7 +29,7 @@ Before creating a tag:
 2. keep headless line coverage at or above the enforced baseline and review the latest scheduled fuzz run;
 3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, Linux x86_64 desktop, and Windows x86_64 builds;
 4. complete install, restart, connect, tool-call, lock, and uninstall acceptance on a Mac, clean Linux VPS, clean Linux desktop, and Windows VM;
-5. confirm no MacMCP service, file, or port was changed;
+5. confirm install, lock, uninstall, and purge do not modify unrelated local services or application data;
 6. record evidence in `acceptance/release-gates.toml` and pass `cargo run --locked -p xtask -- release-readiness --profile private-beta`;
 7. present remaining risks and the secret-scan result to the repository owner.
 
@@ -50,9 +51,11 @@ a later code, dependency, workflow, package, or narrative-documentation change
 invalidates the candidate even if it is subsequently reverted.
 
 The release workflow runs readiness at the tag commit, then checks out and builds
-the frozen source revision. It stops while any required gate is `pending` or
-`blocked`. Public beta additionally requires independent security review,
-hosted platform CI, publisher signing, and protected-main gates. See
+the frozen source revision. It stops while any gate required for the selected
+profile is `pending` or `blocked`. Public beta requires hosted platform CI,
+untrusted-fork isolation, protected-main enforcement, exact-candidate platform
+acceptance, and owner risk review. Signing/notarization and independent review
+remain visible advisory gates rather than mandatory beta gates. See
 [release acceptance](acceptance.md).
 
 The tag must exactly match the Cargo version:
@@ -75,13 +78,13 @@ It produces:
 - CycloneDX JSON SBOMs containing component references, dependency edges, Cargo.lock package checksums where available, and the Cargo.lock integrity hash;
 - SHA-256 files for release artifacts.
 
-The workflow opens a draft prerelease only. Private-beta artifacts are deliberately unsigned and must not be described as signed, notarized, or trusted by the operating system. For public beta, the checked-in macOS path imports a protected Developer ID certificate, enables hardened runtime, notarizes and staples the universal application, signs the DMG, and runs Gatekeeper verification. Missing credentials or failed verification stop the job. Windows Authenticode remains a separate blocked gate. Publishing the draft and making the repository public both require separate owner approval.
+The workflow opens a draft prerelease only. Beta artifacts may be unsigned and must never be described as signed, notarized, or publisher-trusted unless that exact artifact passed the corresponding verification. When Apple signing credentials are configured, the checked-in macOS path imports the Developer ID certificate, enables hardened runtime, notarizes and staples the universal application, signs the DMG, and runs Gatekeeper verification; incomplete configured signing material fails closed. Without those credentials, the macOS beta follows the checked ad-hoc hardened-runtime path. Windows beta installers may likewise be unsigned. Publishing the draft and making the repository public both require separate owner approval.
 
 ## Hosted platform validation
 
-`CI` exposes one stable `Linux quality` check. Pushes, manual runs, and pull requests from owner branches use the hardened self-hosted runner. Fork pull requests are evaluated from the protected base workflow and route to GitHub-hosted `ubuntu-24.04`; they never receive the persistent runner or repository secrets. The hosted path installs Gitleaks 8.24.3 only after verifying the checked-in official SHA-256. Both paths execute the same headless quality, MCP, and coverage contract and remove ephemeral targets after the run. Independent `Security` and `Coverage` workflows remain available for manual dispatch and scheduled sweeps.
+`CI` exposes one stable `Linux quality` check on GitHub-hosted `ubuntu-24.04` for pushes, manual runs, owner pull requests, and fork pull requests. No repository workflow selects a persistent self-hosted runner. The job installs Gitleaks 8.24.3 only after verifying the checked-in official SHA-256, executes the headless quality, MCP, and coverage contract, and removes ephemeral targets after the run. `Security`, `Coverage`, `Fuzz`, `Mutation`, and the Linux `Soak` job use the same ephemeral hosted trust model.
 
-`Platform CI` is separate from the self-hosted quality path. Its macOS
+`Platform CI` is separate from the Linux quality path. Its macOS
 arm64/x86_64, Windows x86_64, and Linux ARM64 jobs run on every pull request and
 on manual dispatch; there is no repository-variable skip guard. `Artifact
 preflight` runs on every push to `main` and on manual dispatch, adding hosted
@@ -156,12 +159,13 @@ duplicate package names or versions fail, while intentional removals are
 accepted. Update the baseline only after reviewing platform compatibility and
 audit/binary-size impact.
 
-Private-beta artifacts remain explicitly unsigned. Public-beta packaging is
-hard-blocked until independent security review, Developer ID and Windows
-publisher credentials, successful notarization/AuthentiCode verification,
-hosted platform CI, and protected-main evidence all pass. Merely supplying
-secret values is not accepted as signing evidence. Do not relabel unsigned
-artifacts as public candidates.
+Unsigned artifacts are allowed for beta distribution when the release notes and
+platform documentation state that limitation prominently. Public-beta packaging
+remains blocked by its declared release gates, including hosted platform CI and
+protected-main evidence, but not by the absence of Developer ID, notarization,
+Windows Authenticode, or an independent external review. If signing is configured,
+verification remains fail-closed and secret presence alone is never accepted as
+signing evidence.
 
 ## Clean-install evidence
 

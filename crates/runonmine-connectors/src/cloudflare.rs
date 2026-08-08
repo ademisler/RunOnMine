@@ -12,7 +12,6 @@ use crate::binary::{BinaryKind, InstalledBinary};
 use crate::health::HealthCheck;
 use crate::process::{CommandSpec, SecretValue};
 
-const LEGACY_MACMCP_PORT: u16 = 45_799;
 const QUICK_TUNNEL_METRICS_MAX_BYTES: usize = 256 * 1_024;
 const QUICK_TUNNEL_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -423,18 +422,12 @@ fn validate_loopback_origin(url: &Url) -> Result<()> {
     if !loopback || url.port().is_none_or(|port| port == 0) {
         bail!("Cloudflare origin must use an explicit loopback IP and non-zero port");
     }
-    if url.port() == Some(LEGACY_MACMCP_PORT) {
-        bail!("port 45799 is reserved for the existing MacMCP installation");
-    }
     Ok(())
 }
 
 fn validate_runonmine_loopback(address: SocketAddr, label: &str) -> Result<()> {
     if !address.ip().is_loopback() || address.port() == 0 {
         bail!("{label} address must use a non-zero loopback port");
-    }
-    if address.port() == LEGACY_MACMCP_PORT {
-        bail!("port 45799 is reserved for the existing MacMCP installation");
     }
     Ok(())
 }
@@ -519,7 +512,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn connector_port_strategy() -> impl Strategy<Value = u16> {
-        (1_u16..=u16::MAX).prop_filter("reserved MacMCP port", |port| *port != LEGACY_MACMCP_PORT)
+        1_u16..=u16::MAX
     }
 
     #[test]
@@ -635,11 +628,11 @@ mod tests {
     }
 
     #[test]
-    fn quick_config_rejects_legacy_macmcp_port() -> Result<()> {
-        let config = QuickTunnelConfig::builder(Url::parse("http://127.0.0.1:45799/mcp")?)
+    fn quick_config_accepts_arbitrary_nonzero_loopback_port() -> Result<()> {
+        let config = QuickTunnelConfig::builder(Url::parse("http://127.0.0.1:49152/mcp")?)
             .metrics_address("127.0.0.1:47822".parse()?)
             .build();
-        assert!(config.is_err());
+        assert!(config.is_ok());
         Ok(())
     }
 
@@ -688,7 +681,7 @@ mod tests {
         #[test]
         fn malformed_cloudflare_origins_are_rejected(
             port in connector_port_strategy(),
-            variant in 0_u8..10,
+            variant in 0_u8..9,
         ) {
             let value = match variant {
                 0 => format!("https://127.0.0.1:{port}/mcp"),
@@ -699,8 +692,7 @@ mod tests {
                 5 => format!("http://127.0.0.1:{port}/mcp?token=value"),
                 6 => format!("http://127.0.0.1:{port}/mcp#fragment"),
                 7 => "http://127.0.0.1/mcp".to_owned(),
-                8 => "http://127.0.0.1:0/mcp".to_owned(),
-                _ => format!("http://127.0.0.1:{LEGACY_MACMCP_PORT}/mcp"),
+                _ => "http://127.0.0.1:0/mcp".to_owned(),
             };
             let url = Url::parse(&value)?;
             prop_assert!(validate_loopback_origin(&url).is_err(), "accepted {value}");

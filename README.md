@@ -57,28 +57,30 @@ connectors, and OpenAI Secure MCP Tunnel. See
 ## Install
 
 > [!NOTE]
-> RunOnMine is currently **pre-release/private-beta software**. Windows and Linux
-> prerelease packages are available from [GitHub Releases](https://github.com/ademisler/RunOnMine/releases).
-> macOS is supported and clean-machine tested, but a public Developer ID signed
-> and notarized DMG is not published yet; use the source build below for now.
+> RunOnMine is **pre-release software**. The previous owner-only private-beta
+> artifacts are not the current public candidate. Until a fresh public-beta
+> candidate completes the required gates, build from source. New public beta
+> assets will be published through [GitHub Releases](https://github.com/ademisler/RunOnMine/releases)
+> with explicit unsigned/signing status, SHA-256 checksums, and SBOMs.
 
 | Platform | Recommended install today |
 | --- | --- |
-| **Windows x86_64** | Current-user NSIS desktop installer from Releases |
-| **Linux x86_64** | Desktop DEB or headless DEB from Releases |
-| **Linux ARM64** | Headless DEB from Releases |
-| **macOS 12+** | Native source build; public signed/notarized DMG is pending |
+| **Windows x86_64** | Source build until the fresh public-beta NSIS asset is published |
+| **Linux x86_64** | Source build until fresh public-beta desktop/headless DEBs are published |
+| **Linux ARM64** | Source build until the fresh public-beta headless DEB is published |
+| **macOS 12+** | Native source build today; beta DMGs may be unsigned when explicitly disclosed |
 
-Private-beta installers are not publisher-signed production builds. Verify the
-adjacent SHA-256 checksum asset before running a downloaded package.
+Public-beta packages may be unsigned. Every published beta asset must state its
+signing status and ship with an adjacent SHA-256 checksum and CycloneDX SBOM.
 
 ### Windows x86_64
 
-Download the `runonmine-desktop_*_x64-setup.exe` prerelease asset and run it.
-The installer is a **current-user install**; the optional LocalSystem helper is
-not installed or activated unless you explicitly request it later.
+When the fresh public-beta `runonmine-desktop_*_x64-setup.exe` asset is
+published, it is a **current-user install**; the optional LocalSystem helper is
+not installed or activated unless you explicitly request it later. Until then,
+use the source-build workflow in the platform guide.
 
-Then initialize the project directory the AI may access:
+After installation, initialize the project directory the AI may access:
 
 ```powershell
 $rom = Join-Path $env:LOCALAPPDATA "RunOnMine\runonmine.exe"
@@ -92,7 +94,7 @@ uninstall behavior, and the optional privileged helper.
 
 ### Linux desktop (x86_64)
 
-Download the desktop DEB from Releases, then:
+When the fresh public-beta desktop DEB is published, install it with:
 
 ```console
 sudo apt install ./runonmine-desktop_*_amd64.deb
@@ -108,8 +110,7 @@ service assumptions to a server.
 
 ### macOS 12+
 
-Until the public notarized installer is available, build the native app from
-source. You need Xcode Command Line Tools and Rust; the repository pins Rust
+For the current beta, build the native app from source. You need Xcode Command Line Tools and Rust; the repository pins Rust
 `1.95.0` in `rust-toolchain.toml`.
 
 ```console
@@ -254,9 +255,10 @@ machine-readable form: `acceptance/release-candidate.toml` identifies the frozen
 source candidate and `acceptance/release-gates.toml` records which acceptance
 and security gates actually passed.
 
-A signed public release remains fail-closed until the public release gates are
-satisfied. Do not interpret an unsigned private-beta artifact as a publisher-
-trusted production build.
+Public beta may be distributed unsigned when that limitation is stated
+prominently and every required public-beta gate passes. Unsigned artifacts do
+not establish publisher identity or operating-system trust and must not be
+presented as production-signed builds.
 
 ## Documentation
 
@@ -276,6 +278,7 @@ Start with the [documentation index](docs/README.md).
 - **Quality & release:** [testing](docs/testing.md),
   [release acceptance](docs/acceptance.md), and
   [release process](docs/releasing.md)
+- **Help:** [support](SUPPORT.md) and [security reporting](SECURITY.md)
 
 ## Development
 
