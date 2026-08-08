@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "repository": "ademisler/RunOnMine",
+  "audited_at": "2026-08-08T22:23:27Z",
+  "frozen_source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
+  "release_metadata_head_at_audit": "ec4a4995fd9435a9b29c989fc4790bbd70cb898c",
+  "public_surface": {
+    "visibility": "public",
+    "default_branch": "main",
+    "remote_branch_count": 1,
+    "tag_count": 0,
+    "release_count": 0,
+    "open_pull_request_count": 0,
+    "open_issue_count": 0,
+    "collaborator_count": 1,
+    "webhook_count": 0,
+    "deploy_key_count": 0,
+    "environment_count": 0,
+    "remaining_actions_artifacts": 5,
+    "remaining_actions_artifacts_scope": "exact frozen-source Artifact preflight run 31273372524 only"
+  },
+  "branch_protection": {
+    "required_status_checks": [
+      "Linux quality",
+      "Platform matrix",
+      "Dependency review"
+    ],
+    "enforce_admins": true,
+    "conversation_resolution": true,
+    "linear_history": true,
+    "force_pushes": false,
+    "branch_deletions": false,
+    "required_approving_reviews": 0,
+    "sole_maintainer_rationale": "A mandatory self-approval would deadlock the sole maintainer; required hosted checks and administrator enforcement remain mandatory."
+  },
+  "actions": {
+    "default_workflow_permissions": "read",
+    "can_approve_pull_request_reviews": false,
+    "allowed_actions": "selected",
+    "github_owned_allowed": true,
+    "verified_marketplace_actions_allowed": false,
+    "third_party_allowlist": [
+      "dtolnay/rust-toolchain",
+      "softprops/action-gh-release",
+      "taiki-e/install-action"
+    ],
+    "external_uses_references": 47,
+    "unpinned_external_uses_references": 0,
+    "third_party_allowlist_exact": [
+      "dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1",
+      "softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
+      "taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf"
+    ]
+  },
+  "security": {
+    "private_vulnerability_reporting": true,
+    "secret_scanning": true,
+    "push_protection": true,
+    "dependabot_security_updates": true,
+    "open_secret_scanning_alerts": 0,
+    "open_dependabot_alerts": 0,
+    "repository_security_advisories": 0,
+    "actions_secrets": 0,
+    "actions_variables": 0,
+    "dependabot_secrets": 0,
+    "secret_scanning_non_provider_patterns_available": false,
+    "secret_scanning_validity_checks_available": false,
+    "codeql_default_setup": {
+      "state": "configured",
+      "languages": [
+        "actions",
+        "python"
+      ],
+      "query_suite": "default",
+      "schedule": "weekly",
+      "threat_model": "remote",
+      "open_alerts": 0
+    }
+  },
+  "history_privacy": {
+    "public_main_commits": 299,
+    "gitleaks_public_main_findings": 0,
+    "final_verify_gitleaks_findings": 0,
+    "public_actions_runs_scanned": 33,
+    "public_actions_log_files_scanned": 232,
+    "public_actions_personal_or_internal_trace_matches": 0,
+    "issue_or_pull_request_records_scanned": 77,
+    "issue_comments_scanned": 46,
+    "issue_pull_request_personal_or_internal_trace_matches": 0,
+    "commit_messages_scanned": 299,
+    "commit_message_personal_or_internal_trace_matches": 0,
+    "current_tree_personal_email_matches": 0,
+    "current_tree_owner_specific_home_path_matches": 0,
+    "current_tree_internal_mcp_tool_matches": 0,
+    "historic_personal_email_address_count_in_commit_metadata": 1,
+    "historic_commits_with_personal_email_metadata": 78,
+    "historic_removed_internal_tool_diff_commits": 16,
+    "historic_removed_owner_linux_path_diff_commits": 7,
+    "future_repo_git_identity_uses_github_noreply": true,
+    "history_rewrite_performed": false,
+    "history_rewrite_reason": "A destructive rewrite would invalidate the frozen revision and exact-candidate evidence and cannot guarantee removal from existing public caches or pull-request refs. The historic identity is not a credential and no secret scanner finding exists.",
+    "public_pull_head_refs_scanned": 76,
+    "gitleaks_public_main_and_pull_head_findings": 0,
+    "gitleaks_public_visible_non_merge_commits_scanned": 272,
+    "artifact_files_privacy_scanned": 46,
+    "artifact_personal_or_internal_trace_matches": 0,
+    "archive_files_scanned": 10,
+    "archive_members_scanned": 64,
+    "unsafe_archive_member_paths": 0
+  },
+  "verification": {
+    "docs_check": "passed",
+    "xtask_verify": "passed",
+    "dependency_advisories": "passed",
+    "dependency_bans": "passed",
+    "licenses": "passed",
+    "dependency_sources": "passed",
+    "final_verify_secret_scan": "no leaks found"
+  },
+  "release_acceptance": {
+    "frozen_source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
+    "macos_universal": "passed",
+    "linux_x86_64": "passed",
+    "linux_desktop_x86_64": "passed",
+    "linux_aarch64": "passed",
+    "windows_x86_64": "passed",
+    "windows_artifact_sha256": "26bea81ff040e75f8650545838692dfc29bbe42396e11dcf3c640ac18dd5fbc1",
+    "windows_reboot_agent_mcp_uninstall_residue": "passed"
+  }
+}
