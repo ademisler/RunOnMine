@@ -60,7 +60,7 @@ cargo run --locked -p xtask -- checksums
 
 The release workflow performs the same universal merge and package contract.
 
-The private-beta DMG and every bundled Mach-O use ad-hoc code signatures with
+The unsigned beta DMG path and every bundled Mach-O use ad-hoc code signatures with
 hardened runtime, and the application resource envelope is sealed. This proves
 bundle integrity but does not establish a publisher identity or Apple trust.
 Unsigned/ad-hoc beta builds are not Developer ID signed or notarized, so Gatekeeper

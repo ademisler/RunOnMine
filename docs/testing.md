@@ -161,7 +161,7 @@ command omits that switch and remains the required interactive Windows VM or
 physical-machine gate.
 
 An interactive Windows VM or physical Windows machine is authoritative for the
-native-window and tray lifecycle. The formal private-beta run also verifies a
+native-window and tray lifecycle. The formal beta acceptance run also verifies a
 real boot-identity change, Scheduled Task recovery, MCP approval/deny, the
 LocalSystem helper owner/second-user boundary, purge, and zero unexpected
 residue. A Wine x86_64 run remains useful supplemental evidence for PE launch,

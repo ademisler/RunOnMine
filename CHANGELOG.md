@@ -5,6 +5,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Prepare the repository for public contribution with canonical Apache-2.0 licensing, official website package metadata, a support policy, public-beta security wording, and explicit owner-only controls for visibility and release publication.
+
 - Move all repository Linux quality, security, coverage, fuzz, mutation, and soak jobs from the persistent RunOnMine runner to ephemeral GitHub-hosted Ubuntu; install pinned Gitleaks explicitly and remove owner-specific runner HOME/PATH assumptions before public visibility.
 
 - Define public beta as an exact-candidate, hosted-CI and protected-main quality profile that may ship explicitly unsigned; Developer ID/notarization, Windows Authenticode, and independent external review remain recommended hardening and become fail-closed only when their signing paths are configured.

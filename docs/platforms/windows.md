@@ -123,7 +123,7 @@ upgrades stage executable and policy before stopping the Windows service, wait
 for SCM to report `STOPPED`, and restore the previous files, registration, start
 type, and running state after a failed start or health validation.
 
-The private-beta installer is unsigned. Windows may show an unrecognized
+Unsigned beta installers do not carry a trusted publisher signature. Windows may show an unrecognized
 publisher warning. Verify its SHA-256 file before running it. A candidate may
 pass the Windows clean-install gate only after rebooted Windows Server 2025 or
 equivalent owner-controlled acceptance proves the native desktop, Scheduled Task

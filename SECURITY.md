@@ -5,11 +5,11 @@ pre-release software. There is no supported production release yet.
 
 ## Supported versions
 
-The current `main` branch is the reviewed source line, but it is not itself a
-published production release. The exact private-beta candidate named in
-`acceptance/release-candidate.toml` is eligible only for owner-authorized testing
-when its artifact SHA-256 matches committed evidence. Older commits, locally
-modified builds, and unrecorded artifacts are unsupported.
+There is no supported production release yet. `main` is the active development
+line. A beta artifact is supported only when it is attached to an owner-published
+GitHub prerelease and its source revision and SHA-256 match the release metadata
+for that candidate. Locally modified builds and unrecorded artifacts are outside
+the supported beta surface.
 
 ## Reporting a vulnerability
 
@@ -42,10 +42,10 @@ A beta candidate must pass formatting, Clippy, tests, dependency policy, full
 Git-history secret scanning, the enforced coverage floor, scheduled fuzzing,
 platform builds, clean-machine acceptance tests, and an owner risk review. The
 tag workflow reads `acceptance/release-gates.toml` and fails while required
-evidence is pending or blocked. The previously recorded frozen candidate completed its then-applicable private-beta
-platform gates, but later source changes invalidated that freeze. Public beta may
-ship unsigned when that limitation is explicit; publisher signing, notarization,
-and independent external review are recommended hardening rather than mandatory
-beta gates. Every gate declared for the selected release profile must still pass.
+evidence is pending or blocked. The previously recorded frozen candidate completed its then-applicable platform
+gates, but later source changes invalidated that freeze. Public beta may ship
+unsigned when that limitation is explicit; publisher signing, notarization, and
+independent external review are recommended hardening rather than mandatory beta
+gates. Every gate declared for the selected release profile must still pass.
 Changes after a freeze require a new candidate and may not reuse prior platform
 evidence.

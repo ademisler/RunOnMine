@@ -35,5 +35,5 @@ Dependency advisories are release blockers. Do not add an advisory exception wit
 - Keep migrations forward-compatible and reject unknown future schema versions.
 - Update `README.md`, `CHANGELOG.md`, and the relevant file under `docs/` when behavior changes.
 - Do not commit generated `target/`, local state databases, credentials, browser profiles, release artifacts, or machine-specific configuration.
-- Keep the repository private unless the owner explicitly changes that decision.
+- Do not change repository visibility, publish a release, or transfer repository ownership without explicit owner approval.
 - Do not attach persistent self-hosted runners to the public repository. CI and scheduled repository workflows must use ephemeral GitHub-hosted runners unless a separately reviewed isolation design is introduced.
