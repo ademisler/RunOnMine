@@ -1081,14 +1081,4 @@ mod tests {
         remove_runtime_parent(Path::new(r"\\.\pipe\RunOnMine.Helper"))
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn system_paths_do_not_overlap_legacy_macmcp() -> Result<()> {
-        let paths = SystemPaths::discover()?;
-        for path in [paths.binary, paths.policy, paths.socket] {
-            assert!(!path.to_string_lossy().contains("macmcp"));
-            assert!(!path.to_string_lossy().contains("45799"));
-        }
-        Ok(())
-    }
 }

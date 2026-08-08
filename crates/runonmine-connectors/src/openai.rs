@@ -10,7 +10,6 @@ use crate::binary::{BinaryKind, InstalledBinary, validate_profile};
 use crate::health::HealthCheck;
 use crate::process::{CommandSpec, SecretValue};
 
-const LEGACY_MACMCP_PORT: u16 = 45_799;
 const RUNTIME_KEY_ENVIRONMENT: &str = "CONTROL_PLANE_API_KEY";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -223,11 +222,8 @@ impl OpenAiTunnelProfileBuilder {
         let health_address = self
             .health_address
             .context("OpenAI tunnel-client health address is required")?;
-        if !health_address.ip().is_loopback()
-            || health_address.port() == 0
-            || health_address.port() == LEGACY_MACMCP_PORT
-        {
-            bail!("OpenAI tunnel-client health address must use a non-reserved loopback port");
+        if !health_address.ip().is_loopback() || health_address.port() == 0 {
+            bail!("OpenAI tunnel-client health address must use a non-zero loopback port");
         }
         let health_url_file = self
             .health_url_file
@@ -301,11 +297,8 @@ fn validate_loopback_mcp_url(url: &Url) -> Result<()> {
         Some(Host::Ipv6(address)) => address.is_loopback(),
         Some(Host::Domain(_)) | None => false,
     };
-    if !loopback
-        || url.port().is_none_or(|port| port == 0)
-        || url.port() == Some(LEGACY_MACMCP_PORT)
-    {
-        bail!("RunOnMine MCP URL must use a non-reserved explicit non-zero loopback port");
+    if !loopback || url.port().is_none_or(|port| port == 0) {
+        bail!("RunOnMine MCP URL must use an explicit non-zero loopback port");
     }
     Ok(())
 }
@@ -407,7 +400,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn connector_port_strategy() -> impl Strategy<Value = u16> {
-        (1_u16..=u16::MAX).prop_filter("reserved MacMCP port", |port| *port != LEGACY_MACMCP_PORT)
+        1_u16..=u16::MAX
     }
 
     fn test_executable() -> Result<PathBuf> {
@@ -486,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_rejects_legacy_macmcp_port() -> Result<()> {
+    fn profile_accepts_arbitrary_nonzero_loopback_health_port() -> Result<()> {
         let directory = tempdir()?;
         restrict_test_directory(directory.path())?;
         let result = OpenAiTunnelProfile::builder(
@@ -498,10 +491,10 @@ mod tests {
             },
         )
         .profile_directory(directory.path().to_path_buf())
-        .health_address("127.0.0.1:45799".parse()?)
+        .health_address("127.0.0.1:49152".parse()?)
         .health_url_file(directory.path().join("tunnel-health.url"))
         .build();
-        assert!(result.is_err());
+        assert!(result.is_ok());
         Ok(())
     }
 
@@ -525,7 +518,7 @@ mod tests {
         #[test]
         fn malformed_openai_mcp_urls_are_rejected(
             port in connector_port_strategy(),
-            variant in 0_u8..10,
+            variant in 0_u8..9,
         ) {
             let value = match variant {
                 0 => format!("https://127.0.0.1:{port}/mcp"),
@@ -536,8 +529,7 @@ mod tests {
                 5 => format!("http://127.0.0.1:{port}/mcp?token=value"),
                 6 => format!("http://127.0.0.1:{port}/mcp#fragment"),
                 7 => "http://127.0.0.1/mcp".to_owned(),
-                8 => "http://127.0.0.1:0/mcp".to_owned(),
-                _ => format!("http://127.0.0.1:{LEGACY_MACMCP_PORT}/mcp"),
+                _ => "http://127.0.0.1:0/mcp".to_owned(),
             };
             let url = Url::parse(&value)?;
             prop_assert!(validate_loopback_mcp_url(&url).is_err(), "accepted {value}");

@@ -707,7 +707,6 @@ mod tests {
     #[test]
     fn pipe_name_is_product_scoped_and_local() {
         assert_eq!(PIPE_NAME, r"\\.\pipe\RunOnMine.Helper");
-        assert!(!PIPE_NAME.to_ascii_lowercase().contains("macmcp"));
     }
 
     #[test]

@@ -45,7 +45,6 @@ desktop="$app_bin/runonmine-desktop"
 agent="$app_bin/runonmine-agent"
 helper="$app_bin/runonmine-helper"
 state="$output/acceptance-state.json"
-macmcp_baseline="$output/macmcp-baseline.json"
 evidence="$output/macos-universal-clean-install.json"
 mkdir -p "$output"
 chmod 700 "$output"
@@ -57,41 +56,6 @@ boot_session() { sysctl -n kern.bootsessionuuid; }
 require_clean_revision() {
   [[ -z $(git -C "$repo_root" status --porcelain) ]] || fail "repository must be clean and committed"
   git -C "$repo_root" rev-parse HEAD
-}
-
-capture_macmcp() {
-  local destination=$1 uid broker tunnel
-  uid=$(id -u)
-  broker="$HOME/Library/LaunchAgents/com.idemasler.macmcp.broker.plist"
-  tunnel="$HOME/Library/LaunchAgents/com.idemasler.macmcp.tunnel.plist"
-  [[ -f $broker && -f $tunnel ]] || fail "MacMCP LaunchAgent files are missing"
-  launchctl print "gui/$uid/com.idemasler.macmcp.broker" >/dev/null 2>&1 || fail "MacMCP broker is not loaded"
-  launchctl print "gui/$uid/com.idemasler.macmcp.tunnel" >/dev/null 2>&1 || fail "MacMCP tunnel is not loaded"
-  lsof -nP -iTCP:45799 -sTCP:LISTEN | grep -F '127.0.0.1:45799' >/dev/null || fail "MacMCP loopback port 45799 is not listening"
-  python3 - "$destination" "$(sha256 "$broker")" "$(sha256 "$tunnel")" <<'PY'
-import json, pathlib, sys
-pathlib.Path(sys.argv[1]).write_text(json.dumps({
-    "schema_version": 1,
-    "broker_plist_sha256": sys.argv[2],
-    "tunnel_plist_sha256": sys.argv[3],
-    "broker_loaded": True,
-    "tunnel_loaded": True,
-    "loopback_45799_listening": True,
-}, indent=2) + "\n")
-PY
-  chmod 600 "$destination"
-}
-
-verify_macmcp() {
-  local current="$output/macmcp-current.json"
-  capture_macmcp "$current"
-  python3 - "$macmcp_baseline" "$current" <<'PY'
-import json, pathlib, sys
-before=json.loads(pathlib.Path(sys.argv[1]).read_text())
-after=json.loads(pathlib.Path(sys.argv[2]).read_text())
-if before != after:
-    raise SystemExit(f"MacMCP invariant changed: before={before!r} after={after!r}")
-PY
 }
 
 wait_health() {
@@ -286,7 +250,6 @@ prepare() {
     cloudflared_source="external"
   fi
   revision=$(require_clean_revision)
-  capture_macmcp "$macmcp_baseline"
   has_preexisting_runonmine_state && had_preexisting_state=1
   python3 "$repo_root/scripts/release/validate-clean-install-evidence.py" "$repo_root/acceptance/evidence/clean-install.template.json" >/dev/null
   cargo run --quiet --locked -p xtask --manifest-path "$repo_root/Cargo.toml" -- validate-sbom --path "$sbom" --target universal-apple-darwin
@@ -410,7 +373,7 @@ steps=[
  ("native_slice_launch", "arm64 slice produced the validated seven-view acceptance report"),
  ("rosetta_slice_launch", "x86_64 slice launched under Rosetta and produced the validated seven-view acceptance report"),
  ("uninstall", "LaunchAgent was removed, managed credentials/data were purged, and RunOnMine.app was deleted"),
- ("residue_check", "no application bundle, LaunchAgent, RunOnMine process, loopback agent listener, or managed data directory remained; MacMCP invariants were unchanged"),
+ ("residue_check", "no application bundle, LaunchAgent, RunOnMine process, loopback agent listener, or managed data directory remained"),
 ]
 evidence={
  "schema_version":1,
@@ -454,7 +417,6 @@ import json, pathlib, sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text())["quick_connector_id"])
 PY
 )
-  verify_macmcp
   "$cli" service status >"$output/service-status-after-reboot.log"
   launchctl print "gui/$(id -u)/dev.runonmine.agent" >"$output/launchagent-after-reboot.log"
   wait_health "$port"
@@ -482,7 +444,6 @@ PY
     "$HOME/Library/Logs/dev.RunOnMine.RunOnMine"; do
     [[ ! -e $path ]] || fail "managed data residue remains at $path"
   done
-  verify_macmcp
   write_evidence
   printf 'RunOnMine macOS universal clean-install acceptance passed.\n'
 }

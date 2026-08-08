@@ -77,7 +77,6 @@ pub(crate) async fn doctor(arguments: &DoctorArgs) -> Result<()> {
         json!({
             "os": current().os,
             "architecture": current().architecture,
-            "legacy_macmcp_port_reserved": 45_799,
         }),
         None,
     )];

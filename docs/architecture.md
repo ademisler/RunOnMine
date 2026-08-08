@@ -356,8 +356,8 @@ external process execution; it does not rely only on an eventual bind failure.
 
 ## Network ownership
 
-The MCP listener is fixed to `127.0.0.1:47821`; configuration validation rejects
-other bind hosts and reserves the existing MacMCP port `45799`. Cloudflare and
+The MCP listener defaults to `127.0.0.1:47821`; configuration validation rejects
+non-loopback bind hosts and zero ports. Cloudflare and
 OpenAI tunnel processes connect outward. RunOnMine does not open a public
 listener or modify firewall rules.
 

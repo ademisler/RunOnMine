@@ -29,7 +29,7 @@ Before creating a tag:
 2. keep headless line coverage at or above the enforced baseline and review the latest scheduled fuzz run;
 3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, Linux x86_64 desktop, and Windows x86_64 builds;
 4. complete install, restart, connect, tool-call, lock, and uninstall acceptance on a Mac, clean Linux VPS, clean Linux desktop, and Windows VM;
-5. confirm no MacMCP service, file, or port was changed;
+5. confirm install, lock, uninstall, and purge do not modify unrelated local services or application data;
 6. record evidence in `acceptance/release-gates.toml` and pass `cargo run --locked -p xtask -- release-readiness --profile private-beta`;
 7. present remaining risks and the secret-scan result to the repository owner.
 

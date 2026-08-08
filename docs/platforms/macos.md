@@ -91,7 +91,7 @@ secrets. The separately elevated privileged helper is not removed by either
 operation; run `sudo runonmine admin uninstall` before deleting the bundle when
 that helper was explicitly installed.
 
-## Privileged helper and MacMCP boundary
+## Privileged helper and service ownership
 
 The optional privileged helper is installed only through `sudo runonmine admin
 install` and authenticates the local peer with `getpeereid`. It accepts only
@@ -106,5 +106,5 @@ not claim descriptor-path execution. Helper upgrades stage the executable,
 policy, and launchd plist before booting out the old daemon. A failed bootstrap
 or health check restores prior files and the former loaded/running state.
 
-The existing `com.idemasler.macmcp.*` services, port `45799`, and MacMCP config,
-logs, and data are outside RunOnMine's ownership and must not be modified.
+Unrelated launchd services, listeners, configuration, logs, and application data
+are outside RunOnMine's ownership and must not be modified.

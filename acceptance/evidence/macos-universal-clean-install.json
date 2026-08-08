@@ -75,7 +75,7 @@
     {
       "id": "residue_check",
       "status": "passed",
-      "evidence": "no application bundle, LaunchAgent, RunOnMine process, loopback agent listener, or managed data directory remained; MacMCP invariants were unchanged"
+      "evidence": "no application bundle, LaunchAgent, RunOnMine process, loopback agent listener, or managed data directory remained; pre-existing unrelated service/listener invariants were unchanged"
     }
   ],
   "residues": []

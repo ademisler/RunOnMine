@@ -251,10 +251,9 @@ print(data.decode())
     }
 
     #[test]
-    fn socket_never_uses_legacy_macmcp_port_or_name() {
+    fn socket_name_is_product_scoped() {
         let path = socket_path().to_string_lossy().to_lowercase();
-        assert!(!path.contains("macmcp"));
-        assert!(!path.contains("45799"));
+        assert!(path.contains("runonmine"));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 - Approval grants must be scoped to the exact connector, tool, and argument hash unless a separately reviewed policy feature explicitly narrows a resource boundary.
 - Dangerous actions must fail closed when authorization or audit persistence is unavailable.
 - Do not weaken selected-root filesystem checks, managed-binary receipt verification, process environment clearing, output limits, or process-tree termination.
-- Port `45799` belongs to the existing MacMCP installation and must remain untouched.
+- Do not stop, rewrite, or claim ownership of unrelated local services, listeners, or application data during development or acceptance.
 
 ## Development workflow
 
