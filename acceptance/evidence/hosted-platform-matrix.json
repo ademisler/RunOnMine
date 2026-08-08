@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
+  "tested_at": "2026-08-08T19:26:14Z",
+  "platform_ci_run": 31273387664,
+  "artifact_preflight_run": 31273372524,
+  "ci_run": 31273373611,
+  "security_run": 31273374922,
+  "coverage_run": 31273376205,
+  "fuzz_run": 31273377385,
+  "mutation_run": 31273378509,
+  "soak_run": 31273379456,
+  "status": "passed",
+  "platforms": ["macos-arm64", "macos-x86_64", "windows-x86_64", "linux-aarch64", "linux-x86_64", "linux-desktop-x86_64"]
+}

@@ -1,48 +1,75 @@
 {
   "schema_version": 1,
-  "source_revision": "03db4cbcf733c406f71dbc8a0870de34187cd268",
-  "reviewed_at": "2026-08-08T02:53:13Z",
+  "source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
+  "reviewed_at": "2026-08-08T22:23:27Z",
   "verification": {
-    "command": "xtask verify --headless",
+    "command": "cargo run --locked -p xtask -- verify",
     "exit_code": 0,
-    "history_commits_scanned": 229,
-    "secret_scan": "no leaks found",
-    "dependency_policy": "advisories, bans, licenses and sources passed"
+    "git_visible_non_merge_commits_scanned": 272,
+    "git_secret_scan": "no leaks found, including 76 GitHub pull-request head refs",
+    "public_pr_issue_comment_records_scanned": 123,
+    "public_text_secret_scan": "no leaks found",
+    "dependency_policy": "advisories, bans, licenses and sources passed",
+    "hosted_exact_candidate_runs": {
+      "ci": 31273373611,
+      "security": 31273374922,
+      "coverage": 31273376205,
+      "fuzz": 31273377385,
+      "mutation": 31273378509,
+      "soak": 31273379456,
+      "platform_ci": 31273387664,
+      "artifact_preflight": 31273372524
+    },
+    "codeql_default_setup_run": 31279864170,
+    "codeql_default_setup": "actions and python passed; zero open code-scanning alerts",
+    "artifact_privacy_scan": "46 extracted files scanned with zero owner/Oty/internal-tool/email/path markers; 10 archives and 64 members had zero unsafe absolute/traversal member paths",
+    "artifact_checksum_sidecars": "all downloaded exact-candidate sidecars matched; CycloneDX SBOMs parsed for five hosted platform artifacts",
+    "git_integrity": "git fsck --full --strict passed for reachable repository objects",
+    "github_public_text_scan": "123 issue/PR/comment/review records; zero secret/email/internal-path/tool findings",
+    "github_actions_public_logs": "33 current public workflow runs / 232 log files scanned; no secrets, personal email, owner paths, internal MCP tool names, Oty host/domain/IP markers",
+    "repository_public_audit": "acceptance/evidence/repository-public-audit.json"
   },
   "fresh_acceptance": {
-    "macos_universal_dmg_sha256": "687c4352f6eeb094570df11a7625bde6556b637272c27d45585c4ef345746a69",
-    "linux_x86_64_deb_sha256": "9d027a68a43b8e0341714d9f7f1b3e2f8a6ec9d192f782833f8d273583a836a8",
-    "linux_desktop_x86_64_deb_sha256": "d69740b22b4c0dda6cd1359d67e25561dd94eb7a37fd0b989cbcc54c60d5e3b8",
-    "linux_aarch64_deb_sha256": "188d47de891f219ced27566271d4b5d94857fb78ce4211c4e2ad66043bd265fa",
-    "windows_nsis_sha256": "1fe65be5a130443cfaf99ef48d3c8b87ca7424883ed2f527fc62f0318f22b584",
-    "windows_portable_zip_sha256": "2bca6ee59aeee96f898e64c43746168c06a18895a820b68981f099d3284ed3a9",
-    "windows_helper_evidence": "acceptance/evidence/windows-helper-security-review.json"
+    "macos_universal_dmg_sha256": "11226dd4f9c634220d8746d84ac6a152c48dc3ae79c362620317ce5bb75f45e9",
+    "linux_x86_64_deb_sha256": "2d4bf633265d6bff09a92a53cec2fc57d65875a969195da5a096909002bab518",
+    "linux_desktop_x86_64_deb_sha256": "323a844465e65f968610eca5a57f847d93905c6d7da38d5b6b13c8a3a66df09b",
+    "linux_aarch64_deb_sha256": "35b5c6abfec66232c519c2eccdb19af01550d73905dcc3d0213620f80d8f7543",
+    "windows_nsis_sha256": "26bea81ff040e75f8650545838692dfc29bbe42396e11dcf3c640ac18dd5fbc1",
+    "windows_portable_zip_sha256": "70af7fdf895801f46bc4f5cf1185e3be6eac95754fb5f453a2dd6eb091b44509",
+    "windows_helper_evidence": "acceptance/evidence/windows-helper-security-review.json",
+    "windows_clean_install_status": "passed",
+    "windows_clean_install_evidence": "acceptance/evidence/windows-x86_64-clean-install.json",
+    "windows_clean_install_tested_at": "2026-08-08T22:20:48.0109916Z"
   },
-  "remaining_public_beta_blockers": [
-    {
-      "id": "hosted-platform-matrix",
-      "status": "blocked",
-      "reason": "GitHub Artifact preflight run 31235857762 was not started on all five jobs because recent account payments failed or the spending limit must be increased."
-    },
-    {
-      "id": "external-security-review",
-      "status": "blocked",
-      "reason": "Requires an independent third-party architecture and penetration review."
-    },
-    {
-      "id": "macos-signing-notarization",
-      "status": "blocked",
-      "reason": "Owner Mac has zero valid code-signing identities and no notarization credential environment configured."
-    },
-    {
-      "id": "windows-code-signing",
-      "status": "blocked",
-      "reason": "No trusted Windows publisher certificate/protected signing secret is configured."
-    },
-    {
-      "id": "protected-main",
-      "status": "blocked",
-      "reason": "GitHub returns HTTP 403 because branch protection for this private repository requires GitHub Pro or public visibility."
-    }
-  ]
+  "repository_controls": {
+    "visibility": "public",
+    "repository_runner_count": 0,
+    "actions_selected_only": true,
+    "actions_sha_pinning_required": true,
+    "default_workflow_permissions": "read",
+    "secret_scanning": "enabled",
+    "push_protection": "enabled",
+    "private_vulnerability_reporting": "enabled",
+    "dependabot_security_updates": "enabled",
+    "protected_main": "passed",
+    "codeql_default_setup": "configured for actions and python; weekly",
+    "code_scanning_open_alerts": 0,
+    "repository_secrets": 0,
+    "dependabot_secrets": 0,
+    "webhooks": 0,
+    "deploy_keys": 0
+  },
+  "accepted_beta_limitations": [
+    "macOS Developer ID signing and notarization are not configured; beta packaging uses the verified ad-hoc hardened-runtime path and must disclose this limitation.",
+    "Windows publisher signing is not configured; beta installers may be unsigned and must disclose this limitation.",
+    "Independent external security review is recommended hardening but is not a required public-beta gate by owner direction."
+  ],
+  "privacy_review": {
+    "tracked_content": "no personal email or owner/internal infrastructure path/tool exposure in current tree",
+    "github_public_text": "no personal email or internal infrastructure trace in issue/PR/comment text",
+    "historical_commit_metadata": "78 historical commits contain a non-noreply Gmail author/committer address; this is Git object metadata, not a credential or tracked-file leak. Rewriting it would require destructive history replacement and invalidate the frozen candidate/evidence, and GitHub pull-request refs may retain old objects.",
+    "future_commit_identity": "repository Git identity uses GitHub noreply email and the public GitHub profile exposes no email address"
+  },
+  "required_public_beta_gates": "all passed",
+  "publication_state": "technically release-ready; creating the tag/draft/published prerelease still requires explicit owner approval"
 }
