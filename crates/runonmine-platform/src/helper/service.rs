@@ -1080,5 +1080,4 @@ mod tests {
     fn named_pipe_runtime_parent_cleanup_is_not_a_filesystem_removal() -> Result<()> {
         remove_runtime_parent(Path::new(r"\\.\pipe\RunOnMine.Helper"))
     }
-
 }

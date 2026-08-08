@@ -24,11 +24,17 @@ case "$(uname -s)" in
     export PATH="$CARGO_HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     ;;
   Linux)
-    owner_user="${RUNONMINE_ACCEPTANCE_OWNER_USER:-github1-dev}"
+    repo_owner=$(stat -c %U "$repo_root")
+    owner_user="${RUNONMINE_ACCEPTANCE_OWNER_USER:-$repo_owner}"
     attacker_user="${RUNONMINE_ACCEPTANCE_ATTACKER_USER:-nobody}"
+    owner_home=$(getent passwd "$owner_user" | cut -d: -f6)
+    [[ -n "$owner_home" && -d "$owner_home" ]] || {
+      echo "unable to resolve a home directory for owner user $owner_user" >&2
+      exit 2
+    }
     export HOME=/root
-    export CARGO_HOME="${CARGO_HOME:-/home/github1-dev/.cargo}"
-    export RUSTUP_HOME="${RUSTUP_HOME:-/home/github1-dev/.rustup}"
+    export CARGO_HOME="${CARGO_HOME:-$owner_home/.cargo}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-$owner_home/.rustup}"
     export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     ;;
   *)
