@@ -2,10 +2,10 @@
   "schema_version": 1,
   "platform": "macos-universal",
   "artifact": "RunOnMine_0.1.0-beta.1_universal.dmg",
-  "artifact_sha256": "a285269ec7919878bc2a59dd278bab56afd54542deae4398f81947ef094bffb0",
-  "source_revision": "1a0ba3d134f40fc95b9e8c52a95132fff061acb0",
+  "artifact_sha256": "687c4352f6eeb094570df11a7625bde6556b637272c27d45585c4ef345746a69",
+  "source_revision": "03db4cbcf733c406f71dbc8a0870de34187cd268",
   "tester": "OpenAI automated acceptance on owner-authorized Apple Silicon Mac",
-  "tested_at": "2026-08-05T07:43:43Z",
+  "tested_at": "2026-08-08T01:45:21Z",
   "steps": [
     {
       "id": "install",
@@ -66,11 +66,6 @@
       "id": "rosetta_slice_launch",
       "status": "passed",
       "evidence": "x86_64 slice launched under Rosetta and produced the validated seven-view acceptance report"
-    },
-    {
-      "id": "privileged_helper_boundary",
-      "status": "passed",
-      "evidence": "a real second local macOS user could not connect to the owner-only privileged-helper socket while the socket owner succeeded; the kernel enforced the denial, and the temporary account, UID lookup, home directory, Directory Services plist, and account-owned processes were removed after the test"
     },
     {
       "id": "uninstall",

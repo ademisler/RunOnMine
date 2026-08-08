@@ -3,9 +3,10 @@ schema = 1
 [[gate]]
 id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, MacMCP invariants, and reboot evidence."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 requires physical macOS clean-install acceptance. Native universal package/CLI/MCP/desktop smoke is supplemental until the FileVault-protected reboot cycle completes."
+evidence = "Fresh physical Apple Silicon clean-install acceptance passed for exact source 03db4cbcf733c406f71dbc8a0870de34187cd268 and DMG SHA-256 687c4352f6eeb094570df11a7625bde6556b637272c27d45585c4ef345746a69: arm64 and Rosetta x86_64 desktop views, native menu-bar lifecycle, LaunchAgent reboot recovery, authenticated MCP approval/deny, Cloudflare Quick Tunnel recovery, Emergency Lock, retained-data uninstall, explicit purge, zero RunOnMine residue, and unchanged MacMCP broker/tunnel/loopback-45799 invariants."
+evidence_file = "acceptance/evidence/macos-universal-clean-install.json"
 
 [[gate]]
 id = "linux-clean-install"
