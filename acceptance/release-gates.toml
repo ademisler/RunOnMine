@@ -37,7 +37,7 @@ id = "hosted-platform-matrix"
 description = "Run the macOS ARM64/Intel, Windows x86_64, Linux ARM64, and clean-image artifact-preflight matrix including Linux desktop for the release candidate."
 status = "blocked"
 required_for = ["public-beta"]
-evidence = "Artifact preflight run 31218863681 for freeze commit 78b4b5d ended before checkout on macOS, Windows, Linux x86_64, Linux ARM64, and Linux desktop. GitHub explicitly reported that the jobs were not started because recent account payments failed or the spending limit must be increased; public beta remains blocked until hosted execution is restored."
+evidence = "Artifact preflight run 31235857762 on release-metadata commit 05c3ef2 for frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 ended before checkout on macOS, Windows, Linux x86_64, Linux ARM64, and Linux desktop. GitHub explicitly reported for all five jobs that recent account payments failed or the spending limit must be increased; public beta remains blocked until hosted execution is restored."
 
 [[gate]]
 id = "windows-helper-security-review"
@@ -50,9 +50,10 @@ evidence_file = "acceptance/evidence/windows-helper-security-review.json"
 [[gate]]
 id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
-status = "pending"
+status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Complete the owner risk review after frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 has fresh Linux and Windows evidence and the final complete-history secret scan is recorded."
+evidence = "Owner-directed final review for frozen source 03db4cbcf733c406f71dbc8a0870de34187cd268 records fresh physical macOS, Linux x86_64/desktop/ARM64, Windows clean-install and real Windows helper-boundary evidence; final xtask verify --headless exited 0 and Gitleaks scanned 229 commits with no leaks. Remaining public-beta risks are explicitly fail-closed: hosted GitHub billing/spending, independent third-party security review, macOS Developer ID/notarization credentials, Windows publisher signing credentials, and protected-main plan support."
+evidence_file = "acceptance/evidence/owner-risk-review.json"
 
 [[gate]]
 id = "external-security-review"
