@@ -65,9 +65,9 @@ evidence = "Requires an independent reviewer. Self-authored tests and this autom
 [[gate]]
 id = "public-pr-runner-isolation"
 description = "Prevent untrusted fork pull requests from executing on persistent self-hosted infrastructure."
-status = "pending"
+status = "passed"
 required_for = ["public-beta"]
-evidence = "Checked-in CI, security, coverage, fuzz, mutation, and soak workflows use GitHub-hosted runners only. The repository-level persistent self-hosted runner must be deregistered before this gate can pass."
+evidence = "Checked-in CI, security, coverage, fuzz, mutation, and soak workflows use GitHub-hosted runners only. After merge 7240f29, the dedicated RunOnMine repository runner was stopped and disabled on Oty, GitHub runner registration id 22 was deleted, the repository runner inventory returned zero runners, and the runonmine-ci account had zero Runner.Listener/Runner.Worker processes."
 
 [[gate]]
 id = "macos-signing-notarization"
