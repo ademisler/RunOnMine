@@ -374,10 +374,10 @@ impl StateStore {
         }
         let audit_mac = AuditMacKey::load_or_create(path)?;
         let _migration_lock = StateMigrationLock::acquire(path)?;
-        let connection = Connection::open(path)
+        let mut connection = Connection::open(path)
             .with_context(|| format!("failed to open state database at {}", path.display()))?;
         configure_connection(&connection)?;
-        migrate(&connection, &audit_mac)?;
+        migrate(&mut connection, &audit_mac)?;
         restrict_sqlite_files(path)?;
         let approval_notifications = ApprovalNotifications::for_state_db(path)?;
         Ok(Self {
@@ -389,9 +389,9 @@ impl StateStore {
 
     pub fn in_memory() -> Result<Self> {
         let audit_mac = AuditMacKey::generate()?;
-        let connection = Connection::open_in_memory()?;
+        let mut connection = Connection::open_in_memory()?;
         configure_connection(&connection)?;
-        migrate(&connection, &audit_mac)?;
+        migrate(&mut connection, &audit_mac)?;
         Ok(Self {
             worker: Arc::new(SqliteWorker::start(connection)?),
             audit_mac,

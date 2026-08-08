@@ -757,6 +757,63 @@ fn state_store_open_waits_for_an_existing_writer() -> Result<()> {
 }
 
 #[test]
+fn current_schema_missing_security_table_fails_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("state.db");
+    drop(StateStore::open(&database)?);
+    {
+        let connection = Connection::open(&database)?;
+        connection.execute("DROP TABLE persistent_grants", [])?;
+    }
+    let Err(error) = StateStore::open(&database) else {
+        bail!("missing current-schema table unexpectedly opened");
+    };
+    assert!(
+        format!("{error:#}")
+            .contains("current state schema is missing required table persistent_grants")
+    );
+    Ok(())
+}
+
+#[test]
+fn state_store_open_survives_concurrent_live_writes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("state.db");
+    let writer_store = StateStore::open(&database)?;
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let writer_barrier = Arc::clone(&barrier);
+    let writer = std::thread::spawn(move || -> Result<()> {
+        writer_barrier.wait();
+        for index in 0..128 {
+            writer_store
+                .append_audit(&test_audit_event(&format!("concurrent write {index}")))
+                .with_context(|| format!("writer append {index}"))?;
+            std::thread::yield_now();
+        }
+        Ok(())
+    });
+
+    barrier.wait();
+    for index in 0..32 {
+        let reopened =
+            StateStore::open(&database).with_context(|| format!("concurrent reopen {index}"))?;
+        let pending = reopened
+            .pending_approvals()
+            .with_context(|| format!("read pending approvals from reopened store {index}"))?;
+        assert!(pending.is_empty());
+        std::thread::yield_now();
+    }
+    writer
+        .join()
+        .map_err(|_| anyhow!("concurrent state writer panicked"))??;
+
+    let final_store = StateStore::open(&database)?;
+    assert_eq!(final_store.audit_tail(256)?.len(), 128);
+    assert!(final_store.verify_audit_chain()?);
+    Ok(())
+}
+
+#[test]
 fn concurrent_legacy_migration_is_serialized_and_idempotent() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("state").join("state.db");
@@ -833,10 +890,10 @@ fn malformed_wal_never_causes_silent_empty_state_fallback() -> Result<()> {
 
 #[test]
 fn state_schema_version_is_recorded_and_future_versions_are_rejected() -> Result<()> {
-    let connection = Connection::open_in_memory()?;
+    let mut connection = Connection::open_in_memory()?;
     configure_connection(&connection)?;
     let audit_mac = AuditMacKey::generate()?;
-    migrate(&connection, &audit_mac)?;
+    migrate(&mut connection, &audit_mac)?;
     let version: i64 = connection.query_row(
         "SELECT version FROM schema_versions WHERE component = 'core_state'",
         [],
@@ -847,7 +904,7 @@ fn state_schema_version_is_recorded_and_future_versions_are_rejected() -> Result
         "UPDATE schema_versions SET version = 999 WHERE component = 'core_state'",
         [],
     )?;
-    assert!(migrate(&connection, &audit_mac).is_err());
+    assert!(migrate(&mut connection, &audit_mac).is_err());
     Ok(())
 }
 fn test_audit_event(summary: &str) -> AuditEvent {

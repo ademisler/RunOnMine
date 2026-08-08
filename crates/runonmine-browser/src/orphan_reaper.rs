@@ -774,24 +774,24 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()?;
         let pid = child.id();
-        let process = wait_for_process(pid, Duration::from_secs(5))
-            .context("test Chromium did not become observable")?;
         let current_user = current_user_id(&System::new_all())
             .cloned()
             .context("test user identity is unavailable")?;
         let token = format!("--runonmine-owner-token={}", lease.record.token);
-        if process.user_id.as_ref() != Some(&current_user)
-            || !process_is_live_snapshot(process.status)
-            || !command_contains_exact(&process.command, OsStr::new(&token))
-            || !command_references_profile(&process.command, &lease.record.profile_directory)
-            || !process.exe().is_some_and(|actual| {
-                executable_matches(actual, &lease.record.executable, ProcessMatchMode::Pending)
-            })
-        {
+        let process = wait_for_matching_process(pid, Duration::from_secs(15), |process| {
+            process.user_id.as_ref() == Some(&current_user)
+                && process_is_live_snapshot(process.status)
+                && command_contains_exact(&process.command, OsStr::new(&token))
+                && command_references_profile(&process.command, &lease.record.profile_directory)
+                && process.exe().is_some_and(|actual| {
+                    executable_matches(actual, &lease.record.executable, ProcessMatchMode::Pending)
+                })
+        });
+        let Some(process) = process else {
             let _ignored = child.kill();
             let _ignored = child.wait();
-            bail!("test Chromium did not match its prepared lease");
-        }
+            bail!("test Chromium did not reach the prepared lease identity before timeout");
+        };
         lease.record.owner_pid = u32::MAX;
         lease.record.owner_start_time_unix_seconds = 1;
         lease.record.browser_pid = Some(pid);
@@ -812,12 +812,22 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn wait_for_process(pid: u32, timeout: Duration) -> Option<OwnedProcessSnapshot> {
+    fn wait_for_matching_process(
+        pid: u32,
+        timeout: Duration,
+        matches: impl Fn(&OwnedProcessSnapshot) -> bool,
+    ) -> Option<OwnedProcessSnapshot> {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             let system = System::new_all();
             if let Some(process) = system.process(Pid::from_u32(pid)) {
-                return Some(OwnedProcessSnapshot::from_process(process));
+                let snapshot = OwnedProcessSnapshot::from_process(process);
+                if matches(&snapshot) {
+                    return Some(snapshot);
+                }
+                if !process_is_live_snapshot(snapshot.status) {
+                    return None;
+                }
             }
             thread::sleep(Duration::from_millis(25));
         }
