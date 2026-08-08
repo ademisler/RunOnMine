@@ -25,7 +25,7 @@ LaunchAgent/MCP recovery can be verified.
 
 Before creating a tag:
 
-1. run `cargo run --locked -p xtask -- verify` without skipping the secret scan;
+1. run `python3 scripts/release/check-duplicate-dependencies.py` and `cargo run --locked -p xtask -- verify` without skipping the secret scan;
 2. keep headless line coverage at or above the enforced baseline and review the latest scheduled fuzz run;
 3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, Linux x86_64 desktop, and Windows x86_64 builds;
 4. complete install, restart, connect, tool-call, lock, and uninstall acceptance on a Mac, clean Linux VPS, clean Linux desktop, and Windows VM;
@@ -159,7 +159,9 @@ before upload.
 
 `python3 scripts/release/check-duplicate-dependencies.py` is a ratchet: new
 duplicate package names or versions fail, while intentional removals are
-accepted. Update the baseline only after reviewing platform compatibility and
+accepted. The required Linux quality PR check runs this ratchet before merge so
+a stale baseline cannot first surface during tag publication. Update the baseline
+only after reviewing dependency paths, platform compatibility, advisories, and
 audit/binary-size impact.
 
 Unsigned artifacts are allowed for beta distribution when the release notes and
