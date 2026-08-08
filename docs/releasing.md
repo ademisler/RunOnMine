@@ -191,12 +191,17 @@ scripts/release/branch-protection.sh apply
 scripts/release/branch-protection.sh check
 ```
 
-The policy requires strict Linux quality, platform matrix and dependency-review
-checks, one CODEOWNERS-approved review, conversation resolution and linear
-history, and disables force-push and deletion. Review the exact GitHub check names
-before applying after workflow renames. On private repositories where the current
-GitHub plan returns HTTP 403 for branch protection, leave the machine-readable
-gate blocked rather than claiming the policy is active.
+The policy requires strict Linux quality, Platform matrix and Dependency review
+checks, administrator enforcement, pull requests, conversation resolution and
+linear history, and disables force-push and deletion. The repository currently
+has one maintainer, so `RUNONMINE_REQUIRED_APPROVALS` defaults to `0`; GitHub still
+requires the pull-request and status-check policy, but no second-person approval
+is fabricated. Set `RUNONMINE_REQUIRED_APPROVALS=1` (or higher) when another
+trusted maintainer is available; CODEOWNERS and last-push approval become
+mandatory in that mode. Review the exact GitHub check names before applying after
+workflow renames. On private repositories where the current GitHub plan returns
+HTTP 403 for branch protection, leave the machine-readable gate blocked rather
+than claiming the policy is active.
 
 See [release-rollback.md](release-rollback.md) for rollback and downgrade rules.
 
@@ -209,4 +214,6 @@ where applicable, uninstall, and residue checks. A job with no assigned runner
 or executed steps produces no acceptance evidence. Its
 report type is `artifact_preflight_not_release_acceptance` and explicitly does
 not claim an operating-system reboot, publisher signature or notarization.
-Those items remain required evidence for the release clean-install gate.
+Clean-install and reboot evidence remain separate candidate gates. Publisher
+signature/notarization are recorded when present but are optional for an
+explicitly unsigned beta.

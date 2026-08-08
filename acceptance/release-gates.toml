@@ -72,7 +72,7 @@ evidence = "Requires a Windows code-signing certificate and protected CI secret 
 
 [[gate]]
 id = "protected-main"
-description = "Enforce pull requests, required checks, review rules, and no force-pushes on main."
+description = "Enforce pull requests, required checks, administrator enforcement, conversation resolution, linear history, and no force-push/deletion on main."
 status = "blocked"
 required_for = ["public-beta"]
 evidence = "GitHub returns HTTP 403: branch protection and repository rulesets require GitHub Pro or a public repository for this private repository."

@@ -69,3 +69,19 @@ jobs:
         run: >-
           cargo test -p runonmine -p runonmine-agent -p runonmine-desktop
           -p runonmine-helper --all-features --locked
+
+
+  platform-matrix:
+    name: Platform matrix
+    if: always()
+    needs: [test-headless, desktop-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform job to pass
+        env:
+          HEADLESS_RESULT: ${{ needs.test-headless.result }}
+          DESKTOP_RESULT: ${{ needs.desktop-build.result }}
+        run: |
+          test "$HEADLESS_RESULT" = success
+          test "$DESKTOP_RESULT" = success

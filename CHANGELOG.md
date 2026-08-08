@@ -5,6 +5,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Make protected-main enforcement match the public workflow surface: add stable Platform matrix and Dependency review checks, keep external Actions SHA-pinned, and support a solo-maintainer PR policy with zero mandatory reviewers until a second trusted maintainer is available.
+
 - Prepare the repository for public contribution with canonical Apache-2.0 licensing, official website package metadata, a support policy, public-beta security wording, and explicit owner-only controls for visibility and release publication.
 
 - Move all repository Linux quality, security, coverage, fuzz, mutation, and soak jobs from the persistent RunOnMine runner to ephemeral GitHub-hosted Ubuntu; install pinned Gitleaks explicitly and remove owner-specific runner HOME/PATH assumptions before public visibility.
