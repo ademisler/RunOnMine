@@ -13,26 +13,20 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HOME: /home/runonmine-ci
-  USER: runonmine-ci
-  LOGNAME: runonmine-ci
-  CARGO_HOME: /home/runonmine-ci/.cargo
-  RUSTUP_HOME: /home/runonmine-ci/.rustup
-  PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
   security-sweep:
-    runs-on: [self-hosted, Linux, X64, runonmine]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify isolated runner environment
-        run: ./scripts/ci/verify-runner-environment.sh
+      - name: Install pinned Gitleaks
+        run: ./scripts/ci/install-gitleaks.sh
       - name: Configure ephemeral Cargo target
         run: |
           target="${RUNNER_TEMP}/runonmine-security-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

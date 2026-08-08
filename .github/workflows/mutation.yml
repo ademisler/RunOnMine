@@ -13,17 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HOME: /home/runonmine-ci
-  USER: runonmine-ci
-  LOGNAME: runonmine-ci
-  CARGO_HOME: /home/runonmine-ci/.cargo
-  RUSTUP_HOME: /home/runonmine-ci/.rustup
-  PATH: /home/runonmine-ci/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   CARGO_INCREMENTAL: 0
 
 jobs:
   critical-state-machines:
-    runs-on: [self-hosted, Linux, X64, runonmine]
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     concurrency:
       group: mutation-${{ matrix.name }}
@@ -44,8 +38,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
-      - name: Verify isolated runner environment
-        run: ./scripts/ci/verify-runner-environment.sh
       - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
         with:
           toolchain: 1.95.0

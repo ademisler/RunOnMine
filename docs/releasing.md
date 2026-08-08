@@ -82,9 +82,9 @@ The workflow opens a draft prerelease only. Beta artifacts may be unsigned and m
 
 ## Hosted platform validation
 
-`CI` exposes one stable `Linux quality` check. Pushes, manual runs, and pull requests from owner branches use the hardened self-hosted runner. Fork pull requests are evaluated from the protected base workflow and route to GitHub-hosted `ubuntu-24.04`; they never receive the persistent runner or repository secrets. The hosted path installs Gitleaks 8.24.3 only after verifying the checked-in official SHA-256. Both paths execute the same headless quality, MCP, and coverage contract and remove ephemeral targets after the run. Independent `Security` and `Coverage` workflows remain available for manual dispatch and scheduled sweeps.
+`CI` exposes one stable `Linux quality` check on GitHub-hosted `ubuntu-24.04` for pushes, manual runs, owner pull requests, and fork pull requests. No repository workflow selects a persistent self-hosted runner. The job installs Gitleaks 8.24.3 only after verifying the checked-in official SHA-256, executes the headless quality, MCP, and coverage contract, and removes ephemeral targets after the run. `Security`, `Coverage`, `Fuzz`, `Mutation`, and the Linux `Soak` job use the same ephemeral hosted trust model.
 
-`Platform CI` is separate from the self-hosted quality path. Its macOS
+`Platform CI` is separate from the Linux quality path. Its macOS
 arm64/x86_64, Windows x86_64, and Linux ARM64 jobs run on every pull request and
 on manual dispatch; there is no repository-variable skip guard. `Artifact
 preflight` runs on every push to `main` and on manual dispatch, adding hosted

@@ -5,6 +5,8 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Move all repository Linux quality, security, coverage, fuzz, mutation, and soak jobs from the persistent RunOnMine runner to ephemeral GitHub-hosted Ubuntu; install pinned Gitleaks explicitly and remove owner-specific runner HOME/PATH assumptions before public visibility.
+
 - Define public beta as an exact-candidate, hosted-CI and protected-main quality profile that may ship explicitly unsigned; Developer ID/notarization, Windows Authenticode, and independent external review remain recommended hardening and become fail-closed only when their signing paths are configured.
 
 - Make Cloudflare Quick Tunnel runtime discovery resilient to a missed one-shot cloudflared startup URL: when the loopback readiness endpoint is healthy but generation state still has no public URL, recover the strictly validated `trycloudflare.com` hostname from a two-second, 256 KiB-bounded loopback metrics read; retain restart/backoff clearing and generation-bound state semantics.

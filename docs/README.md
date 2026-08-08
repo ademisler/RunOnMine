@@ -50,7 +50,7 @@ the final authority when a document and implementation disagree.
   and branch protection.
 - [Rollback runbook](release-rollback.md): application, connector, state, and
   helper recovery.
-- [Self-hosted CI runner](ci-runner.md): isolated runner identity and cleanup
+- [GitHub-hosted CI](ci-runner.md): ephemeral runner trust model, pinned tooling, and cleanup
   contract.
 
 Repository-wide contribution and disclosure rules are in

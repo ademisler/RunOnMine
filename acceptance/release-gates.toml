@@ -65,9 +65,9 @@ evidence = "Requires an independent reviewer. Self-authored tests and this autom
 [[gate]]
 id = "public-pr-runner-isolation"
 description = "Prevent untrusted fork pull requests from executing on persistent self-hosted infrastructure."
-status = "passed"
+status = "pending"
 required_for = ["public-beta"]
-evidence = "The base-branch CI workflow routes fork pull requests to ubuntu-24.04 with a checksum-pinned Gitleaks bootstrap; only trusted owner branches select the dedicated runonmine runner label."
+evidence = "Checked-in CI, security, coverage, fuzz, mutation, and soak workflows use GitHub-hosted runners only. The repository-level persistent self-hosted runner must be deregistered before this gate can pass."
 
 [[gate]]
 id = "macos-signing-notarization"
