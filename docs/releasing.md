@@ -30,7 +30,7 @@ Before creating a tag:
 3. pass macOS arm64/x86_64, Linux x86_64/aarch64 headless, Linux x86_64 desktop, and Windows x86_64 builds;
 4. complete install, restart, connect, tool-call, lock, and uninstall acceptance on a Mac, clean Linux VPS, clean Linux desktop, and Windows VM;
 5. confirm install, lock, uninstall, and purge do not modify unrelated local services or application data;
-6. record evidence in `acceptance/release-gates.toml` and pass `cargo run --locked -p xtask -- release-readiness --profile private-beta`;
+6. record evidence in `acceptance/release-gates.toml` and pass `cargo run --locked -p xtask -- release-readiness --profile public-beta`;
 7. present remaining risks and the secret-scan result to the repository owner.
 
 After all production code, dependency, workflow, documentation, and packaging
@@ -51,7 +51,9 @@ a later code, dependency, workflow, package, or narrative-documentation change
 invalidates the candidate even if it is subsequently reverted.
 
 The release workflow runs readiness at the tag commit, then checks out and builds
-the frozen source revision. It stops while any gate required for the selected
+the frozen source revision. Beta tag pushes always resolve to `public-beta`;
+manual dispatch remains an explicit profile choice so `private-beta` validation
+can still be run deliberately. It stops while any gate required for the selected
 profile is `pending` or `blocked`. Public beta requires hosted platform CI,
 untrusted-fork isolation, protected-main enforcement, exact-candidate platform
 acceptance, and owner risk review. Signing/notarization and independent review
@@ -103,6 +105,7 @@ misclassify the run as a source-code failure.
 ```console
 cargo run --locked -p xtask -- verify
 cargo run --locked -p xtask -- freeze-release-candidate
+cargo run --locked -p xtask -- release-readiness --profile public-beta
 cargo run --locked -p xtask -- release-readiness --profile private-beta
 cargo run --quiet --locked -p xtask -- release-candidate-revision
 cargo run --locked -p xtask -- sync-versions

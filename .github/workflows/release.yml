@@ -20,7 +20,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_PROFILE: ${{ inputs.profile || 'private-beta' }}
+  RELEASE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'public-beta' }}
 
 jobs:
   release-plan:
