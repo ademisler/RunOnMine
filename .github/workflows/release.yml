@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-dist@0.32.0
       - run: cargo run --locked -p xtask -- verify-versions
@@ -75,7 +75,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "aarch64-apple-darwin,x86_64-apple-darwin"
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-dist@0.32.0,cargo-packager@0.11.8
       - name: Prepare App Store Connect API key
@@ -134,7 +134,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "${{ matrix.target }}"
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-dist@0.32.0,cargo-packager@0.11.8
       - run: dist build --artifacts=local --target=${{ matrix.target }}
@@ -182,7 +182,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-0
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-unknown-linux-gnu
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-packager@0.11.8
       - name: Build Linux desktop applications
@@ -225,7 +225,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "x86_64-pc-windows-msvc"
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-dist@0.32.0,cargo-packager@0.11.8
       - run: choco install nsis --yes --no-progress
