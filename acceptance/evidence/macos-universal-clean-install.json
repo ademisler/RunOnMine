@@ -2,10 +2,10 @@
   "schema_version": 1,
   "platform": "macos-universal",
   "artifact": "RunOnMine_0.1.0-beta.1_universal.dmg",
-  "artifact_sha256": "11226dd4f9c634220d8746d84ac6a152c48dc3ae79c362620317ce5bb75f45e9",
-  "source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
+  "artifact_sha256": "bbd35f1fbeedcd1d3e35b19f0b6873f0b924f2f81e38828192371b003b74a828",
+  "source_revision": "620aed5635c8e2ca428715e5da3089f4bbbf4585",
   "tester": "OpenAI automated acceptance on owner-authorized Apple Silicon Mac",
-  "tested_at": "2026-08-08T20:16:51Z",
+  "tested_at": "2026-08-09T05:45:27Z",
   "steps": [
     {"id":"install","status":"passed","evidence":"DMG mounted read-only; RunOnMine.app copied to /Applications; bundle ID, four universal binaries, version and code-signature structure verified"},
     {"id":"reboot","status":"passed","evidence":"macOS boot session UUID changed after the installed per-user LaunchAgent was configured"},

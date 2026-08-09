@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
   "repository": "ademisler/RunOnMine",
-  "audited_at": "2026-08-08T22:23:27Z",
-  "frozen_source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
-  "release_metadata_head_at_audit": "ec4a4995fd9435a9b29c989fc4790bbd70cb898c",
+  "audited_at": "2026-08-09T07:35:11Z",
+  "frozen_source_revision": "620aed5635c8e2ca428715e5da3089f4bbbf4585",
+  "release_metadata_head_at_audit": "cf177efbed7632770edb33b7335a0170687ccb43",
   "public_surface": {
     "visibility": "public",
     "default_branch": "main",
-    "remote_branch_count": 1,
+    "remote_branch_count": 2,
+    "temporary_branch_at_audit": "ci/public-beta-620aed5",
     "tag_count": 0,
     "release_count": 0,
     "open_pull_request_count": 0,
@@ -17,7 +18,7 @@
     "deploy_key_count": 0,
     "environment_count": 0,
     "remaining_actions_artifacts": 5,
-    "remaining_actions_artifacts_scope": "exact frozen-source Artifact preflight run 31273372524 only"
+    "remaining_actions_artifacts_scope": "exact frozen-source Artifact preflight run 31296994900 only"
   },
   "branch_protection": {
     "required_status_checks": [
@@ -25,6 +26,7 @@
       "Platform matrix",
       "Dependency review"
     ],
+    "strict": true,
     "enforce_admins": true,
     "conversation_resolution": true,
     "linear_history": true,
@@ -37,20 +39,16 @@
     "default_workflow_permissions": "read",
     "can_approve_pull_request_reviews": false,
     "allowed_actions": "selected",
+    "sha_pinning_required": true,
     "github_owned_allowed": true,
     "verified_marketplace_actions_allowed": false,
-    "third_party_allowlist": [
-      "dtolnay/rust-toolchain",
-      "softprops/action-gh-release",
-      "taiki-e/install-action"
-    ],
-    "external_uses_references": 47,
-    "unpinned_external_uses_references": 0,
     "third_party_allowlist_exact": [
       "dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1",
       "softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
       "taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf"
-    ]
+    ],
+    "external_uses_references": 47,
+    "unpinned_external_uses_references": 0
   },
   "security": {
     "private_vulnerability_reporting": true,
@@ -78,53 +76,62 @@
     }
   },
   "history_privacy": {
-    "public_main_commits": 299,
-    "gitleaks_public_main_findings": 0,
-    "final_verify_gitleaks_findings": 0,
-    "public_actions_runs_scanned": 33,
-    "public_actions_log_files_scanned": 232,
+    "public_main_commits": 304,
+    "public_pull_head_refs_scanned": 81,
+    "gitleaks_public_visible_non_merge_commits_scanned": 283,
+    "gitleaks_raw_matches_before_checked_in_ignore": 4,
+    "checked_in_gitleaks_ignore_entries": 4,
+    "gitleaks_public_main_and_pull_head_findings": 0,
+    "public_actions_runs_scanned": 89,
+    "public_actions_log_files_scanned": 512,
+    "public_actions_secret_findings": 0,
     "public_actions_personal_or_internal_trace_matches": 0,
-    "issue_or_pull_request_records_scanned": 77,
-    "issue_comments_scanned": 46,
-    "issue_pull_request_personal_or_internal_trace_matches": 0,
-    "commit_messages_scanned": 299,
-    "commit_message_personal_or_internal_trace_matches": 0,
+    "public_text_records_scanned": 128,
+    "public_text_secret_findings": 0,
+    "public_text_personal_or_internal_trace_matches": 0,
     "current_tree_personal_email_matches": 0,
     "current_tree_owner_specific_home_path_matches": 0,
     "current_tree_internal_mcp_tool_matches": 0,
     "historic_personal_email_address_count_in_commit_metadata": 1,
     "historic_commits_with_personal_email_metadata": 78,
-    "historic_removed_internal_tool_diff_commits": 16,
-    "historic_removed_owner_linux_path_diff_commits": 7,
     "future_repo_git_identity_uses_github_noreply": true,
+    "public_github_profile_email": null,
     "history_rewrite_performed": false,
-    "history_rewrite_reason": "A destructive rewrite would invalidate the frozen revision and exact-candidate evidence and cannot guarantee removal from existing public caches or pull-request refs. The historic identity is not a credential and no secret scanner finding exists.",
-    "public_pull_head_refs_scanned": 76,
-    "gitleaks_public_main_and_pull_head_findings": 0,
-    "gitleaks_public_visible_non_merge_commits_scanned": 272,
-    "artifact_files_privacy_scanned": 46,
+    "history_rewrite_reason": "A destructive rewrite would invalidate frozen revision/evidence and cannot guarantee removal from already-public caches or pull-request refs. The historic identity is not a credential and no secret scanner finding exists.",
+    "artifact_download_and_extracted_files_scanned": 60,
     "artifact_personal_or_internal_trace_matches": 0,
-    "archive_files_scanned": 10,
-    "archive_members_scanned": 64,
-    "unsafe_archive_member_paths": 0
+    "archive_files_scanned": 5,
+    "archive_members_scanned": 32,
+    "unsafe_archive_member_paths": 0,
+    "credentialish_archive_member_names": 0,
+    "checksum_sidecars_verified": 13,
+    "checksum_sidecar_mismatches": 0,
+    "cyclonedx_sboms_parsed": 5,
+    "cyclonedx_components_per_sbom": 710
   },
   "verification": {
-    "docs_check": "passed",
-    "xtask_verify": "passed",
-    "dependency_advisories": "passed",
-    "dependency_bans": "passed",
-    "licenses": "passed",
-    "dependency_sources": "passed",
-    "final_verify_secret_scan": "no leaks found"
+    "docs_check": "passed before evidence commit and required again on evidence commit",
+    "xtask_verify": "required on evidence commit before merge",
+    "dependency_advisories": "required by xtask verify",
+    "dependency_bans": "required by xtask verify",
+    "licenses": "required by xtask verify",
+    "dependency_sources": "required by xtask verify",
+    "final_verify_secret_scan": "required by xtask verify",
+    "git_integrity": "git fsck --full --strict passed"
   },
   "release_acceptance": {
-    "frozen_source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
+    "frozen_source_revision": "620aed5635c8e2ca428715e5da3089f4bbbf4585",
     "macos_universal": "passed",
+    "macos_dmg_sha256": "bbd35f1fbeedcd1d3e35b19f0b6873f0b924f2f81e38828192371b003b74a828",
     "linux_x86_64": "passed",
+    "linux_x86_64_deb_sha256": "f191a9808833c46e6057337a97b0a79af1434c244d9c73b539c050daa0966d76",
     "linux_desktop_x86_64": "passed",
+    "linux_desktop_x86_64_deb_sha256": "9109a590ccffc80639a3273606c323e4f84ee7f9e99d5adc4b85574bdb19221d",
     "linux_aarch64": "passed",
+    "linux_aarch64_deb_sha256": "b19f01d7fb93aef5d4df7f0102ecc40b680f3867cdca867975373ac6bee85501",
     "windows_x86_64": "passed",
-    "windows_artifact_sha256": "26bea81ff040e75f8650545838692dfc29bbe42396e11dcf3c640ac18dd5fbc1",
+    "windows_artifact_sha256": "148ee04ba604a4a8dbf5f346a490cfaef0ca53f2f06178b613fdfff087ebd855",
+    "windows_portable_sha256": "02a0bc50a5bfd05d4f6278fd50ee3ab81b53d3d8916152f915613365ab99bd7e",
     "windows_reboot_agent_mcp_uninstall_residue": "passed"
   }
 }

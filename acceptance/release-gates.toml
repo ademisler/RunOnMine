@@ -5,7 +5,7 @@ id = "macos-clean-install"
 description = "Install the universal DMG on a clean supported macOS machine, validate native and Rosetta desktop launch, LaunchAgent lifecycle, approved MCP execution, Cloudflare Quick Tunnel recovery, retained-data uninstall, full purge, unrelated-service coexistence, and reboot evidence."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Fresh physical Apple Silicon clean-install acceptance passed for exact source a20c5d4b9023cc7c0fb861908aac6f8be84bf426 and DMG SHA-256 11226dd4f9c634220d8746d84ac6a152c48dc3ae79c362620317ce5bb75f45e9: arm64 and Rosetta x86_64 desktop views, native menu-bar lifecycle, LaunchAgent reboot recovery, authenticated MCP approval/deny, Cloudflare Quick Tunnel recovery, Emergency Lock, retained-data uninstall, explicit purge, and zero RunOnMine residue."
+evidence = "Fresh physical Apple Silicon clean-install acceptance passed for exact source 620aed5635c8e2ca428715e5da3089f4bbbf4585 and DMG SHA-256 bbd35f1fbeedcd1d3e35b19f0b6873f0b924f2f81e38828192371b003b74a828: arm64 and Rosetta x86_64 desktop views, native menu-bar lifecycle, LaunchAgent reboot recovery, authenticated MCP approval/deny, Cloudflare Quick Tunnel recovery, Emergency Lock, retained-data uninstall, explicit purge, and zero RunOnMine residue."
 evidence_file = "acceptance/evidence/macos-universal-clean-install.json"
 
 [[gate]]
@@ -13,7 +13,7 @@ id = "linux-clean-install"
 description = "Install the headless package and service paths on clean Linux x86_64 and ARM64 hosts, restart, connect, exercise tools, and uninstall."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Fresh exact-candidate evidence passed for source a20c5d4b9023cc7c0fb861908aac6f8be84bf426: Linux x86_64 DEB SHA-256 2d4bf633265d6bff09a92a53cec2fc57d65875a969195da5a096909002bab518 and ARM64 DEB SHA-256 35b5c6abfec66232c519c2eccdb19af01550d73905dcc3d0213620f80d8f7543; reboot, agent recovery, MCP approval/deny, connector, Emergency Lock, uninstall and residue checks passed."
+evidence = "Fresh exact-candidate evidence passed for source 620aed5635c8e2ca428715e5da3089f4bbbf4585: Linux x86_64 DEB SHA-256 f191a9808833c46e6057337a97b0a79af1434c244d9c73b539c050daa0966d76 and ARM64 DEB SHA-256 b19f01d7fb93aef5d4df7f0102ecc40b680f3867cdca867975373ac6bee85501; reboot, agent recovery, MCP approval/deny, connector, Emergency Lock, uninstall and residue checks passed."
 evidence_file = "acceptance/evidence/linux-x86_64-clean-install.json"
 
 [[gate]]
@@ -21,7 +21,7 @@ id = "linux-desktop-clean-install"
 description = "Install the standalone x86_64 desktop DEB on a clean Linux desktop, validate all seven views, StatusNotifier close/reopen, MCP lifecycle, uninstall, and package-owned residue cleanup."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Fresh exact-candidate Linux desktop acceptance passed for source a20c5d4b9023cc7c0fb861908aac6f8be84bf426 and desktop DEB SHA-256 323a844465e65f968610eca5a57f847d93905c6d7da38d5b6b13c8a3a66df09b: seven views, real X11 launch, close-to-tray/reopen, single-instance behavior, reboot, MCP lifecycle, uninstall and residue checks passed."
+evidence = "Fresh exact-candidate Linux desktop acceptance passed for source 620aed5635c8e2ca428715e5da3089f4bbbf4585 and desktop DEB SHA-256 9109a590ccffc80639a3273606c323e4f84ee7f9e99d5adc4b85574bdb19221d: seven views, real X11 launch, close-to-tray/reopen, single-instance behavior, reboot, MCP lifecycle, uninstall and residue checks passed."
 evidence_file = "acceptance/evidence/linux-desktop-x86_64-clean-install.json"
 
 [[gate]]
@@ -29,7 +29,7 @@ id = "windows-clean-install"
 description = "Install the current-user NSIS package on a clean Windows x86_64 VM, validate all seven desktop views, WM_CLOSE hide-to-tray, Scheduled Task and optional helper boundaries, approved MCP execution, retained-data uninstall, managed residue, and reboot evidence."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Fresh owner-authorized Windows Server 2025 Desktop Experience VM acceptance passed for exact source a20c5d4b9023cc7c0fb861908aac6f8be84bf426, NSIS SHA-256 26bea81ff040e75f8650545838692dfc29bbe42396e11dcf3c640ac18dd5fbc1 and portable ZIP SHA-256 70af7fdf895801f46bc4f5cf1185e3be6eac95754fb5f453a2dd6eb091b44509: install, real reboot, agent recovery, authenticated MCP approved fs_write with denied admin_exec, native desktop seven-view and tray/single-instance behavior, helper boundary, uninstall and zero-residue checks passed."
+evidence = "Fresh owner-authorized Windows Server 2025 Desktop Experience VM acceptance passed for exact source 620aed5635c8e2ca428715e5da3089f4bbbf4585, NSIS SHA-256 148ee04ba604a4a8dbf5f346a490cfaef0ca53f2f06178b613fdfff087ebd855 and portable ZIP SHA-256 02a0bc50a5bfd05d4f6278fd50ee3ab81b53d3d8916152f915613365ab99bd7e: install, real reboot, agent recovery, authenticated MCP approved fs_write with denied admin_exec, native desktop seven-view and tray/single-instance behavior, helper boundary, uninstall and zero-residue checks passed."
 evidence_file = "acceptance/evidence/windows-x86_64-clean-install.json"
 
 [[gate]]
@@ -37,7 +37,7 @@ id = "hosted-platform-matrix"
 description = "Run the macOS ARM64/Intel, Windows x86_64, Linux ARM64, and clean-image artifact-preflight matrix including Linux desktop for the release candidate."
 status = "passed"
 required_for = ["public-beta"]
-evidence = "Exact frozen source a20c5d4b9023cc7c0fb861908aac6f8be84bf426 passed hosted Platform CI run 31273387664 and Artifact preflight run 31273372524 across macOS ARM64/Intel, Windows x86_64, Linux x86_64/ARM64 and Linux desktop; CI, Security, Coverage, Fuzz, Mutation and Soak exact-candidate runs also passed."
+evidence = "Exact frozen source 620aed5635c8e2ca428715e5da3089f4bbbf4585 passed hosted Platform CI run 31296994016 and Artifact preflight run 31296994900 across macOS ARM64/Intel, Windows x86_64, Linux x86_64/ARM64 and Linux desktop; CI, Security, Coverage, Fuzz, Mutation and Soak exact-candidate runs also passed."
 evidence_file = "acceptance/evidence/hosted-platform-matrix.json"
 
 [[gate]]
@@ -45,7 +45,7 @@ id = "windows-helper-security-review"
 description = "Review Windows named-pipe ACL, token impersonation, process identity, and allowlisted executable verification on a real Windows VM."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Fresh exact-candidate Windows helper acceptance passed for source a20c5d4b9023cc7c0fb861908aac6f8be84bf426 and NSIS SHA-256 26bea81ff040e75f8650545838692dfc29bbe42396e11dcf3c640ac18dd5fbc1: LocalSystem service identity and owner health passed, a real temporary non-admin second-user token was denied by the named pipe, and helper uninstall was idempotent with empty stderr."
+evidence = "Fresh exact-candidate Windows helper acceptance passed for source 620aed5635c8e2ca428715e5da3089f4bbbf4585 and NSIS SHA-256 148ee04ba604a4a8dbf5f346a490cfaef0ca53f2f06178b613fdfff087ebd855: LocalSystem service identity and owner health passed, a real temporary non-admin second-user token was denied by the named pipe, and helper uninstall was idempotent with empty stderr."
 evidence_file = "acceptance/evidence/windows-helper-security-review.json"
 
 [[gate]]
@@ -53,7 +53,7 @@ id = "owner-risk-review"
 description = "Present remaining risks, complete-history secret scan results, exact-candidate acceptance evidence, and signing limitations to the repository owner."
 status = "passed"
 required_for = ["private-beta", "public-beta"]
-evidence = "Final public-beta risk review completed for frozen source a20c5d4b9023cc7c0fb861908aac6f8be84bf426: all required hosted and physical acceptance gates passed; repository history, 76 public PR head refs, 33 Actions runs / 232 public log files, 123 public issue/PR/comment/review records and extracted release artifacts were scanned with no secret or owner-infrastructure leak. Unsigned macOS/Windows packaging and no independent external review remain explicitly disclosed non-blocking beta limitations. Historical Gmail identity remains only in 78 commit metadata records and is documented as a non-secret residual privacy tradeoff rather than rewriting and invalidating the frozen evidence chain."
+evidence = "Final public-beta risk review completed for frozen source 620aed5635c8e2ca428715e5da3089f4bbbf4585: all required hosted and physical acceptance gates passed; 81 public PR head refs / 283 visible non-merge commits, 89 Actions runs / 512 public log files, 128 public issue/PR/comment/review records and final preflight artifacts were scanned with no remaining secret or owner-infrastructure leak. Unsigned macOS/Windows packaging and no independent external review remain explicitly disclosed non-blocking beta limitations. Historical Gmail identity remains only in 78 commit metadata records and is documented as a non-secret residual privacy tradeoff rather than destructively rewriting public history."
 evidence_file = "acceptance/evidence/owner-risk-review.json"
 
 [[gate]]

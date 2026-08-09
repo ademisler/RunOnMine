@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
   "repository": "ademisler/RunOnMine",
-  "checked_at": "2026-08-08T21:31:06Z",
+  "checked_at": "2026-08-09T07:35:11Z",
   "status": "passed",
   "required_status_checks": [
     "Linux quality",
     "Platform matrix",
     "Dependency review"
   ],
+  "strict_status_checks": true,
   "enforce_admins": true,
   "required_conversation_resolution": true,
   "required_linear_history": true,
@@ -15,7 +16,7 @@
   "allow_deletions": false,
   "required_approving_review_count": 0,
   "rationale": "Sole-maintainer repository; required hosted checks and admin enforcement protect main without creating an impossible self-approval requirement.",
-  "source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
+  "source_revision": "620aed5635c8e2ca428715e5da3089f4bbbf4585",
   "actions_sha_pinning_required": true,
   "repository_runner_count": 0
 }
