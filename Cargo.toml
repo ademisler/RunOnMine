@@ -47,7 +47,7 @@ command-group = { version = "5.0.1", features = ["with-tokio"] }
 directories = "6.0"
 ed25519-dalek = "3.0"
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts"] }
-wgpu = { version = "29.0.4", default-features = false }
+wgpu = { version = "30.0.0", default-features = false }
 egui = "0.35.0"
 hex = "0.4"
 hmac = "0.13"
