@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh nightly-2026-07-18
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-fuzz@0.13.2
       - name: Build ${{ matrix.target }} fuzz target
