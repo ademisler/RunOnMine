@@ -1,45 +1,45 @@
 {
   "schema_version": 1,
-  "source_revision": "a20c5d4b9023cc7c0fb861908aac6f8be84bf426",
-  "reviewed_at": "2026-08-08T22:23:27Z",
+  "source_revision": "620aed5635c8e2ca428715e5da3089f4bbbf4585",
+  "reviewed_at": "2026-08-09T07:35:11Z",
   "verification": {
     "command": "cargo run --locked -p xtask -- verify",
-    "exit_code": 0,
-    "git_visible_non_merge_commits_scanned": 272,
-    "git_secret_scan": "no leaks found, including 76 GitHub pull-request head refs",
-    "public_pr_issue_comment_records_scanned": 123,
+    "evidence_commit_verification": "must pass before merge and tag",
+    "git_visible_non_merge_commits_scanned": 283,
+    "git_secret_scan": "no leaks found after applying the four checked-in synthetic-fixture fingerprints across main plus 81 public pull-request head refs",
+    "raw_history_scanner_matches": "four intentional synthetic test fixtures, all fingerprint-allowlisted; zero remaining findings",
+    "public_text_records_scanned": 128,
     "public_text_secret_scan": "no leaks found",
-    "dependency_policy": "advisories, bans, licenses and sources passed",
+    "dependency_policy": "advisories, bans, licenses and sources are required to pass on the evidence commit",
     "hosted_exact_candidate_runs": {
-      "ci": 31273373611,
-      "security": 31273374922,
-      "coverage": 31273376205,
-      "fuzz": 31273377385,
-      "mutation": 31273378509,
-      "soak": 31273379456,
-      "platform_ci": 31273387664,
-      "artifact_preflight": 31273372524
+      "ci": 31296988392,
+      "security": 31296989295,
+      "coverage": 31296990314,
+      "fuzz": 31296991361,
+      "mutation": 31296992278,
+      "soak": 31296993158,
+      "platform_ci": 31296994016,
+      "artifact_preflight": 31296994900
     },
-    "codeql_default_setup_run": 31279864170,
-    "codeql_default_setup": "actions and python passed; zero open code-scanning alerts",
-    "artifact_privacy_scan": "46 extracted files scanned with zero owner/Oty/internal-tool/email/path markers; 10 archives and 64 members had zero unsafe absolute/traversal member paths",
-    "artifact_checksum_sidecars": "all downloaded exact-candidate sidecars matched; CycloneDX SBOMs parsed for five hosted platform artifacts",
-    "git_integrity": "git fsck --full --strict passed for reachable repository objects",
-    "github_public_text_scan": "123 issue/PR/comment/review records; zero secret/email/internal-path/tool findings",
-    "github_actions_public_logs": "33 current public workflow runs / 232 log files scanned; no secrets, personal email, owner paths, internal MCP tool names, Oty host/domain/IP markers",
+    "codeql_default_setup": "actions and python configured weekly; zero open code-scanning alerts",
+    "artifact_privacy_scan": "60 downloaded/extracted files scanned with zero owner/Oty/internal-tool/email/path markers; 5 archives and 32 members had zero unsafe paths and zero credential-like member names",
+    "artifact_checksum_sidecars": "13 exact-candidate sidecars matched; 5 CycloneDX SBOMs parsed with 710 components and 710 dependency entries each",
+    "git_integrity": "git fsck --full --strict passed",
+    "github_public_text_scan": "128 issue/PR/comment/review records; zero secret/email/internal-path/tool findings",
+    "github_actions_public_logs": "89 current public workflow runs / 512 log files scanned; default Gitleaks rules reported zero findings and owner/internal trace markers were zero",
     "repository_public_audit": "acceptance/evidence/repository-public-audit.json"
   },
   "fresh_acceptance": {
-    "macos_universal_dmg_sha256": "11226dd4f9c634220d8746d84ac6a152c48dc3ae79c362620317ce5bb75f45e9",
-    "linux_x86_64_deb_sha256": "2d4bf633265d6bff09a92a53cec2fc57d65875a969195da5a096909002bab518",
-    "linux_desktop_x86_64_deb_sha256": "323a844465e65f968610eca5a57f847d93905c6d7da38d5b6b13c8a3a66df09b",
-    "linux_aarch64_deb_sha256": "35b5c6abfec66232c519c2eccdb19af01550d73905dcc3d0213620f80d8f7543",
-    "windows_nsis_sha256": "26bea81ff040e75f8650545838692dfc29bbe42396e11dcf3c640ac18dd5fbc1",
-    "windows_portable_zip_sha256": "70af7fdf895801f46bc4f5cf1185e3be6eac95754fb5f453a2dd6eb091b44509",
+    "macos_universal_dmg_sha256": "bbd35f1fbeedcd1d3e35b19f0b6873f0b924f2f81e38828192371b003b74a828",
+    "linux_x86_64_deb_sha256": "f191a9808833c46e6057337a97b0a79af1434c244d9c73b539c050daa0966d76",
+    "linux_desktop_x86_64_deb_sha256": "9109a590ccffc80639a3273606c323e4f84ee7f9e99d5adc4b85574bdb19221d",
+    "linux_aarch64_deb_sha256": "b19f01d7fb93aef5d4df7f0102ecc40b680f3867cdca867975373ac6bee85501",
+    "windows_nsis_sha256": "148ee04ba604a4a8dbf5f346a490cfaef0ca53f2f06178b613fdfff087ebd855",
+    "windows_portable_zip_sha256": "02a0bc50a5bfd05d4f6278fd50ee3ab81b53d3d8916152f915613365ab99bd7e",
     "windows_helper_evidence": "acceptance/evidence/windows-helper-security-review.json",
     "windows_clean_install_status": "passed",
     "windows_clean_install_evidence": "acceptance/evidence/windows-x86_64-clean-install.json",
-    "windows_clean_install_tested_at": "2026-08-08T22:20:48.0109916Z"
+    "windows_clean_install_tested_at": "2026-08-09T07:16:12.3645977Z"
   },
   "repository_controls": {
     "visibility": "public",
@@ -60,16 +60,16 @@
     "deploy_keys": 0
   },
   "accepted_beta_limitations": [
-    "macOS Developer ID signing and notarization are not configured; beta packaging uses the verified ad-hoc hardened-runtime path and must disclose this limitation.",
-    "Windows publisher signing is not configured; beta installers may be unsigned and must disclose this limitation.",
+    "macOS Developer ID signing and notarization are not configured; beta packaging uses the verified ad-hoc hardened-runtime path and prominently discloses this limitation.",
+    "Windows publisher signing is not configured; beta installers are unsigned and prominently disclose this limitation.",
     "Independent external security review is recommended hardening but is not a required public-beta gate by owner direction."
   ],
   "privacy_review": {
     "tracked_content": "no personal email or owner/internal infrastructure path/tool exposure in current tree",
-    "github_public_text": "no personal email or internal infrastructure trace in issue/PR/comment text",
-    "historical_commit_metadata": "78 historical commits contain a non-noreply Gmail author/committer address; this is Git object metadata, not a credential or tracked-file leak. Rewriting it would require destructive history replacement and invalidate the frozen candidate/evidence, and GitHub pull-request refs may retain old objects.",
+    "github_public_text": "no personal email or internal infrastructure trace in public issue/PR/comment text",
+    "historical_commit_metadata": "78 historical commits contain one non-noreply Gmail author/committer address; this is Git object metadata, not a credential or tracked-file leak. Rewriting it would destructively replace public history and invalidate the frozen evidence chain without guaranteeing removal from caches/PR refs.",
     "future_commit_identity": "repository Git identity uses GitHub noreply email and the public GitHub profile exposes no email address"
   },
-  "required_public_beta_gates": "all passed",
-  "publication_state": "technically release-ready; creating the tag/draft/published prerelease still requires explicit owner approval"
+  "required_public_beta_gates": "all evidence now available; evidence commit must pass protected-main checks and release-readiness before tag publication",
+  "publication_state": "repository owner explicitly approved publication of v0.1.0-beta.1; publish only after this evidence commit is merged and public-beta readiness passes"
 }
