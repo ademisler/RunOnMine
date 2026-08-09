@@ -1,7 +1,6 @@
 .DS_Store
 target/
 .idea/
-.vscode/
 __pycache__/
 *.py[cod]
 *.log
@@ -34,3 +33,5 @@ artifacts/
 /fuzz/target/
 /coverage.lcov
 *.profraw
+config.bat
+node_modules
