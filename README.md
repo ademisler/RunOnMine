@@ -57,28 +57,33 @@ connectors, and OpenAI Secure MCP Tunnel. See
 ## Install
 
 > [!NOTE]
-> RunOnMine is **pre-release software**. The previous owner-only private-beta
-> artifacts are not the current public candidate. Until a fresh public-beta
-> candidate completes the required gates, build from source. New public beta
-> assets will be published through [GitHub Releases](https://github.com/ademisler/RunOnMine/releases)
-> with explicit unsigned/signing status, SHA-256 checksums, and SBOMs.
+> RunOnMine is **pre-release software**. The latest public beta is
+> **[v0.1.0-beta.1](https://github.com/ademisler/RunOnMine/releases/tag/v0.1.0-beta.1)**.
+> macOS is ad-hoc signed but not Developer ID signed or notarized, and the
+> Windows installer is not Authenticode signed. Gatekeeper or SmartScreen may
+> therefore warn on downloaded builds. Each primary artifact has an adjacent
+> SHA-256 checksum, and target-specific CycloneDX SBOMs are attached to the
+> release.
 
-| Platform | Recommended install today |
+| Platform | Public beta download |
 | --- | --- |
-| **Windows x86_64** | Source build until the fresh public-beta NSIS asset is published |
-| **Linux x86_64** | Source build until fresh public-beta desktop/headless DEBs are published |
-| **Linux ARM64** | Source build until the fresh public-beta headless DEB is published |
-| **macOS 12+** | Native source build today; beta DMGs may be unsigned when explicitly disclosed |
+| **Windows x86_64** | [`runonmine-desktop_0.1.0-beta.1_x64-setup.exe`](https://github.com/ademisler/RunOnMine/releases/download/v0.1.0-beta.1/runonmine-desktop_0.1.0-beta.1_x64-setup.exe) |
+| **Linux x86_64 — Desktop** | [`runonmine-desktop_0.1.0-beta.1_amd64.deb`](https://github.com/ademisler/RunOnMine/releases/download/v0.1.0-beta.1/runonmine-desktop_0.1.0-beta.1_amd64.deb) |
+| **Linux x86_64 — Headless** | [`runonmine_0.1.0-beta.1_amd64.deb`](https://github.com/ademisler/RunOnMine/releases/download/v0.1.0-beta.1/runonmine_0.1.0-beta.1_amd64.deb) |
+| **Linux ARM64 — Headless** | [`runonmine_0.1.0-beta.1_arm64.deb`](https://github.com/ademisler/RunOnMine/releases/download/v0.1.0-beta.1/runonmine_0.1.0-beta.1_arm64.deb) |
+| **macOS 12+ — Universal** | [`RunOnMine_0.1.0-beta.1_universal.dmg`](https://github.com/ademisler/RunOnMine/releases/download/v0.1.0-beta.1/RunOnMine_0.1.0-beta.1_universal.dmg) |
 
-Public-beta packages may be unsigned. Every published beta asset must state its
-signing status and ship with an adjacent SHA-256 checksum and CycloneDX SBOM.
+Portable unsigned archives, checksums, and SBOMs are available on the
+[release page](https://github.com/ademisler/RunOnMine/releases/tag/v0.1.0-beta.1).
+Source builds remain supported for developers and platforms not covered by the
+packaged beta.
 
 ### Windows x86_64
 
-When the fresh public-beta `runonmine-desktop_*_x64-setup.exe` asset is
-published, it is a **current-user install**; the optional LocalSystem helper is
-not installed or activated unless you explicitly request it later. Until then,
-use the source-build workflow in the platform guide.
+Run `runonmine-desktop_0.1.0-beta.1_x64-setup.exe`. It is a **current-user
+install**; the optional LocalSystem helper is not installed or activated unless
+you explicitly request it later. Because this beta is not Authenticode signed,
+Windows SmartScreen may show an unrecognized-publisher warning.
 
 After installation, initialize the project directory the AI may access:
 
@@ -94,10 +99,10 @@ uninstall behavior, and the optional privileged helper.
 
 ### Linux desktop (x86_64)
 
-When the fresh public-beta desktop DEB is published, install it with:
+Download `runonmine-desktop_0.1.0-beta.1_amd64.deb`, then install it with:
 
 ```console
-sudo apt install ./runonmine-desktop_*_amd64.deb
+sudo apt install ./runonmine-desktop_0.1.0-beta.1_amd64.deb
 runonmine setup --root "$HOME/Projects/my-project"
 runonmine service install
 runonmine-desktop
@@ -110,19 +115,10 @@ service assumptions to a server.
 
 ### macOS 12+
 
-For the current beta, build the native app from source. You need Xcode Command Line Tools and Rust; the repository pins Rust
-`1.95.0` in `rust-toolchain.toml`.
-
-```console
-git clone https://github.com/ademisler/RunOnMine.git
-cd RunOnMine
-cargo build --release --locked \
-  -p runonmine -p runonmine-agent -p runonmine-desktop
-
-./target/release/runonmine setup --root "$HOME/Projects/my-project"
-./target/release/runonmine service install
-./target/release/runonmine-desktop
-```
+Open `RunOnMine_0.1.0-beta.1_universal.dmg` and copy **RunOnMine.app** to
+Applications. The beta uses verified ad-hoc code signatures and hardened
+runtime, but it is not Apple Developer ID signed or notarized, so Gatekeeper may
+warn or block a quarantined download.
 
 RunOnMine does not bypass macOS consent prompts. Desktop input/capture may
 require Accessibility or Screen Recording permission. See the
