@@ -153,6 +153,9 @@ jobs:
         with: { fetch-depth: 0, persist-credentials: false }
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "aarch64-apple-darwin,x86_64-apple-darwin"
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-packager@0.11.8
       - name: Run native isolated acceptance
         run: |
           ./scripts/acceptance/cli-smoke.sh
@@ -165,6 +168,24 @@ jobs:
           cargo build --release --locked --target x86_64-apple-darwin --workspace --exclude xtask
           cargo run --locked -p xtask -- universal-macos
           cargo run --locked -p xtask -- package --target universal-apple-darwin
+      - name: Package unsigned macOS DMG with empty signing secrets
+        env:
+          APPLE_CERTIFICATE: ""
+          APPLE_CERTIFICATE_PASSWORD: ""
+          APPLE_ID: ""
+          APPLE_PASSWORD: ""
+          APPLE_TEAM_ID: ""
+          APPLE_API_KEY: ""
+          APPLE_API_ISSUER: ""
+          APPLE_API_KEY_PATH: ""
+          APPLE_API_KEY_P8: ""
+          APPLE_KEYCHAIN_PROFILE: ""
+          RUNONMINE_APPLE_SIGNING_IDENTITY: ""
+        run: |
+          cargo run --locked -p xtask -- stage-packager --target universal-apple-darwin
+          ./packaging/package-macos.sh
+          dmg=$(find dist -maxdepth 1 -type f -name "RunOnMine*.dmg" -print -quit)
+          test -n "$dmg"
       - name: Validate SBOM and artifact
         run: |
           sbom=$(find dist -maxdepth 1 -name '*universal-apple-darwin-unsigned.sbom.json' -print -quit)

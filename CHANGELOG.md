@@ -5,6 +5,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Keep unsigned public-beta macOS packaging on the verified ad-hoc path when GitHub exposes missing Apple signing secrets as empty environment variables; clear those variables before `cargo-packager` keychain detection and cover the exact empty-secret case in hosted artifact preflight.
 - Stabilize Windows hosted process-capture tests by giving PowerShell startup a platform-appropriate test budget and reporting timeout failures before output assertions; runtime command timeouts and process behavior are unchanged.
 - Refresh the reviewed duplicate-dependency baseline after the accepted rmcp/HMAC/Ed25519/platform dependency updates, and run that ratchet in required Linux quality CI so stale release metadata fails on pull requests instead of at tag publication.
 - Resolve tag-triggered release builds as `public-beta` instead of silently falling back to `private-beta`; manual release dispatches retain their explicit profile selection.

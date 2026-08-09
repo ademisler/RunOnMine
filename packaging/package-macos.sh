@@ -28,6 +28,19 @@ if [ -n "$identity" ]; then
   fi
 fi
 
+# cargo-packager treats the presence of Apple credential environment variables
+# as a request to initialize a signing keychain, even when their values are
+# empty. GitHub Actions exposes missing secrets as empty strings, so the
+# explicitly unsigned/ad-hoc beta path must remove those variables before
+# invoking cargo-packager. Signed packaging keeps the validated environment
+# above and remains fail-closed.
+if [ "$mode" = private-beta ]; then
+  unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+    APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+    APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH APPLE_API_KEY_P8 \
+    APPLE_KEYCHAIN_PROFILE RUNONMINE_APPLE_SIGNING_IDENTITY
+fi
+
 temporary=packaging/.Packager.macos.signed.$$.json
 cleanup() { rm -f -- "$temporary"; }
 trap cleanup EXIT HUP INT TERM
