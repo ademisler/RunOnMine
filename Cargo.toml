@@ -48,7 +48,7 @@ directories = "6.0"
 ed25519-dalek = "3.0"
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts"] }
 wgpu = { version = "29.0.4", default-features = false }
-egui = "0.35.0"
+egui = "0.36.0"
 hex = "0.4"
 hmac = "0.13"
 hostname = "0.4"
