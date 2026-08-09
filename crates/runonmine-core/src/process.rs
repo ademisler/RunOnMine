@@ -219,6 +219,20 @@ fn shell_command(command: &str) -> (&'static str, Vec<&str>) {
 mod tests {
     use super::*;
 
+    fn output_test_timeout() -> Duration {
+        // Starting Windows PowerShell can approach five seconds on a busy hosted
+        // runner even when the child exits successfully. Keep these output
+        // assertions focused on capture semantics rather than startup jitter.
+        #[cfg(windows)]
+        {
+            Duration::from_secs(15)
+        }
+        #[cfg(not(windows))]
+        {
+            Duration::from_secs(5)
+        }
+    }
+
     #[tokio::test]
     async fn captures_output() -> Result<()> {
         #[cfg(windows)]
@@ -228,13 +242,13 @@ mod tests {
         let result = execute_shell(&ProcessRequest {
             command: command.to_owned(),
             cwd: None,
-            timeout: Duration::from_secs(5),
+            timeout: output_test_timeout(),
             max_output_bytes: 1_024,
         })
         .await?;
+        assert!(!result.timed_out);
         assert_eq!(result.stdout, "hello");
         assert_eq!(result.exit_code, Some(0));
-        assert!(!result.timed_out);
         Ok(())
     }
 
@@ -262,14 +276,14 @@ mod tests {
         let result = execute_shell(&ProcessRequest {
             command: command.to_owned(),
             cwd: None,
-            timeout: Duration::from_secs(5),
+            timeout: output_test_timeout(),
             max_output_bytes: 1_024,
         })
         .await?;
+        assert!(!result.timed_out);
         assert_eq!(result.stdout.trim(), "out");
         assert_eq!(result.stderr, "err");
         assert!(!result.truncated);
-        assert!(!result.timed_out);
         Ok(())
     }
 
@@ -306,12 +320,12 @@ mod tests {
         let result = execute_shell(&ProcessRequest {
             command,
             cwd: None,
-            timeout: Duration::from_secs(5),
+            timeout: output_test_timeout(),
             max_output_bytes: 1_024,
         })
         .await?;
-        assert_eq!(result.stdout.trim(), "missing");
         assert!(!result.timed_out);
+        assert_eq!(result.stdout.trim(), "missing");
         Ok(())
     }
 
