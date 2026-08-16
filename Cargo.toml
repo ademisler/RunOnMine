@@ -66,7 +66,7 @@ notify = "8.2"
 proptest = "1.9"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 rpassword = "7.4"
-rmcp = { version = "=3.1.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "=3.1.2", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40.1", features = ["bundled", "chrono", "uuid"] }
 schemars = "1.0"
 secrecy = "0.10"
