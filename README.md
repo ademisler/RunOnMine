@@ -191,7 +191,11 @@ the managed Cloudflare Named Tunnel with `--owner-full-access`, then select the
 `full` policy. This is deliberately opt-in: it can permit user shell, browser,
 desktop, platform-native automation, and—when the separately installed helper
 profile allows it—administrator execution. OAuth scopes, GitHub owner identity,
-selected roots, audit integrity, and Emergency Lock still apply.
+selected roots, audit integrity, and Emergency Lock still apply. For OAuth clients that
+support owner-supplied credentials, RunOnMine can provision a confidential client with an
+exact HTTPS callback allowlist; its secret is exported once to an owner-only file and only a
+domain-separated hash is retained in local state. Dynamic registration remains separately
+protected by the owner-controlled registration token.
 
 On macOS, optional local voice tools can be prepared with:
 

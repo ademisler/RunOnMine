@@ -22,7 +22,9 @@ use runonmine_core::{
     QuickTunnelRuntimeStore, StateStore, connector_secret_suffixes,
 };
 use runonmine_mcp::{reconcile_pending_connector_removals, remove_connector_recoverably};
-use runonmine_oauth::SqliteOAuthStore;
+use runonmine_oauth::{
+    HashPurpose, RegisteredClient, ScopeSet, SqliteOAuthStore, TokenHasher, generate_secret,
+};
 #[cfg(target_os = "macos")]
 use runonmine_platform::helper::{
     AdminArgumentSchema, AdminCommandSchema, AdminFlagSchema, AdminProgramRule,
@@ -407,6 +409,18 @@ enum OauthRegistrationTokenCommand {
 #[derive(Debug, Subcommand)]
 enum OauthClientCommand {
     List,
+    /// Provision a confidential OAuth client and export its secret once to an owner-only file.
+    Provision {
+        connector_id: String,
+        #[arg(long, default_value = "ChatGPT")]
+        name: String,
+        #[arg(long = "redirect-uri", value_name = "HTTPS_URL", required = true)]
+        redirect_uris: Vec<Url>,
+        #[arg(long = "scope", value_name = "SCOPE")]
+        scopes: Vec<String>,
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        output: PathBuf,
+    },
     /// Revoke every active token issued to one client.
     Revoke {
         connector_id: String,

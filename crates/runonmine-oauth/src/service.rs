@@ -534,10 +534,15 @@ impl OAuthService {
         Ok(ConsentResult { redirect })
     }
 
-    pub fn issue_token(&self, request: &TokenRequest) -> Result<IssuedToken, OAuthError> {
+    pub fn issue_token(
+        &self,
+        request: &TokenRequest,
+        client_secret: Option<&str>,
+    ) -> Result<IssuedToken, OAuthError> {
         if request.client_id.is_empty() || request.client_id.len() > 256 {
             return Err(OAuthError::invalid_client());
         }
+        self.authenticate_token_client(&request.client_id, client_secret)?;
         let access = generate_secret()?;
         let refresh = generate_secret()?;
         let now = Utc::now();
@@ -598,6 +603,39 @@ impl OAuthService {
         }
         .map_err(|error| self.store_grant_error("issue_token", error))?;
         Ok(token_response(access, refresh, grant))
+    }
+
+    fn authenticate_token_client(
+        &self,
+        client_id: &str,
+        client_secret: Option<&str>,
+    ) -> Result<(), OAuthError> {
+        self.store
+            .client(client_id)
+            .map_err(|error| self.store_server_error("load_token_client", &error))?
+            .ok_or_else(OAuthError::invalid_client)?;
+        let expected = self
+            .store
+            .client_secret_hash(client_id)
+            .map_err(|error| self.store_server_error("load_token_client_secret", &error))?;
+        match expected {
+            Some(expected) => {
+                let supplied = client_secret.ok_or_else(OAuthError::invalid_client)?;
+                if supplied.len() < 32
+                    || supplied.len() > 1_024
+                    || supplied.contains(char::is_whitespace)
+                {
+                    return Err(OAuthError::invalid_client());
+                }
+                let supplied = self.hasher.hash(HashPurpose::ClientSecret, supplied);
+                if !expected.constant_time_eq(&supplied) {
+                    return Err(OAuthError::invalid_client());
+                }
+            }
+            None if client_secret.is_some() => return Err(OAuthError::invalid_client()),
+            None => {}
+        }
+        Ok(())
     }
 
     pub fn revoke(&self, request: &RevocationRequest) -> Result<(), OAuthError> {
@@ -933,6 +971,44 @@ mod tests {
         register_from_source(service, "test-source")
     }
 
+    fn confidential_service() -> Result<
+        (
+            OAuthService,
+            Arc<SqliteOAuthStore>,
+            RegisteredClient,
+            String,
+        ),
+        OAuthError,
+    > {
+        let store = Arc::new(
+            SqliteOAuthStore::in_memory().map_err(|error| map_store_server_error(&error))?,
+        );
+        let service = service_with_store(store.clone())?;
+        let secret = "confidential-client-secret-0123456789abcdef".to_owned();
+        let now = Utc::now();
+        let client = RegisteredClient {
+            connector_id: "test-connector".to_owned(),
+            client_id: "romc_test-confidential-client".to_owned(),
+            client_name: "Confidential test client".to_owned(),
+            redirect_uris: vec![
+                Url::parse("https://client.example/callback")
+                    .map_err(|_| OAuthError::invalid_request())?,
+            ],
+            scopes: ScopeSet::parse("machine:read files:read files:write")?,
+            issued_at: now,
+            expires_at: now + Duration::days(365),
+            last_used_at: None,
+            registration_source_hash: "local-test".to_owned(),
+        };
+        store
+            .register_confidential_client(
+                &client,
+                &service.hasher.hash(HashPurpose::ClientSecret, &secret),
+            )
+            .map_err(|error| map_store_server_error(&error))?;
+        Ok((service, store, client, secret))
+    }
+
     fn begin_test_authorization(
         service: &OAuthService,
         client_id: &str,
@@ -1250,9 +1326,65 @@ mod tests {
         let service = service()?;
         let client = register(&service)?;
         let code = authorize(&service, &client.client_id).await?;
-        let first = service.issue_token(&TokenRequest {
+        let first = service.issue_token(
+            &TokenRequest {
+                grant_type: "authorization_code".to_owned(),
+                client_id: client.client_id.clone(),
+                code: Some(code),
+                redirect_uri: Some(
+                    Url::parse("https://client.example/callback")
+                        .map_err(|_| OAuthError::invalid_request())?,
+                ),
+                code_verifier: Some(verifier()),
+                refresh_token: None,
+                scope: None,
+            },
+            None,
+        )?;
+        let grant = service.authenticate_access(
+            first.access_token.expose_secret(),
+            Scope::MachineRead,
+            &ScopeSet::all(),
+        )?;
+        assert_eq!(grant.subject, "github:42");
+        let old_refresh = first.refresh_token.expose_secret().to_owned();
+        let second = service.issue_token(
+            &TokenRequest {
+                grant_type: "refresh_token".to_owned(),
+                client_id: client.client_id.clone(),
+                code: None,
+                redirect_uri: None,
+                code_verifier: None,
+                refresh_token: Some(old_refresh.clone()),
+                scope: Some("machine:read".to_owned()),
+            },
+            None,
+        )?;
+        assert_eq!(second.scope.to_space_delimited(), "machine:read");
+        let reused = service.issue_token(
+            &TokenRequest {
+                grant_type: "refresh_token".to_owned(),
+                client_id: client.client_id,
+                code: None,
+                redirect_uri: None,
+                code_verifier: None,
+                refresh_token: Some(old_refresh),
+                scope: None,
+            },
+            None,
+        );
+        assert!(reused.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confidential_client_requires_secret_without_consuming_code() -> Result<(), OAuthError>
+    {
+        let (service, _store, client, secret) = confidential_service()?;
+        let code = authorize(&service, &client.client_id).await?;
+        let request = TokenRequest {
             grant_type: "authorization_code".to_owned(),
-            client_id: client.client_id.clone(),
+            client_id: client.client_id,
             code: Some(code),
             redirect_uri: Some(
                 Url::parse("https://client.example/callback")
@@ -1261,34 +1393,44 @@ mod tests {
             code_verifier: Some(verifier()),
             refresh_token: None,
             scope: None,
-        })?;
-        let grant = service.authenticate_access(
-            first.access_token.expose_secret(),
-            Scope::MachineRead,
-            &ScopeSet::all(),
-        )?;
-        assert_eq!(grant.subject, "github:42");
-        let old_refresh = first.refresh_token.expose_secret().to_owned();
-        let second = service.issue_token(&TokenRequest {
-            grant_type: "refresh_token".to_owned(),
-            client_id: client.client_id.clone(),
-            code: None,
-            redirect_uri: None,
-            code_verifier: None,
-            refresh_token: Some(old_refresh.clone()),
-            scope: Some("machine:read".to_owned()),
-        })?;
-        assert_eq!(second.scope.to_space_delimited(), "machine:read");
-        let reused = service.issue_token(&TokenRequest {
-            grant_type: "refresh_token".to_owned(),
+        };
+        assert!(matches!(
+            service.issue_token(&request, None),
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidClient
+        ));
+        assert!(matches!(
+            service.issue_token(&request, Some("wrong-confidential-client-secret-00000000")),
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidClient
+        ));
+        assert!(service.issue_token(&request, Some(&secret)).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn public_dynamic_client_rejects_injected_secret() -> Result<(), OAuthError> {
+        let service = service()?;
+        let client = register(&service)?;
+        let code = authorize(&service, &client.client_id).await?;
+        let request = TokenRequest {
+            grant_type: "authorization_code".to_owned(),
             client_id: client.client_id,
-            code: None,
-            redirect_uri: None,
-            code_verifier: None,
-            refresh_token: Some(old_refresh),
+            code: Some(code),
+            redirect_uri: Some(
+                Url::parse("https://client.example/callback")
+                    .map_err(|_| OAuthError::invalid_request())?,
+            ),
+            code_verifier: Some(verifier()),
+            refresh_token: None,
             scope: None,
-        });
-        assert!(reused.is_err());
+        };
+        assert!(matches!(
+            service.issue_token(
+                &request,
+                Some("unexpected-client-secret-0123456789abcdef")
+            ),
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidClient
+        ));
+        assert!(service.issue_token(&request, None).is_ok());
         Ok(())
     }
 
@@ -1400,9 +1542,9 @@ mod tests {
             refresh_token: None,
             scope: None,
         };
-        assert!(service.issue_token(&request).is_err());
+        assert!(service.issue_token(&request, None).is_err());
         request.code_verifier = Some(verifier());
-        assert!(service.issue_token(&request).is_ok());
+        assert!(service.issue_token(&request, None).is_ok());
         Ok(())
     }
 
@@ -1411,18 +1553,21 @@ mod tests {
         let service = service()?;
         let client = register(&service)?;
         let code = authorize(&service, &client.client_id).await?;
-        let token = service.issue_token(&TokenRequest {
-            grant_type: "authorization_code".to_owned(),
-            client_id: client.client_id,
-            code: Some(code),
-            redirect_uri: Some(
-                Url::parse("https://client.example/callback")
-                    .map_err(|_| OAuthError::invalid_request())?,
-            ),
-            code_verifier: Some(verifier()),
-            refresh_token: None,
-            scope: None,
-        })?;
+        let token = service.issue_token(
+            &TokenRequest {
+                grant_type: "authorization_code".to_owned(),
+                client_id: client.client_id,
+                code: Some(code),
+                redirect_uri: Some(
+                    Url::parse("https://client.example/callback")
+                        .map_err(|_| OAuthError::invalid_request())?,
+                ),
+                code_verifier: Some(verifier()),
+                refresh_token: None,
+                scope: None,
+            },
+            None,
+        )?;
         let local = ScopeSet::all();
         assert!(
             service
@@ -1454,18 +1599,21 @@ mod tests {
         let service = service()?;
         let client = register(&service)?;
         let code = authorize(&service, &client.client_id).await?;
-        let token = service.issue_token(&TokenRequest {
-            grant_type: "authorization_code".to_owned(),
-            client_id: client.client_id,
-            code: Some(code),
-            redirect_uri: Some(
-                Url::parse("https://client.example/callback")
-                    .map_err(|_| OAuthError::invalid_request())?,
-            ),
-            code_verifier: Some(verifier()),
-            refresh_token: None,
-            scope: None,
-        })?;
+        let token = service.issue_token(
+            &TokenRequest {
+                grant_type: "authorization_code".to_owned(),
+                client_id: client.client_id,
+                code: Some(code),
+                redirect_uri: Some(
+                    Url::parse("https://client.example/callback")
+                        .map_err(|_| OAuthError::invalid_request())?,
+                ),
+                code_verifier: Some(verifier()),
+                refresh_token: None,
+                scope: None,
+            },
+            None,
+        )?;
         let local = ScopeSet::parse("machine:read").unwrap_or_default();
         assert!(
             service

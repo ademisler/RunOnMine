@@ -245,7 +245,13 @@ access token loaded from the credential store. The HTTP layer validates that
 bearer credential and registration payload before entering one SQLite
 `IMMEDIATE` transaction that prunes expired clients, enforces source/global
 windows plus total capacity, records the attempt, and inserts the client.
-Unsuccessful validation consumes no slot. Client expiry is refreshed on real
+Unsuccessful validation consumes no slot. Separately, an owner-full Cloudflare OAuth
+connector may receive a locally provisioned confidential client. Provisioning binds exact
+HTTPS redirect URIs and scopes, generates a random client ID and 256-bit client secret,
+exports the plaintext secret once through a create-new owner-only file, and persists only a
+domain-separated keyed secret hash beside the client row. The token endpoint supports
+`client_secret_basic` and `client_secret_post`; public DCR clients remain secretless and
+reject injected client secrets. Client expiry is refreshed on real
 authorization use rather than registration polling. After owner authentication,
 the consent challenge reloads the registered client and derives display identity
 from server-held state: a stable client-ID fingerprint, registration timestamp,
@@ -264,7 +270,7 @@ unchanged.
 ## Local data
 
 - `config.toml` contains non-secret configuration, is replaced atomically, and uses an owner-only sidecar lock for transactional read-modify-write updates.
-- `state.db` contains approvals, sessions, OAuth token/source hashes, expiring registered-client metadata, and audit records.
+- `state.db` contains approvals, sessions, OAuth token/source/client-secret hashes, expiring registered-client metadata, and audit records.
 - platform credential storage contains connector paths, external API credentials, OAuth hash keys, and owner-controlled registration access tokens.
 - isolated Chromium profiles live below the per-user RunOnMine data directory.
 - immutable managed connector versions live below `data/managed-binaries/<executable>/versions/<sha256>/`, with an owner-only active manifest and receipt per version.

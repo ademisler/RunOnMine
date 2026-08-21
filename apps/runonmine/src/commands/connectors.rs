@@ -807,6 +807,39 @@ pub(super) fn write_oauth_registration_credentials(
     )
 }
 
+#[derive(serde::Serialize)]
+struct OAuthClientCredentialExport<'a> {
+    version: u8,
+    connector_id: &'a str,
+    client_id: &'a str,
+    client_secret: &'a str,
+    token_endpoint_auth_method: &'static str,
+    redirect_uris: Vec<&'a str>,
+    scopes: &'a str,
+}
+
+pub(super) fn write_oauth_client_credentials(
+    path: &Path,
+    connector_id: &str,
+    client_id: &str,
+    client_secret: &str,
+    redirect_uris: &[Url],
+    scopes: &str,
+) -> Result<()> {
+    write_private_json_new(
+        path,
+        &OAuthClientCredentialExport {
+            version: 1,
+            connector_id,
+            client_id,
+            client_secret,
+            token_endpoint_auth_method: "client_secret_basic",
+            redirect_uris: redirect_uris.iter().map(Url::as_str).collect(),
+            scopes,
+        },
+    )
+}
+
 fn write_private_json_new(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     validate_private_output_path(Some(path))?;
     let mut contents = serde_json::to_vec_pretty(value)?;
@@ -1578,6 +1611,48 @@ mod tests {
                 "connector-id",
                 "https://mcp.example.com/oauth/register",
                 "other-token",
+            )
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&output)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn confidential_oauth_client_credentials_use_private_no_overwrite_output() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = temporary.path().join("oauth-client.json");
+        let redirects = vec![Url::parse("https://chatgpt.com/connector/oauth/example")?];
+        write_oauth_client_credentials(
+            &output,
+            "connector-id",
+            "romc-client",
+            "confidential-client-secret-0123456789abcdef",
+            &redirects,
+            "machine:read admin:exec",
+        )?;
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&output)?)?;
+        assert_eq!(value["client_id"], "romc-client");
+        assert_eq!(value["token_endpoint_auth_method"], "client_secret_basic");
+        assert_eq!(
+            value["client_secret"],
+            "confidential-client-secret-0123456789abcdef"
+        );
+        assert!(
+            write_oauth_client_credentials(
+                &output,
+                "connector-id",
+                "romc-other",
+                "other-confidential-client-secret-0123456789",
+                &redirects,
+                "machine:read",
             )
             .is_err()
         );

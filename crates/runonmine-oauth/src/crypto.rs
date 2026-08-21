@@ -18,6 +18,7 @@ pub enum HashPurpose {
     ConsentCsrf,
     RegistrationAccess,
     RegistrationSource,
+    ClientSecret,
 }
 
 impl HashPurpose {
@@ -31,6 +32,7 @@ impl HashPurpose {
             Self::ConsentCsrf => b"runonmine/oauth/consent-csrf/v1\0",
             Self::RegistrationAccess => b"runonmine/oauth/registration-access/v1\0",
             Self::RegistrationSource => b"runonmine/oauth/registration-source/v1\0",
+            Self::ClientSecret => b"runonmine/oauth/client-secret/v1\0",
         }
     }
 }

@@ -9,6 +9,7 @@ use axum::middleware::{Next, from_fn};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -155,11 +156,42 @@ struct TokenResponse {
     scope: String,
 }
 
+#[derive(Deserialize)]
+struct TokenFormRequest {
+    grant_type: String,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    redirect_uri: Option<url::Url>,
+    #[serde(default)]
+    code_verifier: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
 async fn token(
     State(service): State<Arc<OAuthService>>,
-    Form(request): Form<TokenRequest>,
+    headers: HeaderMap,
+    Form(request): Form<TokenFormRequest>,
 ) -> Result<Response, OAuthError> {
-    let issued = service.issue_token(&request)?;
+    let (client_id, client_secret) =
+        token_client_credentials(&headers, request.client_id, request.client_secret)?;
+    let request = TokenRequest {
+        grant_type: request.grant_type,
+        client_id,
+        code: request.code,
+        redirect_uri: request.redirect_uri,
+        code_verifier: request.code_verifier,
+        refresh_token: request.refresh_token,
+        scope: request.scope,
+    };
+    let issued = service.issue_token(&request, client_secret.as_deref())?;
     let body = TokenResponse {
         access_token: issued.access_token.expose_secret().to_owned(),
         token_type: issued.token_type,
@@ -170,6 +202,57 @@ async fn token(
     let mut response = Json(body).into_response();
     no_store_headers(response.headers_mut());
     Ok(response)
+}
+
+fn token_client_credentials(
+    headers: &HeaderMap,
+    form_client_id: Option<String>,
+    form_client_secret: Option<String>,
+) -> Result<(String, Option<String>), OAuthError> {
+    let basic = basic_client_credentials(headers)?;
+    if let Some((client_id, secret)) = basic {
+        if form_client_id
+            .as_deref()
+            .is_some_and(|value| value != client_id)
+            || form_client_secret.is_some()
+        {
+            return Err(OAuthError::invalid_client());
+        }
+        Ok((client_id, Some(secret)))
+    } else {
+        let client_id = form_client_id.ok_or_else(OAuthError::invalid_client)?;
+        Ok((client_id, form_client_secret))
+    }
+}
+
+fn basic_client_credentials(headers: &HeaderMap) -> Result<Option<(String, String)>, OAuthError> {
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| OAuthError::invalid_client())?;
+    let encoded = value
+        .strip_prefix("Basic ")
+        .ok_or_else(OAuthError::invalid_client)?;
+    if encoded.is_empty() || encoded.len() > 4_096 {
+        return Err(OAuthError::invalid_client());
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| OAuthError::invalid_client())?;
+    let decoded = String::from_utf8(decoded).map_err(|_| OAuthError::invalid_client())?;
+    let (client_id, secret) = decoded
+        .split_once(':')
+        .ok_or_else(OAuthError::invalid_client)?;
+    if client_id.is_empty()
+        || client_id.len() > 256
+        || secret.len() < 32
+        || secret.len() > 1_024
+        || client_id.chars().any(char::is_control)
+        || secret.contains(char::is_whitespace)
+    {
+        return Err(OAuthError::invalid_client());
+    }
+    Ok(Some((client_id.to_owned(), secret.to_owned())))
 }
 
 async fn revoke(
@@ -337,6 +420,54 @@ mod tests {
         }
         assert!(registration_bearer_token(&HeaderMap::new()).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn token_client_credentials_support_basic_and_post_without_mixing_methods()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client_id = "romc_chatgpt";
+        let secret = "confidential-client-secret-0123456789abcdef";
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{client_id}:{secret}"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {encoded}"))?,
+        );
+        assert_eq!(
+            token_client_credentials(&headers, None, None)?,
+            (client_id.to_owned(), Some(secret.to_owned()))
+        );
+        assert_eq!(
+            token_client_credentials(
+                &HeaderMap::new(),
+                Some(client_id.to_owned()),
+                Some(secret.to_owned())
+            )?,
+            (client_id.to_owned(), Some(secret.to_owned()))
+        );
+        assert!(
+            token_client_credentials(&headers, Some("different-client".to_owned()), None).is_err()
+        );
+        assert!(
+            token_client_credentials(
+                &headers,
+                Some(client_id.to_owned()),
+                Some(secret.to_owned())
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_client_credentials_reject_non_basic_authorization_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer not-valid-for-token-client-auth"),
+        );
+        assert!(token_client_credentials(&headers, None, None).is_err());
     }
 
     #[test]

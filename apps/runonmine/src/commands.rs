@@ -11,7 +11,8 @@ use connector_transactions::{local_http_secret_name, update_config_with_secrets}
 pub(crate) use connectors::{connect, setup};
 use connectors::{
     ensure_private_directory, generate_path_secret, load_connector_binary,
-    validate_private_output_path, write_oauth_registration_credentials,
+    validate_private_output_path, write_oauth_client_credentials,
+    write_oauth_registration_credentials,
 };
 pub(crate) use doctor_command::doctor;
 
@@ -359,7 +360,7 @@ pub(super) fn oauth(command: OauthCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
     let store = SqliteOAuthStore::open(&paths.state_db())?;
     match command {
-        OauthCommand::Clients { command } => oauth_clients(&store, command),
+        OauthCommand::Clients { command } => oauth_clients(&paths, &store, command),
         OauthCommand::Sessions { command } => oauth_sessions(&store, command),
         OauthCommand::RegistrationToken { command } => oauth_registration_token(&paths, command),
         OauthCommand::Cleanup => {
@@ -370,7 +371,11 @@ pub(super) fn oauth(command: OauthCommand) -> Result<()> {
     }
 }
 
-fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Result<()> {
+fn oauth_clients(
+    paths: &AppPaths,
+    store: &SqliteOAuthStore,
+    command: OauthClientCommand,
+) -> Result<()> {
     match command {
         OauthClientCommand::List => {
             let clients = store.registered_clients()?;
@@ -398,6 +403,22 @@ fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Resul
                 );
             }
         }
+        OauthClientCommand::Provision {
+            connector_id,
+            name,
+            redirect_uris,
+            scopes,
+            output,
+        } => {
+            provision_confidential_oauth_client(
+                paths,
+                &connector_id,
+                &name,
+                &redirect_uris,
+                &scopes,
+                &output,
+            )?;
+        }
         OauthClientCommand::Revoke {
             connector_id,
             client_id,
@@ -417,6 +438,102 @@ fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Resul
             );
         }
     }
+    Ok(())
+}
+
+fn provision_confidential_oauth_client(
+    paths: &AppPaths,
+    connector_id: &str,
+    name: &str,
+    redirect_uris: &[Url],
+    requested_scopes: &[String],
+    output: &Path,
+) -> Result<()> {
+    validate_private_output_path(Some(output))?;
+    let name = name.trim();
+    if name.is_empty() || name.len() > 100 || name.chars().any(char::is_control) {
+        bail!("OAuth client name must be a bounded printable value");
+    }
+    if redirect_uris.is_empty() || redirect_uris.len() > 16 {
+        bail!("at least one and at most 16 OAuth redirect URIs are required");
+    }
+    for redirect in redirect_uris {
+        if redirect.scheme() != "https"
+            || redirect.host_str().is_none()
+            || redirect.fragment().is_some()
+            || !redirect.username().is_empty()
+            || redirect.password().is_some()
+        {
+            bail!(
+                "confidential OAuth redirect URIs must be credential-free HTTPS URLs without fragments"
+            );
+        }
+    }
+
+    let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
+    let connector = oauth_connector(&config, connector_id)?;
+    if !connector.owner_workstation_access() {
+        bail!(
+            "confidential owner client provisioning requires an owner-full Cloudflare OAuth connector"
+        );
+    }
+
+    let scopes = if requested_scopes.is_empty() {
+        ScopeSet::all()
+    } else {
+        ScopeSet::parse(&requested_scopes.join(" "))?
+    };
+    if scopes.is_empty() || !scopes.is_subset(&ScopeSet::all()) {
+        bail!("OAuth client scopes must be a non-empty subset of supported scopes");
+    }
+
+    let secrets = default_secret_store(paths)?;
+    let hash_key = secrets
+        .get(&format!("connector.{connector_id}.oauth_hash_key"))?
+        .context("OAuth hash key is missing")?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(hash_key.expose_secret())
+        .context("OAuth hash key is invalid")?;
+    let hash_key: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("OAuth hash key has an invalid length"))?;
+    let hasher = TokenHasher::new(hash_key)?;
+
+    let client_id_secret = generate_secret()?;
+    let client_id = format!("romc_{}", client_id_secret.expose_secret());
+    let client_secret = generate_secret()?;
+    let now = chrono::Utc::now();
+    let client = RegisteredClient {
+        connector_id: connector_id.to_owned(),
+        client_id: client_id.clone(),
+        client_name: name.to_owned(),
+        redirect_uris: redirect_uris.to_vec(),
+        scopes: scopes.clone(),
+        issued_at: now,
+        expires_at: now + chrono::Duration::days(365),
+        last_used_at: None,
+        registration_source_hash: "local-owner-confidential".to_owned(),
+    };
+    let scoped_store = SqliteOAuthStore::open_scoped(&paths.state_db(), connector_id)?;
+    scoped_store.register_confidential_client(
+        &client,
+        &hasher.hash(HashPurpose::ClientSecret, client_secret.expose_secret()),
+    )?;
+    let scope_text = scopes.to_space_delimited();
+    if let Err(error) = write_oauth_client_credentials(
+        output,
+        connector_id,
+        &client_id,
+        client_secret.expose_secret(),
+        redirect_uris,
+        &scope_text,
+    ) {
+        let _ignored = scoped_store.delete_client(&client_id);
+        return Err(error)
+            .context("confidential OAuth client was rolled back after credential export failed");
+    }
+    println!("Provisioned confidential OAuth client {client_id} for connector {connector_id}.");
+    println!("Client secret written once to {}.", output.display());
     Ok(())
 }
 

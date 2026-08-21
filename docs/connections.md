@@ -133,6 +133,25 @@ runonmine oauth registration-token rotate <connector-id> --output /absolute/priv
 Rotation takes effect after the agent restarts. Emergency lock stops the service
 and rotates every OAuth registration token before access can be restored.
 
+Platforms that let the owner supply an OAuth Client ID and Client Secret do not need to use
+DCR. Provision a confidential client locally with the exact HTTPS callback URL copied from
+the client platform:
+
+```console
+runonmine oauth clients provision <connector-id> \
+  --name ChatGPT \
+  --redirect-uri 'https://chatgpt.com/connector/oauth/<exact-callback-id>' \
+  --output /absolute/private/chatgpt-oauth-client.json
+```
+
+Do not invent or generalize the callback URL. The command refuses non-HTTPS redirects,
+requires the explicit owner-full Cloudflare OAuth connector, and never prints the secret.
+The export is create-new and owner-only. With no `--scope` arguments the confidential
+client receives all RunOnMine OAuth scopes; repeat `--scope <scope>` to narrow it. The
+server stores only a keyed, domain-separated client-secret hash. Token exchange accepts
+`client_secret_basic` and `client_secret_post`, while a public DCR client rejects an
+unexpected secret. Deleting the client cascades its secret hash and authorization state.
+
 Registration payloads are fully validated before they can consume capacity. A
 registration that omits `scope` receives only `machine:read`; clients must name
 each additional capability explicitly and can never request a scope later that
@@ -157,7 +176,7 @@ characters are rejected from client names. Review the fingerprint and origins,
 not the claimed name alone, before allowing access.
 
 Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days;
-reuse revokes the token family. Only keyed, domain-separated token and source
+reuse revokes the token family. Only keyed, domain-separated token, client-secret, and source
 hashes are stored in SQLite. The GitHub client secret, hashing key, and
 registration access token remain in the platform credential store.
 
