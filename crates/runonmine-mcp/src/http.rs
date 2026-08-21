@@ -1124,6 +1124,7 @@ mod tests {
                 tunnel_id: "01234567-89ab-cdef-0123-456789abcdef".to_owned(),
                 credentials_file: credentials.canonicalize()?,
                 hostname: "mcp.example.com".to_owned(),
+                owner_full_access: false,
                 cloudflared_path: None,
                 metrics_port: 47_824,
             }),

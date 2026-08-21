@@ -563,8 +563,38 @@ pub(super) fn admin(command: AdminCommand) -> Result<()> {
         AdminCommand::Install {
             allowed_programs,
             profile_file,
+            owner_root_shell,
         } => {
-            validate_admin_install_inputs(&allowed_programs, profile_file.as_deref())?;
+            validate_admin_install_inputs(
+                &allowed_programs,
+                profile_file.as_deref(),
+                owner_root_shell,
+            )?;
+            if owner_root_shell {
+                #[cfg(not(target_os = "macos"))]
+                bail!("--owner-root-shell is supported only on macOS");
+
+                #[cfg(target_os = "macos")]
+                {
+                    let mut document = if let Some(path) = profile_file.as_deref() {
+                        ProgramProfileDocument::load(path)?
+                    } else {
+                        ProgramProfileDocument {
+                            version: PROGRAM_PROFILE_VERSION,
+                            programs: Vec::new(),
+                        }
+                    };
+                    document.programs.push(owner_root_shell_profile());
+                    let mut generated = tempfile::NamedTempFile::new()?;
+                    serde_json::to_writer_pretty(&mut generated, &document)?;
+                    generated.flush()?;
+                    return install_admin_helper(
+                        &helper,
+                        &allowed_programs,
+                        Some(generated.path()),
+                    );
+                }
+            }
             install_admin_helper(&helper, &allowed_programs, profile_file.as_deref())
         }
         AdminCommand::Uninstall => run_elevated_helper(&helper, &["uninstall".into()]),
@@ -572,12 +602,34 @@ pub(super) fn admin(command: AdminCommand) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn owner_root_shell_profile() -> AdminProgramRule {
+    AdminProgramRule {
+        program: PathBuf::from("/bin/zsh"),
+        commands: vec![AdminCommandSchema {
+            subcommand: None,
+            flags: vec![AdminFlagSchema {
+                name: "-c".to_owned(),
+                value: Some(AdminArgumentSchema::Text {
+                    max_length: 8 * 1024,
+                    allow_leading_dash: true,
+                    allow_response_file: true,
+                }),
+                repeatable: false,
+            }],
+            forbidden_flags: Vec::new(),
+            positionals: Vec::new(),
+        }],
+    }
+}
+
 fn validate_admin_install_inputs(
     allowed_programs: &[PathBuf],
     profile_file: Option<&Path>,
+    owner_root_shell: bool,
 ) -> Result<()> {
-    if allowed_programs.is_empty() && profile_file.is_none() {
-        bail!("admin install requires --allow-program or --profile-file");
+    if allowed_programs.is_empty() && profile_file.is_none() && !owner_root_shell {
+        bail!("admin install requires --allow-program, --profile-file, or --owner-root-shell");
     }
     for path in allowed_programs {
         if !path.is_absolute() {
@@ -945,7 +997,9 @@ pub(super) fn spawn_sibling(name: &str, args: &[&str]) -> Result<()> {
 }
 
 pub(super) fn sibling_executable(name: &str) -> Result<PathBuf> {
-    let current = std::env::current_exe()?;
+    let current = std::env::current_exe()?
+        .canonicalize()
+        .context("failed to resolve the RunOnMine executable")?;
     let directory = current
         .parent()
         .context("RunOnMine executable has no parent directory")?;
@@ -1130,11 +1184,39 @@ mod tests {
 
     #[test]
     fn admin_install_inputs_fail_before_elevation_when_missing_or_relative() {
-        assert!(validate_admin_install_inputs(&[], None).is_err());
-        assert!(validate_admin_install_inputs(&[PathBuf::from("relative-program")], None).is_err());
+        assert!(validate_admin_install_inputs(&[], None, false).is_err());
         assert!(
-            validate_admin_install_inputs(&[], Some(Path::new("relative-profile.json"))).is_err()
+            validate_admin_install_inputs(&[PathBuf::from("relative-program")], None, false)
+                .is_err()
         );
+        assert!(
+            validate_admin_install_inputs(&[], Some(Path::new("relative-profile.json")), false)
+                .is_err()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn owner_root_shell_profile_is_explicit_zsh_c_text_only() {
+        let profile = owner_root_shell_profile();
+        assert_eq!(profile.program, PathBuf::from("/bin/zsh"));
+        assert_eq!(profile.commands.len(), 1);
+        let command = &profile.commands[0];
+        assert!(command.subcommand.is_none());
+        assert!(command.positionals.is_empty());
+        assert!(command.forbidden_flags.is_empty());
+        assert_eq!(command.flags.len(), 1);
+        assert_eq!(command.flags[0].name, "-c");
+        assert!(!command.flags[0].repeatable);
+        assert!(matches!(
+            command.flags[0].value,
+            Some(AdminArgumentSchema::Text {
+                max_length: 8192,
+                allow_leading_dash: true,
+                allow_response_file: true,
+            })
+        ));
+        assert!(validate_admin_install_inputs(&[], None, true).is_ok());
     }
 
     #[cfg(unix)]

@@ -24,7 +24,11 @@ use runonmine_core::{
 use runonmine_mcp::{reconcile_pending_connector_removals, remove_connector_recoverably};
 use runonmine_oauth::SqliteOAuthStore;
 use runonmine_platform::{
-    LinuxSystemService, UserService, current, helper::ProgramProfileDocument,
+    LinuxSystemService, UserService, current,
+    helper::{
+        AdminArgumentSchema, AdminCommandSchema, AdminFlagSchema, AdminProgramRule,
+        PROGRAM_PROFILE_VERSION, ProgramProfileDocument,
+    },
 };
 use secrecy::{ExposeSecret, SecretString};
 use tracing_subscriber::EnvFilter;
@@ -205,6 +209,10 @@ struct CloudflareOAuthArgs {
     github_owner_id: Option<u64>,
     #[arg(long)]
     cloudflared: Option<PathBuf>,
+    /// Trust this authenticated Named Tunnel as the machine owner's full workstation connector.
+    /// DANGEROUS: permits configured Full policy, including administrator execution.
+    #[arg(long)]
+    owner_full_access: bool,
     /// Write the initial OAuth registration credential to a new owner-only JSON file.
     #[arg(long, value_name = "ABSOLUTE_FILE")]
     registration_token_output: Option<PathBuf>,
@@ -433,6 +441,9 @@ enum AdminCommand {
         /// Versioned JSON document with executable-specific invocation profiles.
         #[arg(long, value_name = "ABSOLUTE_FILE")]
         profile_file: Option<PathBuf>,
+        /// DANGEROUS macOS owner-workstation mode: allow /bin/zsh -c <command> as root.
+        #[arg(long)]
+        owner_root_shell: bool,
     },
     Uninstall,
     Status,

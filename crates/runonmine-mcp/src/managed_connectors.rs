@@ -221,6 +221,7 @@ struct AsyncConnectorTask {
 pub(super) struct ManagedConnectors {
     handles: Vec<SupervisorHandle>,
     observers: Vec<QuickObserverHandle>,
+    runtime_observers: Vec<tokio::task::JoinHandle<()>>,
     async_tasks: Vec<AsyncConnectorTask>,
     degraded: Vec<ConnectorStartupFailure>,
     runtime: ConnectorRuntimeRegistry,
@@ -379,6 +380,9 @@ impl ManagedConnectors {
         for handle in self.handles.drain(..) {
             let _ignored = handle.stop().await;
         }
+        for observer in self.runtime_observers.drain(..) {
+            let _ignored = observer.await;
+        }
     }
 }
 
@@ -438,6 +442,22 @@ async fn start_quick_connector(
         tunnel.health_check()?,
         RestartPolicy::default(),
     )?;
+    let runtime_events = handle
+        .take_runtime_events()
+        .unwrap_or_else(|| handle.subscribe());
+    managed.runtime.set_starting(
+        &connector.id,
+        connector.kind,
+        ConnectorStartupStage::Readiness,
+    );
+    managed
+        .runtime_observers
+        .push(spawn_connector_runtime_observer(
+            runtime_events,
+            managed.runtime.clone(),
+            connector.id.clone(),
+            connector.kind,
+        ));
     let generation = match context.quick_runtime.begin(&connector.id) {
         Ok(generation) => generation,
         Err(error) => {
@@ -488,17 +508,34 @@ async fn start_named_connector(
         &settings.tunnel_id,
         settings.credentials_file.clone(),
         &settings.hostname,
-        context.origin.join("mcp")?,
+        context.origin.clone(),
         connector_dir.join("cloudflared.yml"),
     )
     .metrics_address(format!("127.0.0.1:{}", settings.metrics_port).parse()?)
     .build()?;
     tunnel.write_config()?;
-    managed.handles.push(context.supervisor.start(
+    let mut handle = context.supervisor.start(
         tunnel.command(&binary)?,
         tunnel.health_check()?,
         RestartPolicy::default(),
-    )?);
+    )?;
+    let runtime_events = handle
+        .take_runtime_events()
+        .unwrap_or_else(|| handle.subscribe());
+    managed.runtime.set_starting(
+        &connector.id,
+        connector.kind,
+        ConnectorStartupStage::Readiness,
+    );
+    managed
+        .runtime_observers
+        .push(spawn_connector_runtime_observer(
+            runtime_events,
+            managed.runtime.clone(),
+            connector.id.clone(),
+            connector.kind,
+        ));
+    managed.handles.push(handle);
     Ok(())
 }
 
@@ -568,11 +605,6 @@ async fn start_external_connectors_inner(
                 connector.kind,
                 ConnectorStartupStage::Process,
             );
-        } else if matches!(
-            connector.kind,
-            ConnectorKind::CloudflareQuick | ConnectorKind::CloudflareOauth
-        ) {
-            managed.runtime.set_ready(&connector.id, connector.kind);
         }
     }
     Ok(())
@@ -710,6 +742,22 @@ async fn await_openai_readiness_or_shutdown(
     }
 }
 
+fn spawn_connector_runtime_observer(
+    mut events: tokio::sync::broadcast::Receiver<ProcessEvent>,
+    runtime: ConnectorRuntimeRegistry,
+    connector_id: String,
+    kind: ConnectorKind,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let event = events.recv().await;
+            if apply_connector_runtime_event(&runtime, &connector_id, kind, &event) {
+                return;
+            }
+        }
+    })
+}
+
 async fn observe_openai_runtime(
     handle: SupervisorHandle,
     mut events: tokio::sync::broadcast::Receiver<ProcessEvent>,
@@ -727,7 +775,7 @@ async fn observe_openai_runtime(
                 return;
             }
             event = events.recv() => {
-                if apply_openai_runtime_event(&runtime, &connector_id, kind, &event) {
+                if apply_connector_runtime_event(&runtime, &connector_id, kind, &event) {
                     stop_supervisor(&mut handle).await;
                     return;
                 }
@@ -742,7 +790,7 @@ async fn stop_supervisor(handle: &mut Option<SupervisorHandle>) {
     }
 }
 
-fn apply_openai_runtime_event(
+fn apply_connector_runtime_event(
     runtime: &ConnectorRuntimeRegistry,
     connector_id: &str,
     kind: ConnectorKind,
@@ -781,7 +829,7 @@ fn apply_openai_runtime_event(
             state: ProcessState::Failed { .. },
         })
         | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-            mark_openai_degraded(runtime, connector_id, kind, ConnectorStartupStage::Process);
+            mark_connector_degraded(runtime, connector_id, kind, ConnectorStartupStage::Process);
             return true;
         }
         Ok(
@@ -790,7 +838,7 @@ fn apply_openai_runtime_event(
             | ProcessEvent::StandardError { .. },
         ) => {}
         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-            tracing::warn!(connector_id = %connector_id, skipped, "OpenAI connector state observer lagged");
+            tracing::warn!(connector_id = %connector_id, skipped, "connector runtime state observer lagged");
         }
     }
     false
@@ -806,16 +854,25 @@ fn warn_unpinned_binary(connector_id: &str, trust: ExternalBinaryTrust, path: &s
     }
 }
 
+fn mark_connector_degraded(
+    runtime: &ConnectorRuntimeRegistry,
+    connector_id: &str,
+    kind: ConnectorKind,
+    stage: ConnectorStartupStage,
+) {
+    tracing::warn!(connector_id = %connector_id, ?kind, ?stage, "connector runtime degraded");
+    let failure = ConnectorStartupFailure::new(connector_id, kind, stage);
+    failure.log();
+    runtime.set_degraded(failure);
+}
+
 fn mark_openai_degraded(
     runtime: &ConnectorRuntimeRegistry,
     connector_id: &str,
     kind: ConnectorKind,
     stage: ConnectorStartupStage,
 ) {
-    tracing::warn!(connector_id = %connector_id, ?kind, ?stage, "OpenAI connector activation degraded");
-    let failure = ConnectorStartupFailure::new(connector_id, kind, stage);
-    failure.log();
-    runtime.set_degraded(failure);
+    mark_connector_degraded(runtime, connector_id, kind, stage);
 }
 
 async fn prepare_openai_activation(
@@ -1452,13 +1509,26 @@ exit 1
     }
 
     #[test]
-    fn openai_runtime_events_cover_ready_backoff_recovery_and_stop() -> Result<()> {
+    fn cloudflare_runtime_requires_health_before_ready_and_tracks_backoff() -> Result<()> {
         let runtime = ConnectorRuntimeRegistry::default();
-        let connector_id = "runtime-openai";
-        let kind = ConnectorKind::OpenAiTunnel;
+        let connector_id = "runtime-cloudflare";
+        let kind = ConnectorKind::CloudflareOauth;
         runtime.set_starting(connector_id, kind, ConnectorStartupStage::Readiness);
 
-        assert!(!apply_openai_runtime_event(
+        assert!(!apply_connector_runtime_event(
+            &runtime,
+            connector_id,
+            kind,
+            &Ok(ProcessEvent::StateChanged {
+                state: ProcessState::Running {
+                    pid: Some(42),
+                    attempt: 1,
+                },
+            }),
+        ));
+        assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Starting)?;
+
+        assert!(!apply_connector_runtime_event(
             &runtime,
             connector_id,
             kind,
@@ -1469,7 +1539,38 @@ exit 1
         ));
         assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Ready)?;
 
-        assert!(!apply_openai_runtime_event(
+        assert!(!apply_connector_runtime_event(
+            &runtime,
+            connector_id,
+            kind,
+            &Ok(ProcessEvent::RestartScheduled {
+                attempt: 2,
+                delay_ms: 1_000,
+            }),
+        ));
+        assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Backoff)?;
+        Ok(())
+    }
+
+    #[test]
+    fn openai_runtime_events_cover_ready_backoff_recovery_and_stop() -> Result<()> {
+        let runtime = ConnectorRuntimeRegistry::default();
+        let connector_id = "runtime-openai";
+        let kind = ConnectorKind::OpenAiTunnel;
+        runtime.set_starting(connector_id, kind, ConnectorStartupStage::Readiness);
+
+        assert!(!apply_connector_runtime_event(
+            &runtime,
+            connector_id,
+            kind,
+            &Ok(ProcessEvent::HealthChanged {
+                healthy: true,
+                detail: "ready".to_owned(),
+            }),
+        ));
+        assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Ready)?;
+
+        assert!(!apply_connector_runtime_event(
             &runtime,
             connector_id,
             kind,
@@ -1480,7 +1581,7 @@ exit 1
         ));
         assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Backoff)?;
 
-        assert!(!apply_openai_runtime_event(
+        assert!(!apply_connector_runtime_event(
             &runtime,
             connector_id,
             kind,
@@ -1491,7 +1592,7 @@ exit 1
         ));
         assert_runtime_phase(&runtime, connector_id, ConnectorRuntimePhase::Ready)?;
 
-        assert!(apply_openai_runtime_event(
+        assert!(apply_connector_runtime_event(
             &runtime,
             connector_id,
             kind,

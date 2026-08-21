@@ -361,9 +361,13 @@ non-loopback bind hosts and zero ports. Cloudflare and
 OpenAI tunnel processes connect outward. RunOnMine does not open a public
 listener or modify firewall rules.
 
-Cloudflare Quick Tunnel uses `/<secret>/mcp`. Named Tunnel uses `/mcp` plus the
-embedded OAuth endpoints. OpenAI Secure MCP Tunnel launches the official
-external client against `runonmine mcp stdio --connector <id>`.
+Cloudflare Quick Tunnel uses `/<secret>/mcp`. Named Tunnel exposes `/mcp` plus
+the embedded OAuth endpoints, while its generated `cloudflared` ingress service
+is the bare loopback authority (for example `http://127.0.0.1:47821`) with no
+path or trailing slash. Cloudflare preserves the incoming request path when it
+forwards to that origin; rendering `/mcp` into the origin itself is rejected by
+`cloudflared`. OpenAI Secure MCP Tunnel launches the official external client
+against `runonmine mcp stdio --connector <id>`.
 
 ## Privileged executable preparation
 
@@ -456,18 +460,24 @@ replaced with empty state; restore requires an explicit trusted copy.
 
 ## Stable user-service installation
 
-The CLI sibling `runonmine-agent` is only an installation source. Installation
-copies it into the platform data directory under
-`service-bin/<package-version>/runonmine-agent` and service definitions execute
-that immutable path. Reinstalling identical bytes is idempotent; different bytes
-under the same package version are rejected. Unit/plist activation uses a
-temporary file in the destination directory, file fsync, atomic persist, parent
-fsync, private permissions, and symlink rejection.
+The installed user service always executes an immutable copy under
+`service-bin/<package-version>/runonmine-agent`. On Linux and Windows the bundled
+`runonmine-agent` sibling is the source. On macOS the source is the canonical
+`runonmine` CLI binary and launchd invokes that staged copy as `agent run`; using
+the same signed bytes for CLI-created Keychain items and the background agent
+avoids a second ad-hoc binary identity blocking on credential access. Reinstalling
+identical bytes is idempotent; different bytes under the same package version are
+rejected. Unit/plist activation uses a temporary file in the destination
+directory, file fsync, atomic persist, parent fsync, private permissions, and
+symlink rejection.
 
 ## Supervisor terminal-state certainty
 
 Connector supervision distinguishes spawn, process exit/status, readiness,
-shutdown, and cleanup failures. Terminal state also records whether cleanup was
+shutdown, and cleanup failures. Cloudflare and OpenAI runtime registries consume
+a supervisor event receiver created before process start: `ready` is published
+only after a healthy readiness event, while restart/backoff/failure events move
+the connector out of `ready`. Terminal state also records whether cleanup was
 not required, completed, or uncertain. A failed process-group/Job Object kill,
 status error, or shutdown timeout produces `uncertain` cleanup with orphan risk;
 the supervisor does not start another copy in that condition.

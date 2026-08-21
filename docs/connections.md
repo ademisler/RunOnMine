@@ -97,6 +97,21 @@ runonmine connect cloudflare oauth \
   --registration-token-output /absolute/private/oauth-registration.json
 ```
 
+For a dedicated machine you own, an explicit workstation mode is also available:
+
+```console
+runonmine connect cloudflare oauth \
+  --owner-full-access \
+  --registration-token-output /absolute/private/oauth-registration.json
+runonmine policy preset full --connector <connector-id>
+```
+
+`--owner-full-access` is intentionally dangerous. It disables the generic remote
+safety ceiling only for that GitHub-owner-authenticated Named Tunnel. OAuth
+scopes, requester identity, configured policy rules, selected roots, audit
+integrity, and helper allowlists still apply. It is never enabled implicitly and
+does not exist for Quick Tunnel or OpenAI connectors.
+
 The recommended Cloudflare mode uses Cloudflare only as the HTTPS carrier. The
 Rust agent owns protected-resource metadata, authorization-server metadata,
 dynamic client registration, authorization code flow, PKCE S256, consent, CSRF

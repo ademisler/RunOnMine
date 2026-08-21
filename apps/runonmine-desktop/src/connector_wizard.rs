@@ -22,6 +22,7 @@ pub(crate) struct ConnectorWizardState {
     pub(crate) github_client_secret: String,
     pub(crate) github_owner: String,
     pub(crate) github_owner_id: String,
+    pub(crate) owner_full_access: bool,
     pub(crate) openai_profile: String,
     pub(crate) openai_api_key: String,
 }
@@ -173,6 +174,20 @@ impl ConnectorWizardState {
             false,
             "123456",
         );
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut self.owner_full_access,
+            "Owner workstation full access (dangerous)",
+        );
+        if self.owner_full_access {
+            ui.label(
+                egui::RichText::new(
+                    "This authenticated Named Tunnel may use Full policy, including root shell, browser actions, desktop control, and platform automation. Use only on a machine you own.",
+                )
+                .size(12.0)
+                .color(theme::WARNING),
+            );
+        }
     }
 
     fn show_openai_fields(&mut self, ui: &mut egui::Ui) {
@@ -241,8 +256,8 @@ impl ConnectorWizardState {
                 arguments: vec!["connect".into(), "cloudflare".into(), "quick".into()],
                 stdin_secret: None,
             },
-            WizardKind::CloudflareOAuth => ConnectorCommand {
-                arguments: vec![
+            WizardKind::CloudflareOAuth => {
+                let mut arguments = vec![
                     "connect".into(),
                     "cloudflare".into(),
                     "oauth".into(),
@@ -258,10 +273,16 @@ impl ConnectorWizardState {
                     self.github_owner.trim().into(),
                     "--github-owner-id".into(),
                     self.github_owner_id.trim().into(),
-                    "--client-secret-stdin".into(),
-                ],
-                stdin_secret: Some(self.github_client_secret.clone()),
-            },
+                ];
+                if self.owner_full_access {
+                    arguments.push("--owner-full-access".into());
+                }
+                arguments.push("--client-secret-stdin".into());
+                ConnectorCommand {
+                    arguments,
+                    stdin_secret: Some(self.github_client_secret.clone()),
+                }
+            }
             WizardKind::OpenAi => ConnectorCommand {
                 arguments: vec![
                     "connect".into(),

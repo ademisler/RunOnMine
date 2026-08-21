@@ -207,6 +207,48 @@ pub(super) struct EvaluateArgs {
     pub(super) expression: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct VoiceNotifyArgs {
+    pub(super) text: String,
+    #[serde(default = "default_voice")]
+    pub(super) voice: String,
+    #[serde(default)]
+    pub(super) rate_percent: i32,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct VoiceListenArgs {
+    #[serde(default = "default_listen_seconds")]
+    pub(super) listen_seconds: u64,
+    #[serde(default = "default_voice_language")]
+    pub(super) language: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct VoiceAskArgs {
+    pub(super) question: String,
+    #[serde(default = "default_listen_seconds")]
+    pub(super) listen_seconds: u64,
+    #[serde(default = "default_voice")]
+    pub(super) voice: String,
+    #[serde(default)]
+    pub(super) rate_percent: i32,
+    #[serde(default = "default_voice_language")]
+    pub(super) language: String,
+}
+
+fn default_voice() -> String {
+    "ahmet".to_owned()
+}
+
+const fn default_listen_seconds() -> u64 {
+    12
+}
+
+fn default_voice_language() -> String {
+    "tr".to_owned()
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct ReadOutput {
     pub(super) content: String,

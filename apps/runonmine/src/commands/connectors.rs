@@ -377,6 +377,7 @@ struct CloudflareOauthInput {
     owner_login: String,
     owner_id: u64,
     binary_path: PathBuf,
+    owner_full_access: bool,
     registration_token_output: Option<PathBuf>,
 }
 
@@ -429,6 +430,7 @@ async fn prepare_cloudflare_oauth_input(
         owner_login,
         owner_id,
         binary_path: binary.path,
+        owner_full_access: args.owner_full_access,
         registration_token_output: args.registration_token_output,
     })
 }
@@ -455,6 +457,7 @@ fn new_cloudflare_oauth_connector(
             tunnel_id: input.tunnel_id.clone(),
             credentials_file: input.credentials_file.clone(),
             hostname: input.hostname.clone(),
+            owner_full_access: input.owner_full_access,
             cloudflared_path: Some(input.binary_path.clone()),
             metrics_port: 47_824,
         }),
@@ -1401,6 +1404,7 @@ mod tests {
             tunnel_id: "00000000-0000-4000-8000-000000000000".to_owned(),
             credentials_file: temporary.path().join("credentials.json"),
             hostname: "mcp.example.com".to_owned(),
+            owner_full_access: false,
             cloudflared_path: Some(external.clone()),
             metrics_port: 47_824,
         });

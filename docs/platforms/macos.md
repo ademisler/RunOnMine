@@ -18,11 +18,40 @@ window focus require Accessibility permission. RunOnMine does not bypass these
 prompts. Browser automation uses a separate Chromium profile and does not need
 access to the user's normal Chrome profile.
 
+## Local voice workstation tools
+
+RunOnMine can expose `mac_voice_notify`, `mac_voice_listen`, and
+`mac_voice_ask` when the local voice assets are installed:
+
+```console
+./scripts/setup-macos-voice.sh
+```
+
+The setup compiles `packaging/macos/runonmine-record-audio.swift` into the
+private RunOnMine data directory and installs SHA-256-verified Whisper
+`large-v3-turbo-q8_0`, `large-v3-q5_0`, and Silero VAD models. The microphone
+recorder enables AVAudioEngine voice processing when available, starts listening
+only after the start cue completes, and closes automatically after about 2.5
+seconds of silence once speech has begun. Whisper transcription and microphone
+audio remain local.
+
+`mac_voice_ask` is a blocking interaction and the MCP instructions require the
+agent to wait for the returned transcript before continuing work that depends on
+the answer. Voice operations share one playback/listening gate and recent
+identical requests are deduplicated to avoid double playback. Ahmet and Emel use
+the optional Microsoft Edge neural TTS service, so spoken text is sent to that
+service; select Yelda when local-only speech synthesis is required. Microphone
+permission may be required on first use.
+
 ## User service
 
 The normal user agent is installed as `dev.runonmine.agent` below
-`~/Library/LaunchAgents`. The agent executable is copied into RunOnMine's
-versioned per-user `service-bin` directory before the plist is loaded:
+`~/Library/LaunchAgents`. On macOS the installer resolves the canonical bundled
+`runonmine` CLI, copies those exact signed bytes into RunOnMine's versioned
+per-user `service-bin/<version>/runonmine-agent` path, and launches the immutable
+copy as `agent run`. This deliberately gives the CLI and background service the
+same code-signing identity within one installed build so Keychain credentials
+created by the CLI do not require access from a second ad-hoc binary identity:
 
 ```console
 runonmine setup --root /absolute/project/path
@@ -32,6 +61,11 @@ runonmine service status
 
 The LaunchAgent restarts only after unsuccessful exits, applies a 10-second
 crash throttle, and reports `launchctl print` state through `service status`.
+RunOnMine service lifecycle commands stop the agent with `SIGTERM`, wait for its
+managed connector process groups to exit, and only then start or replace the
+LaunchAgent. Do not use `launchctl kickstart -k` for routine RunOnMine restarts:
+that force-kills the agent before it can reap separately supervised tunnel
+process groups and can strand an old `cloudflared` process.
 Private stdout/stderr files live in RunOnMine's platform log directory. The
 agent tracing writer checks the stderr file before each write and truncates it
 before it would exceed 5 MiB; symlinked or unexpected log paths are rejected.
@@ -92,6 +126,18 @@ operation; run `sudo runonmine admin uninstall` before deleting the bundle when
 that helper was explicitly installed.
 
 ## Privileged helper and service ownership
+
+For a dedicated owner workstation, macOS also supports the explicit dangerous
+profile:
+
+```console
+runonmine admin install --owner-root-shell
+```
+
+This keeps the normal helper architecture but installs a hash-pinned `/bin/zsh`
+profile that permits `-c <command>` for `mac_run_root_shell`. It is never part of
+normal setup and should be combined only with a connector the owner intentionally
+trusts.
 
 The optional privileged helper is installed only through `sudo runonmine admin
 install` and authenticates the local peer with `getpeereid`. It accepts only
