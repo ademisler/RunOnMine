@@ -2,6 +2,8 @@
 
 - Cloudflare Named Tunnel ingress now renders the bare loopback authority without `/mcp` or a trailing slash, and managed connector readiness follows real supervisor health/backoff events instead of process spawn.
 - macOS user-service installation now stages the canonical `runonmine` CLI bytes and invokes them as `agent run`, preventing a separate ad-hoc agent identity from blocking on CLI-created Keychain credentials.
+- macOS `service start` now classifies one `launchctl print` snapshot and recovers a stopped-job kickstart race by bootstrapping the plist only after a fresh snapshot proves the job was unloaded.
+- Unix HTTP agents now treat SIGTERM as a graceful shutdown signal in addition to Ctrl-C/SIGINT, so launchd/systemd stops await managed connector teardown instead of orphaning supervised tunnel processes.
 
 All notable changes to RunOnMine are documented here. The project is still in
 pre-release development and does not yet provide compatibility guarantees.

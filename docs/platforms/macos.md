@@ -61,11 +61,18 @@ runonmine service status
 
 The LaunchAgent restarts only after unsuccessful exits, applies a 10-second
 crash throttle, and reports `launchctl print` state through `service status`.
-RunOnMine service lifecycle commands stop the agent with `SIGTERM`, wait for its
-managed connector process groups to exit, and only then start or replace the
-LaunchAgent. Do not use `launchctl kickstart -k` for routine RunOnMine restarts:
-that force-kills the agent before it can reap separately supervised tunnel
-process groups and can strand an old `cloudflared` process.
+RunOnMine service lifecycle commands unload the job with `launchctl bootout`,
+which prevents the `KeepAlive` policy from immediately restarting a process that
+is shutting down. The plist grants a 20-second exit window so the agent can stop
+and reap its managed connector process groups before launchd removes the job.
+`service start`/restart classify a single `launchctl print` snapshot, then use
+`bootstrap` (or a non-forcing `kickstart` only for an already-loaded idle job).
+If launchd unloads that idle job between the snapshot and kickstart, RunOnMine
+re-checks the job and bootstraps the installed plist only when it is now absent.
+Do not use `launchctl kickstart -k` for routine RunOnMine restarts: force-killing
+the agent can strand a separately supervised `cloudflared` process. The agent
+handles launchd's SIGTERM through its graceful shutdown path and waits for
+managed connector supervisors to terminate their process groups before exit.
 Private stdout/stderr files live in RunOnMine's platform log directory. The
 agent tracing writer checks the stderr file before each write and truncates it
 before it would exceed 5 MiB; symlinked or unexpected log paths are rejected.

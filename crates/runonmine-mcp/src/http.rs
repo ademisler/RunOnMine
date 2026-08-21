@@ -1045,7 +1045,48 @@ async fn public_oauth_host_guard(
 }
 
 async fn shutdown_signal() {
-    let _result = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let terminate = signal(SignalKind::terminate());
+        match terminate {
+            Ok(mut terminate) => {
+                wait_for_shutdown_sources(
+                    async {
+                        let _ignored = tokio::signal::ctrl_c().await;
+                    },
+                    async {
+                        let _ignored = terminate.recv().await;
+                    },
+                )
+                .await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to register SIGTERM handler; waiting for Ctrl-C only");
+                let _ignored = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ignored = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_sources<C, T>(ctrl_c: C, terminate: T)
+where
+    C: std::future::Future<Output = ()>,
+    T: std::future::Future<Output = ()>,
+{
+    tokio::pin!(ctrl_c);
+    tokio::pin!(terminate);
+    tokio::select! {
+        () = &mut ctrl_c => {},
+        () = &mut terminate => {},
+    }
 }
 
 #[cfg(test)]
@@ -1062,6 +1103,23 @@ mod tests {
     };
     use runonmine_oauth::Scope;
     use secrecy::SecretString;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graceful_shutdown_accepts_sigterm_source() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let terminate_observed = Arc::clone(&observed);
+        wait_for_shutdown_sources(std::future::pending(), async move {
+            terminate_observed.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(observed.load(Ordering::SeqCst));
+    }
 
     #[derive(Default)]
     struct TestSecretStore {

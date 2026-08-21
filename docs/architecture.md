@@ -469,7 +469,16 @@ avoids a second ad-hoc binary identity blocking on credential access. Reinstalli
 identical bytes is idempotent; different bytes under the same package version are
 rejected. Unit/plist activation uses a temporary file in the destination
 directory, file fsync, atomic persist, parent fsync, private permissions, and
-symlink rejection.
+symlink rejection. On macOS, stop/restart/install/uninstall unload the job with
+`launchctl bootout`, the plist grants a 20-second exit window for managed
+connector cleanup, and start classifies one `launchctl print` snapshot before
+choosing `bootstrap` or a non-forcing `kickstart` for an already-loaded idle
+job. If that idle job disappears before kickstart, RunOnMine takes one fresh
+snapshot and bootstraps only when launchd now proves the job is unloaded. The
+lifecycle never force-kills a running agent. On Unix, the HTTP agent handles
+both SIGINT and SIGTERM through the same graceful shutdown future before it
+stops and joins managed connector supervisors, so launchd/systemd service stops
+do not bypass child-process cleanup.
 
 ## Supervisor terminal-state certainty
 
