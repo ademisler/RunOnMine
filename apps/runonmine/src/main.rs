@@ -23,12 +23,13 @@ use runonmine_core::{
 };
 use runonmine_mcp::{reconcile_pending_connector_removals, remove_connector_recoverably};
 use runonmine_oauth::SqliteOAuthStore;
+#[cfg(target_os = "macos")]
+use runonmine_platform::helper::{
+    AdminArgumentSchema, AdminCommandSchema, AdminFlagSchema, AdminProgramRule,
+    PROGRAM_PROFILE_VERSION,
+};
 use runonmine_platform::{
-    LinuxSystemService, UserService, current,
-    helper::{
-        AdminArgumentSchema, AdminCommandSchema, AdminFlagSchema, AdminProgramRule,
-        PROGRAM_PROFILE_VERSION, ProgramProfileDocument,
-    },
+    LinuxSystemService, UserService, current, helper::ProgramProfileDocument,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tracing_subscriber::EnvFilter;
