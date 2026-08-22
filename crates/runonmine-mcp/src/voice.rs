@@ -143,6 +143,7 @@ struct BestTranscript {
 
 #[derive(Clone, Debug)]
 struct VoicePaths {
+    recorder_app: PathBuf,
     recorder: PathBuf,
     whisper_cli: PathBuf,
     primary_model: PathBuf,
@@ -158,11 +159,12 @@ impl VoicePaths {
     fn discover() -> Result<Self> {
         let app = AppPaths::discover()?;
         let voice = app.data_dir.join("voice");
-        let bin = voice.join("bin");
         let models = voice.join("models");
         let home = std::env::var_os("HOME").map(PathBuf::from);
+        let recorder_app = voice.join("RunOnMine Voice Recorder.app");
         Ok(Self {
-            recorder: bin.join("runonmine-record-audio"),
+            recorder: recorder_app.join("Contents/MacOS/runonmine-record-audio"),
+            recorder_app,
             whisper_cli: discover_absolute_program(&[
                 "/opt/homebrew/bin/whisper-cli",
                 "/usr/local/bin/whisper-cli",
@@ -186,7 +188,7 @@ impl VoicePaths {
     }
 
     fn status(&self) -> VoiceStatus {
-        let recorder = self.recorder.is_file();
+        let recorder = self.recorder_app.is_dir() && self.recorder.is_file();
         let whisper_cli = self.whisper_cli.is_file();
         let primary_model = self.primary_model.is_file();
         let fallback_model = self.fallback_model.is_file();
@@ -481,16 +483,22 @@ impl VoiceService {
     }
 
     async fn record_capture(&self, caf_path: &Path, max_seconds: u64) -> Result<CaptureInfo> {
-        let recorder = run_program_capture(
-            &self.paths.recorder,
+        let result_path = caf_path.with_extension("capture.json");
+        let _launcher = run_program_capture(
+            Path::new("/usr/bin/open"),
             &[
+                "-W".into(),
+                "-n".into(),
+                self.paths.recorder_app.to_string_lossy().into_owned(),
+                "--args".into(),
                 caf_path.to_string_lossy().into_owned(),
                 max_seconds.to_string(),
                 END_SILENCE_MS.to_string(),
                 SPEECH_THRESHOLD_DB.to_string(),
                 self.paths.start_sound.to_string_lossy().into_owned(),
+                result_path.to_string_lossy().into_owned(),
             ],
-            Duration::from_secs(max_seconds + 10),
+            Duration::from_secs(max_seconds + 35),
         )
         .await?;
         let _ = run_program(
@@ -499,12 +507,10 @@ impl VoiceService {
             Duration::from_secs(15),
         )
         .await;
-        recorder
-            .stdout
-            .lines()
-            .rev()
-            .find_map(|line| serde_json::from_str(line).ok())
-            .context("recorder did not return capture metadata")
+        let metadata = tokio::fs::read_to_string(&result_path).await.with_context(|| {
+            "microphone capture did not return metadata; allow Microphone access for RunOnMine Voice Recorder in System Settings > Privacy & Security > Microphone"
+        })?;
+        serde_json::from_str(&metadata).context("recorder returned invalid capture metadata")
     }
 
     async fn prepare_wav(

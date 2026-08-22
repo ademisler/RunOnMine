@@ -203,7 +203,8 @@ On macOS, optional local voice tools can be prepared with:
 ./scripts/setup-macos-voice.sh
 ```
 
-This installs the native recorder and verifies the local Whisper/VAD models in
+This installs a dedicated macOS voice-recorder helper app (the first listen may
+prompt for Microphone permission) and verifies the local Whisper/VAD models in
 RunOnMine's private data directory. See [macOS](docs/platforms/macos.md).
 
 ## Everyday controls

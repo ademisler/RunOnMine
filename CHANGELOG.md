@@ -12,9 +12,12 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
+- Fix local voice capture under the RunOnMine LaunchAgent by moving AVAudioEngine recording into a dedicated `RunOnMine Voice Recorder.app` with a stable bundle identity, explicit Microphone permission, LaunchServices activation, 0600 capture metadata, and preserved 2.5-second post-speech silence detection.
+
 - Make the OAuth consent screen polished and redirect-safe: it uses the real RunOnMine logo plus same-origin CSP-bound CSS, relies on a native HTML form for the browser redirect, and keeps a 30-second in-memory replay guard so an identical repeated approval returns the same redirect instead of turning a successful approval into `access_denied`.
 - Add an explicit owner-workstation mode for GitHub-owner-authenticated Cloudflare Named Tunnels. `--owner-full-access` keeps safe defaults unchanged but permits the selected policy to bypass the generic remote ceiling on that one connector; the macOS desktop surfaces the choice with a dangerous-access warning. Add `admin install --owner-root-shell` for an explicitly requested hash-pinned `/bin/zsh -c` privileged profile.
 - Add macOS owner-workstation MCP tools (`mac_info`, user/root shell aliases, and blocking local voice notify/listen/ask), a native AVAudioEngine recorder with 2.5-second speech-end detection, SHA-256-verified local Whisper large-v3-turbo/large-v3 fallback plus Silero VAD setup, and serialized/deduplicated voice playback to prevent repeated agent speech.
+- Keep external-CDP browser automation on a dedicated RunOnMine-owned Chromium tab and preserve that tab across short-lived HTTP MCP sessions, so automation never adopts or navigates an owner's existing tabs.
 
 - Keep unsigned public-beta macOS packaging on the verified ad-hoc path when GitHub exposes missing Apple signing secrets as empty environment variables; clear those variables before `cargo-packager` keychain detection and cover the exact empty-secret case in hosted artifact preflight.
 - Stabilize Windows hosted process-capture tests by giving PowerShell startup a platform-appropriate test budget and reporting timeout failures before output assertions; runtime command timeouts and process behavior are unchanged.

@@ -30,9 +30,12 @@ RunOnMine can expose `mac_voice_notify`, `mac_voice_listen`, and
 The setup compiles `packaging/macos/runonmine-record-audio.swift` into the
 private RunOnMine data directory and installs SHA-256-verified Whisper
 `large-v3-turbo-q8_0`, `large-v3-q5_0`, and Silero VAD models. The microphone
-recorder enables AVAudioEngine voice processing when available, starts listening
-only after the start cue completes, and closes automatically after about 2.5
-seconds of silence once speech has begun. Whisper transcription and microphone
+recorder is installed as the dedicated `RunOnMine Voice Recorder.app` helper so
+macOS can bind Microphone permission to a stable bundle identity. On first use,
+allow Microphone access for that helper. It explicitly verifies permission,
+enables AVAudioEngine voice processing when available, starts listening only
+after the start cue completes, and closes automatically after about 2.5 seconds
+of silence once speech has begun. Whisper transcription and microphone
 audio remain local.
 
 `mac_voice_ask` is a blocking interaction and the MCP instructions require the

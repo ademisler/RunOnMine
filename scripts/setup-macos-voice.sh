@@ -47,8 +47,39 @@ if [ ! -x "$HOME/.local/bin/edge-tts" ] && command -v uv >/dev/null 2>&1; then
   uv tool install edge-tts
 fi
 
-swiftc -O "$root/packaging/macos/runonmine-record-audio.swift" -o "$bin_dir/runonmine-record-audio"
-chmod 700 "$bin_dir/runonmine-record-audio"
+recorder_source="$root/packaging/macos/runonmine-record-audio.swift"
+recorder_plist="$root/packaging/macos/RunOnMineVoiceRecorder-Info.plist"
+recorder_icon="$root/packaging/assets/runonmine.icns"
+recorder_app="$voice_dir/RunOnMine Voice Recorder.app"
+recorder_executable="$recorder_app/Contents/MacOS/runonmine-record-audio"
+recorder_marker="$recorder_app/Contents/Resources/source.sha256"
+recorder_digest=$(cat "$recorder_source" "$recorder_plist" | shasum -a 256 | awk '{print $1}')
+installed_digest=''
+if [ -f "$recorder_marker" ]; then
+  installed_digest=$(cat "$recorder_marker" 2>/dev/null || true)
+fi
+if [ -x "$recorder_executable" ] && [ "$installed_digest" = "$recorder_digest" ]; then
+  echo "RunOnMine voice recorder helper already matches the current source."
+else
+  recorder_tmp="$voice_dir/.RunOnMine Voice Recorder.app.$$"
+  rm -rf "$recorder_tmp"
+  mkdir -p "$recorder_tmp/Contents/MacOS" "$recorder_tmp/Contents/Resources"
+  swiftc -O "$recorder_source" -o "$recorder_tmp/Contents/MacOS/runonmine-record-audio"
+  cp "$recorder_plist" "$recorder_tmp/Contents/Info.plist"
+  cp "$recorder_icon" "$recorder_tmp/Contents/Resources/runonmine.icns"
+  printf '%s\n' "$recorder_digest" > "$recorder_tmp/Contents/Resources/source.sha256"
+  chmod 700 "$recorder_tmp/Contents/MacOS/runonmine-record-audio"
+  chmod 600 "$recorder_tmp/Contents/Info.plist" "$recorder_tmp/Contents/Resources/source.sha256"
+  /usr/bin/codesign --force --deep --sign - "$recorder_tmp" >/dev/null
+  /usr/bin/codesign --verify --deep --strict "$recorder_tmp"
+  rm -rf "$recorder_app"
+  mv "$recorder_tmp" "$recorder_app"
+  echo "Installed RunOnMine Voice Recorder helper app."
+fi
+
+# Keep the historical executable path as a compatibility link for local diagnostics.
+rm -f "$bin_dir/runonmine-record-audio"
+ln -s "../RunOnMine Voice Recorder.app/Contents/MacOS/runonmine-record-audio" "$bin_dir/runonmine-record-audio"
 
 install_model() {
   label=$1

@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -79,6 +80,40 @@ struct ResolvedAuthorization<'a, T> {
     argument_hash: String,
 }
 
+#[derive(Debug)]
+struct SharedExternalBrowser {
+    fingerprint: String,
+    session: Arc<BrowserSession>,
+}
+
+static EXTERNAL_BROWSER_SESSIONS: OnceLock<StdMutex<HashMap<String, SharedExternalBrowser>>> =
+    OnceLock::new();
+
+fn shared_external_browser(
+    connector_id: &str,
+    fingerprint: String,
+    build: impl FnOnce() -> BrowserSession,
+) -> Arc<BrowserSession> {
+    let registry = EXTERNAL_BROWSER_SESSIONS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = registry.get(connector_id)
+        && existing.fingerprint == fingerprint
+    {
+        return Arc::clone(&existing.session);
+    }
+    let session = Arc::new(build());
+    registry.insert(
+        connector_id.to_owned(),
+        SharedExternalBrowser {
+            fingerprint,
+            session: Arc::clone(&session),
+        },
+    );
+    session
+}
+
 impl std::fmt::Debug for RunOnMineServer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -149,14 +184,42 @@ impl RunOnMineServer {
         };
         let browser_available = matches!(browser_profile, BrowserProfile::ExternalCdp { .. })
             || browser_executable_available(app_config.browser.executable_path.as_deref());
-        let browser = Arc::new(BrowserSession::with_executable_and_operation_timeout(
-            browser_profile,
-            browser_should_be_headless(),
-            app_config.browser.allow_private_network && !remote_restricted,
-            runtime.0.max_output_bytes,
-            app_config.browser.executable_path.clone(),
-            Duration::from_secs(app_config.browser.operation_timeout_seconds),
-        ));
+        let headless = browser_should_be_headless();
+        let allow_private_network = app_config.browser.allow_private_network && !remote_restricted;
+        let max_output_bytes = runtime.0.max_output_bytes;
+        let explicit_executable = app_config.browser.executable_path.clone();
+        let operation_timeout = Duration::from_secs(app_config.browser.operation_timeout_seconds);
+
+        let browser = if let BrowserProfile::ExternalCdp { endpoint } = &browser_profile {
+            // ChatGPT and other HTTP clients may initialize a fresh MCP transport for
+            // each tool call. Keep one external-CDP browser session per connector so
+            // browser_open followed by browser_get_url/click/type keeps the exact
+            // RunOnMine-owned tab instead of reattaching to an arbitrary user tab.
+            let fingerprint = format!(
+                "{}|headless={headless}|private={allow_private_network}|max={max_output_bytes}|timeout={}",
+                endpoint,
+                operation_timeout.as_secs()
+            );
+            shared_external_browser(&connector.id, fingerprint, || {
+                BrowserSession::with_executable_and_operation_timeout(
+                    browser_profile.clone(),
+                    headless,
+                    allow_private_network,
+                    max_output_bytes,
+                    explicit_executable.clone(),
+                    operation_timeout,
+                )
+            })
+        } else {
+            Arc::new(BrowserSession::with_executable_and_operation_timeout(
+                browser_profile,
+                headless,
+                allow_private_network,
+                max_output_bytes,
+                explicit_executable,
+                operation_timeout,
+            ))
+        };
         Ok((browser, browser_available))
     }
 

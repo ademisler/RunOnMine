@@ -18,7 +18,32 @@ let endSilenceMs = CommandLine.arguments.count >= 4 ? (Double(CommandLine.argume
 let speechThresholdDb = CommandLine.arguments.count >= 5 ? (Float(CommandLine.arguments[4]) ?? -43.0) : -43.0
 let endSilenceSeconds = max(0.5, min(4.0, endSilenceMs / 1000.0))
 let startSoundPath = CommandLine.arguments.count >= 6 ? CommandLine.arguments[5] : ""
+let resultPath = CommandLine.arguments.count >= 7 ? CommandLine.arguments[6] : ""
 let minimumSpeechSeconds = 0.16
+
+func microphoneAuthorized() -> Bool {
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized:
+        return true
+    case .denied, .restricted:
+        return false
+    case .notDetermined:
+        let semaphore = DispatchSemaphore(value: 0)
+        var granted = false
+        AVCaptureDevice.requestAccess(for: .audio) { allowed in
+            granted = allowed
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 30)
+        return granted && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    @unknown default:
+        return false
+    }
+}
+
+guard microphoneAuthorized() else {
+    fail("microphone permission denied; enable Microphone access for RunOnMine Voice Recorder in System Settings")
+}
 
 let engine = AVAudioEngine()
 let input = engine.inputNode
@@ -192,6 +217,15 @@ let result: [String: Any] = [
 if let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
    let json = String(data: data, encoding: .utf8) {
     print(json)
+    if !resultPath.isEmpty {
+        let resultURL = URL(fileURLWithPath: resultPath)
+        do {
+            try data.write(to: resultURL, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: resultPath)
+        } catch {
+            fail("cannot write capture metadata: \(error)")
+        }
+    }
 } else {
-    print("recorded \(String(format: "%.2f", durationSeconds))s -> \(outputPath)")
+    fail("cannot serialize capture metadata")
 }

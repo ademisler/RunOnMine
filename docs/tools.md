@@ -29,6 +29,8 @@ has at least one allowlisted, hash-pinned executable. The helper additionally
 requires the complete argument vector to match an installed command profile;
 executable-only compatibility entries accept no arguments.
 
+When browser automation is attached to an owner-managed Chromium through external CDP, RunOnMine creates and owns a dedicated tab instead of adopting an existing tab. The dedicated tab is preserved across short-lived HTTP MCP sessions so a sequence such as `browser_open` then `browser_get_url`/`browser_click`/`browser_type` continues on the same page. `browser_close` closes only the RunOnMine-owned tab.
+
 ## macOS local voice
 
 - `mac_voice_notify` — one-way status/progress/completion speech. It must not be
@@ -39,8 +41,9 @@ executable-only compatibility entries accept no arguments.
   agent work continues.
 
 Voice transcription is local. The macOS setup script installs a native
-AVAudioEngine recorder, Whisper `large-v3-turbo-q8_0`, an accuracy fallback
-`large-v3-q5_0`, and Silero VAD. Recording stops after about 2.5 seconds of
+AVAudioEngine recorder inside a dedicated, microphone-permission-scoped
+`RunOnMine Voice Recorder.app`, Whisper `large-v3-turbo-q8_0`, an accuracy
+fallback `large-v3-q5_0`, and Silero VAD. Recording stops after about 2.5 seconds of
 silence once speech begins. Voice operations are serialized; identical recent
 notifications are suppressed and identical completed questions reuse the prior
 transcript to prevent duplicate playback. Neural Ahmet/Emel speech uses
