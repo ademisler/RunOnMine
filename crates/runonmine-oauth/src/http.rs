@@ -356,9 +356,7 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
     no_store_headers(response.headers_mut());
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-        ),
+        consent_content_security_policy(challenge),
     );
     response.headers_mut().insert(
         header::REFERRER_POLICY,
@@ -369,6 +367,18 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+fn consent_content_security_policy(challenge: &ConsentChallenge) -> HeaderValue {
+    let value = format!(
+        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self' {}; frame-ancestors 'none'; base-uri 'none'",
+        challenge.requested_redirect_origin
+    );
+    HeaderValue::from_str(&value).unwrap_or_else(|_| {
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
+        )
+    })
 }
 
 fn consent_client_identity(challenge: &ConsentChallenge) -> String {
@@ -672,6 +682,7 @@ mod tests {
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("style-src 'self'"));
         assert!(csp.contains("img-src 'self'"));
+        assert!(csp.contains("form-action 'self' https://client.example"));
         assert!(!csp.contains("script-src"));
         assert!(!csp.contains("'unsafe-inline'"));
         Ok(())
