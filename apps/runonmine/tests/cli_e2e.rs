@@ -383,6 +383,7 @@ fn configure_oauth_test_connector(
             tunnel_id: "00000000-0000-4000-8000-000000000456".to_owned(),
             credentials_file: tunnel_credentials,
             hostname: "mcp.example.com".to_owned(),
+            owner_full_access: false,
             cloudflared_path: None,
             metrics_port: 47_824,
         }),

@@ -11,6 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use crate::agent_status::{AgentRestartExpectation, agent_status_path};
 use anyhow::{Context, Result, bail};
@@ -445,19 +447,183 @@ fn atomic_write_mode(destination: &Path, contents: &[u8], mode: u32) -> Result<(
     Ok(())
 }
 
+fn bundled_user_service_source(directory: &Path) -> PathBuf {
+    #[cfg(windows)]
+    return directory.join("runonmine-agent.exe");
+    #[cfg(target_os = "macos")]
+    return directory.join("runonmine");
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    return directory.join("runonmine-agent");
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_AGENT_LABEL: &str = "dev.runonmine.agent";
+#[cfg(target_os = "macos")]
+const MACOS_SERVICE_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(target_os = "macos")]
+const MACOS_EXIT_TIMEOUT_SECONDS: u64 = 20;
+
+#[cfg(target_os = "macos")]
+fn macos_agent_target() -> String {
+    format!("{}/{}", launch_domain(), MACOS_AGENT_LABEL)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_kickstart_arguments(target: &str) -> [&str; 2] {
+    ["kickstart", target]
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bootout_arguments<'a>(domain: &'a str, definition: &'a str) -> [&'a str; 3] {
+    ["bootout", domain, definition]
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bootstrap_arguments<'a>(domain: &'a str, definition: &'a str) -> [&'a str; 3] {
+    ["bootstrap", domain, definition]
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_launchctl_pid(stdout: &[u8]) -> Option<u32> {
+    String::from_utf8_lossy(stdout).lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("pid = ")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service_snapshot() -> Result<Option<Output>> {
+    let target = macos_agent_target();
+    let output = Command::new("launchctl")
+        .args(["print", &target])
+        .output()
+        .context("failed to inspect the LaunchAgent process")?;
+    Ok(output.status.success().then_some(output))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service_pid() -> Result<Option<u32>> {
+    Ok(macos_service_snapshot()?.and_then(|output| parse_macos_launchctl_pid(&output.stdout)))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service_loaded() -> Result<bool> {
+    Ok(macos_service_snapshot()?.is_some())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacosStartState {
+    Unloaded,
+    LoadedStopped,
+    LoadedRunning,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_start_state(snapshot: Option<&Output>) -> MacosStartState {
+    match snapshot {
+        None => MacosStartState::Unloaded,
+        Some(output) if parse_macos_launchctl_pid(&output.stdout).is_some() => {
+            MacosStartState::LoadedRunning
+        }
+        Some(_) => MacosStartState::LoadedStopped,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bootstrap(definition: &Path) -> Result<()> {
+    let domain = launch_domain();
+    command_success(
+        Command::new("launchctl").args(macos_bootstrap_arguments(
+            &domain,
+            definition.to_string_lossy().as_ref(),
+        )),
+        "failed to bootstrap the LaunchAgent",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_wait_for_unloaded() -> Result<()> {
+    let deadline = Instant::now() + MACOS_SERVICE_WAIT_TIMEOUT;
+    loop {
+        if !macos_service_loaded()? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("the LaunchAgent did not unload before the deadline");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_wait_for_running() -> Result<()> {
+    let deadline = Instant::now() + MACOS_SERVICE_WAIT_TIMEOUT;
+    loop {
+        if macos_service_pid()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("the LaunchAgent did not start before the deadline");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bootout(definition: &Path) -> Result<()> {
+    if !macos_service_loaded()? {
+        return Ok(());
+    }
+    let domain = launch_domain();
+    command_success(
+        Command::new("launchctl").args(macos_bootout_arguments(
+            &domain,
+            definition.to_string_lossy().as_ref(),
+        )),
+        "failed to unload the LaunchAgent",
+    )?;
+    macos_wait_for_unloaded()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_start(definition: &Path) -> Result<()> {
+    let target = macos_agent_target();
+    let snapshot = macos_service_snapshot()?;
+    match macos_start_state(snapshot.as_ref()) {
+        MacosStartState::LoadedRunning => {}
+        MacosStartState::Unloaded => macos_bootstrap(definition)?,
+        MacosStartState::LoadedStopped => {
+            let kickstart = command_success(
+                Command::new("launchctl").args(macos_kickstart_arguments(&target)),
+                "failed to start the loaded LaunchAgent",
+            );
+            if let Err(error) = kickstart {
+                // launchd may unload a stopped job between the status snapshot and
+                // kickstart. Recover only when a fresh snapshot proves the job is
+                // now absent; otherwise preserve the original start failure.
+                if macos_service_loaded()? {
+                    return Err(error);
+                }
+                macos_bootstrap(definition)?;
+            }
+        }
+    }
+    macos_wait_for_running()
+}
+
 impl UserService {
     pub fn discover() -> Result<Self> {
-        let current =
-            std::env::current_exe().context("failed to locate the RunOnMine executable")?;
+        let current = std::env::current_exe()
+            .context("failed to locate the RunOnMine executable")?
+            .canonicalize()
+            .context("failed to resolve the RunOnMine executable")?;
         let directory = current
             .parent()
             .context("RunOnMine executable has no parent directory")?;
-        #[cfg(windows)]
-        let agent = directory.join("runonmine-agent.exe");
-        #[cfg(not(windows))]
-        let agent = directory.join("runonmine-agent");
         Ok(Self {
-            agent_executable: agent,
+            agent_executable: bundled_user_service_source(directory),
         })
     }
 
@@ -539,14 +705,11 @@ impl UserService {
         #[cfg(target_os = "macos")]
         {
             rotate_macos_service_logs()?;
-            command_success(
-                Command::new("launchctl").args([
-                    "kickstart",
-                    "-k",
-                    &format!("{}/dev.runonmine.agent", launch_domain()),
-                ]),
-                "failed to start the LaunchAgent",
-            )
+            let path = service_definition_path()?.context("LaunchAgent path is unavailable")?;
+            if !path.is_file() {
+                bail!("the LaunchAgent is not installed");
+            }
+            macos_start(&path)
         }
         #[cfg(target_os = "linux")]
         {
@@ -582,14 +745,9 @@ impl UserService {
         #[cfg(target_os = "macos")]
         {
             rotate_macos_service_logs()?;
-            command_success(
-                Command::new("launchctl").args([
-                    "kickstart",
-                    "-k",
-                    &format!("{}/dev.runonmine.agent", launch_domain()),
-                ]),
-                "failed to restart the LaunchAgent",
-            )?;
+            let path = service_definition_path()?.context("LaunchAgent path is unavailable")?;
+            macos_bootout(&path)?;
+            macos_start(&path)?;
         }
         #[cfg(target_os = "linux")]
         command_success(
@@ -625,14 +783,8 @@ impl UserService {
     pub fn stop(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            command_success(
-                Command::new("launchctl").args([
-                    "kill",
-                    "SIGTERM",
-                    &format!("{}/dev.runonmine.agent", launch_domain()),
-                ]),
-                "failed to stop the LaunchAgent",
-            )
+            let path = service_definition_path()?.context("LaunchAgent path is unavailable")?;
+            macos_bootout(&path)
         }
         #[cfg(target_os = "linux")]
         {
@@ -706,6 +858,7 @@ impl UserService {
         let path = service_definition_path()?.context("LaunchAgent path is unavailable")?;
         ensure_parent(&path)?;
         rotate_macos_service_logs()?;
+        macos_bootout(&path)?;
         let (stdout_path, stderr_path) = macos_service_log_paths()?;
         let executable = xml_escape(&self.agent_executable.to_string_lossy());
         let stdout = xml_escape(&stdout_path.to_string_lossy());
@@ -716,10 +869,11 @@ impl UserService {
              \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
              <plist version=\"1.0\"><dict>\n\
              <key>Label</key><string>dev.runonmine.agent</string>\n\
-             <key>ProgramArguments</key><array><string>{executable}</string><string>run</string></array>\n\
+             <key>ProgramArguments</key><array><string>{executable}</string><string>agent</string><string>run</string></array>\n\
              <key>RunAtLoad</key><true/>\n\
              <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n\
              <key>ThrottleInterval</key><integer>10</integer>\n\
+             <key>ExitTimeOut</key><integer>{MACOS_EXIT_TIMEOUT_SECONDS}</integer>\n\
              <key>ProcessType</key><string>Background</string>\n\
              <key>StandardOutPath</key><string>{stdout}</string>\n\
              <key>StandardErrorPath</key><string>{stderr}</string>\n\
@@ -729,22 +883,7 @@ impl UserService {
              </dict></plist>\n"
         );
         write_private(&path, plist.as_bytes())?;
-        let domain = launch_domain();
-        let _ignored = Command::new("launchctl")
-            .args(["bootout", &domain, path.to_string_lossy().as_ref()])
-            .output();
-        command_success(
-            Command::new("launchctl").args(["bootstrap", &domain, path.to_string_lossy().as_ref()]),
-            "failed to install the LaunchAgent",
-        )?;
-        command_success(
-            Command::new("launchctl").args([
-                "kickstart",
-                "-k",
-                &format!("{domain}/dev.runonmine.agent"),
-            ]),
-            "failed to restart the installed LaunchAgent",
-        )
+        macos_start(&path)
     }
 
     #[cfg(target_os = "macos")]
@@ -752,10 +891,7 @@ impl UserService {
     fn uninstall_macos(&self) -> Result<()> {
         let path = service_definition_path()?.context("LaunchAgent path is unavailable")?;
         if path.exists() {
-            let domain = launch_domain();
-            let _ignored = Command::new("launchctl")
-                .args(["bootout", &domain, path.to_string_lossy().as_ref()])
-                .output();
+            macos_bootout(&path)?;
             fs::remove_file(path)?;
         }
         Ok(())
@@ -928,9 +1064,9 @@ fn stage_versioned_user_service_agent_to(source: &Path, destination: &Path) -> R
 
     let source_metadata = source
         .symlink_metadata()
-        .with_context(|| format!("runonmine-agent is missing at {}", source.display()))?;
+        .with_context(|| format!("user-service executable is missing at {}", source.display()))?;
     if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
-        bail!("runonmine-agent source must be a regular non-symlink file");
+        bail!("user-service source must be a regular non-symlink file");
     }
     let parent = destination
         .parent()
@@ -1393,6 +1529,86 @@ mod service_policy_tests {
         let launch_manager_reports_active = true;
         let running = installed && launch_manager_reports_active;
         assert!(!running);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_user_service_stages_the_cli_identity() {
+        let directory = Path::new("/Applications/RunOnMine.app/Contents/MacOS");
+        assert_eq!(
+            bundled_user_service_source(directory),
+            directory.join("runonmine")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_service_lifecycle_uses_bootout_and_bootstrap_without_force_kill() {
+        let target = "gui/501/dev.runonmine.agent";
+        let domain = "gui/501";
+        let definition = "/Users/test/Library/LaunchAgents/dev.runonmine.agent.plist";
+        assert_eq!(macos_kickstart_arguments(target), ["kickstart", target]);
+        assert!(!macos_kickstart_arguments(target).contains(&"-k"));
+        assert_eq!(
+            macos_bootout_arguments(domain, definition),
+            ["bootout", domain, definition]
+        );
+        assert_eq!(
+            macos_bootstrap_arguments(domain, definition),
+            ["bootstrap", domain, definition]
+        );
+        assert_eq!(MACOS_EXIT_TIMEOUT_SECONDS, 20);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_start_state_uses_one_launchctl_snapshot() -> Result<()> {
+        let running = Output {
+            status: Command::new("true").status()?,
+            stdout: b"state = running\npid = 16832\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        let stopped = Output {
+            status: Command::new("true").status()?,
+            stdout: b"state = waiting\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        assert_eq!(
+            macos_start_state(Some(&running)),
+            MacosStartState::LoadedRunning
+        );
+        assert_eq!(
+            macos_start_state(Some(&stopped)),
+            MacosStartState::LoadedStopped
+        );
+        assert_eq!(macos_start_state(None), MacosStartState::Unloaded);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_launchctl_pid_parser_is_bounded_to_the_pid_field() {
+        let output = b"gui/501/dev.runonmine.agent = {
+	state = running
+	pid = 16832
+	runs = 2
+}
+";
+        assert_eq!(parse_macos_launchctl_pid(output), Some(16832));
+        assert_eq!(
+            parse_macos_launchctl_pid(
+                b"state = waiting
+"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_macos_launchctl_pid(
+                b"pid = not-a-number
+"
+            ),
+            None
+        );
     }
 
     #[test]

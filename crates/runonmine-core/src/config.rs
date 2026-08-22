@@ -48,6 +48,11 @@ pub struct CloudflareNamedSettings {
     pub tunnel_id: String,
     pub credentials_file: PathBuf,
     pub hostname: String,
+    /// Explicit owner-workstation opt-in. When true, the authenticated Cloudflare
+    /// OAuth connector may use the configured policy without the generic remote
+    /// safety ceiling. Defaults to false for every existing/public deployment.
+    #[serde(default)]
+    pub owner_full_access: bool,
     #[serde(default)]
     pub cloudflared_path: Option<PathBuf>,
     #[serde(default = "default_cloudflare_named_metrics_port")]
@@ -133,6 +138,15 @@ impl ConnectorConfig {
             oauth_owner: None,
             openai_tunnel: None,
         }
+    }
+
+    #[must_use]
+    pub fn owner_workstation_access(&self) -> bool {
+        self.kind == ConnectorKind::CloudflareOauth
+            && self
+                .cloudflare_named
+                .as_ref()
+                .is_some_and(|settings| settings.owner_full_access)
     }
 
     pub fn local_http_default() -> Self {

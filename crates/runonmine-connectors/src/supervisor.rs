@@ -168,6 +168,7 @@ impl ProcessSupervisor {
         let (state_tx, state_rx) = watch::channel(ProcessState::Starting { attempt: 1 });
         let (event_tx, _) = broadcast::channel(256);
         let initial_events = event_tx.subscribe();
+        let runtime_events = event_tx.subscribe();
         let task_events = event_tx.clone();
         let task = runtime.spawn(async move {
             run_supervisor(
@@ -186,6 +187,7 @@ impl ProcessSupervisor {
             state: state_rx,
             events: event_tx,
             initial_events: Some(initial_events),
+            runtime_events: Some(runtime_events),
             task: Some(task),
         })
     }
@@ -196,6 +198,7 @@ pub struct SupervisorHandle {
     state: watch::Receiver<ProcessState>,
     events: broadcast::Sender<ProcessEvent>,
     initial_events: Option<broadcast::Receiver<ProcessEvent>>,
+    runtime_events: Option<broadcast::Receiver<ProcessEvent>>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -219,6 +222,13 @@ impl SupervisorHandle {
 
     pub fn take_initial_events(&mut self) -> Option<broadcast::Receiver<ProcessEvent>> {
         self.initial_events.take()
+    }
+
+    /// Returns a receiver created before the supervised process task starts.
+    /// Runtime observers use this separate stream so they cannot miss an early
+    /// readiness/failure event while another consumer retains initial output.
+    pub fn take_runtime_events(&mut self) -> Option<broadcast::Receiver<ProcessEvent>> {
+        self.runtime_events.take()
     }
 
     pub async fn stop(mut self) -> Result<ProcessState> {

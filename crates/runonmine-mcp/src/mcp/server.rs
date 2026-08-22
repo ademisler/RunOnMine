@@ -1,14 +1,16 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer};
 use runonmine_browser::{BrowserProfile, BrowserSession, browser_executable_available};
 use runonmine_core::{
     AppConfig, AppPaths, ApprovalPrincipal, AuditOutcome, BrowserProfileMode, Capability,
-    ConnectorKind, PolicyContext, PolicyEngine, PolicyMode, PrincipalContext,
+    ConnectorConfig, ConnectorKind, PolicyContext, PolicyEngine, PolicyMode, PrincipalContext,
 };
 use runonmine_platform::desktop;
 use runonmine_platform::helper::{HelperAvailability, HelperClient};
@@ -27,7 +29,7 @@ use super::runtime::{
 use super::{
     BROWSER_TOOLS, DESKTOP_CAPTURE_TOOLS, DESKTOP_INPUT_TOOLS, FILE_TOOLS, REQUEST_ACCESS,
     RunOnMineServer, TOOL_CAPABILITIES, argument_hash, authorization, browser_should_be_headless,
-    diagnostics,
+    diagnostics, voice::VoiceService,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -78,6 +80,40 @@ struct ResolvedAuthorization<'a, T> {
     argument_hash: String,
 }
 
+#[derive(Debug)]
+struct SharedExternalBrowser {
+    fingerprint: String,
+    session: Arc<BrowserSession>,
+}
+
+static EXTERNAL_BROWSER_SESSIONS: OnceLock<StdMutex<HashMap<String, SharedExternalBrowser>>> =
+    OnceLock::new();
+
+fn shared_external_browser(
+    connector_id: &str,
+    fingerprint: String,
+    build: impl FnOnce() -> BrowserSession,
+) -> Arc<BrowserSession> {
+    let registry = EXTERNAL_BROWSER_SESSIONS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = registry.get(connector_id)
+        && existing.fingerprint == fingerprint
+    {
+        return Arc::clone(&existing.session);
+    }
+    let session = Arc::new(build());
+    registry.insert(
+        connector_id.to_owned(),
+        SharedExternalBrowser {
+            fingerprint,
+            session: Arc::clone(&session),
+        },
+    );
+    session
+}
+
 impl std::fmt::Debug for RunOnMineServer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -93,14 +129,43 @@ impl RunOnMineServer {
         let permit = Arc::new(runtime.acquire_session()?);
         let paths = AppPaths::discover()?;
         let app_config = AppConfig::load(&paths.config_file())?;
+        let (browser, browser_available) =
+            Self::build_browser(&runtime, &connector, &paths, &app_config)?;
+        let voice = Arc::new(VoiceService::discover()?);
+        let mut tool_router = Self::tool_router();
+        Self::disable_unavailable_tools(
+            &mut tool_router,
+            &runtime,
+            &connector,
+            browser_available,
+            voice.status().available,
+        );
+        Ok(Self {
+            runtime,
+            browser,
+            admin: HelperClient::for_current_user()
+                .map_err(|error| HelperAvailability::from_error(&error)),
+            voice,
+            tool_router,
+            _session_permit: permit,
+        })
+    }
+
+    fn build_browser(
+        runtime: &Runtime,
+        connector: &ConnectorConfig,
+        paths: &AppPaths,
+        app_config: &AppConfig,
+    ) -> Result<(Arc<BrowserSession>, bool)> {
         let remote_connector = matches!(
             connector.kind,
             ConnectorKind::CloudflareQuick
                 | ConnectorKind::CloudflareOauth
                 | ConnectorKind::OpenAiTunnel
         );
+        let remote_restricted = remote_connector && !connector.owner_workstation_access();
         let browser_profile = match app_config.browser.external_cdp_url.clone() {
-            Some(_) if remote_connector => {
+            Some(_) if remote_restricted => {
                 bail!("external CDP attachment is unavailable to remote connectors")
             }
             Some(endpoint) => BrowserProfile::external(endpoint)?,
@@ -119,18 +184,55 @@ impl RunOnMineServer {
         };
         let browser_available = matches!(browser_profile, BrowserProfile::ExternalCdp { .. })
             || browser_executable_available(app_config.browser.executable_path.as_deref());
-        let browser = Arc::new(BrowserSession::with_executable_and_operation_timeout(
-            browser_profile,
-            browser_should_be_headless(),
-            app_config.browser.allow_private_network && !remote_connector,
-            runtime.0.max_output_bytes,
-            app_config.browser.executable_path.clone(),
-            Duration::from_secs(app_config.browser.operation_timeout_seconds),
-        ));
+        let headless = browser_should_be_headless();
+        let allow_private_network = app_config.browser.allow_private_network && !remote_restricted;
+        let max_output_bytes = runtime.0.max_output_bytes;
+        let explicit_executable = app_config.browser.executable_path.clone();
+        let operation_timeout = Duration::from_secs(app_config.browser.operation_timeout_seconds);
+
+        let browser = if let BrowserProfile::ExternalCdp { endpoint } = &browser_profile {
+            // ChatGPT and other HTTP clients may initialize a fresh MCP transport for
+            // each tool call. Keep one external-CDP browser session per connector so
+            // browser_open followed by browser_get_url/click/type keeps the exact
+            // RunOnMine-owned tab instead of reattaching to an arbitrary user tab.
+            let fingerprint = format!(
+                "{}|headless={headless}|private={allow_private_network}|max={max_output_bytes}|timeout={}",
+                endpoint,
+                operation_timeout.as_secs()
+            );
+            shared_external_browser(&connector.id, fingerprint, || {
+                BrowserSession::with_executable_and_operation_timeout(
+                    browser_profile.clone(),
+                    headless,
+                    allow_private_network,
+                    max_output_bytes,
+                    explicit_executable.clone(),
+                    operation_timeout,
+                )
+            })
+        } else {
+            Arc::new(BrowserSession::with_executable_and_operation_timeout(
+                browser_profile,
+                headless,
+                allow_private_network,
+                max_output_bytes,
+                explicit_executable,
+                operation_timeout,
+            ))
+        };
+        Ok((browser, browser_available))
+    }
+
+    fn disable_unavailable_tools(
+        tool_router: &mut ToolRouter<Self>,
+        runtime: &Runtime,
+        connector: &ConnectorConfig,
+        browser_available: bool,
+        voice_available: bool,
+    ) {
         let engine = PolicyEngine;
-        let mut tool_router = Self::tool_router();
         for (tool_name, capability) in TOOL_CAPABILITIES {
-            if engine.evaluate(&connector, tool_name, *capability).mode == PolicyMode::Deny {
+            if engine.evaluate(connector, tool_name, *capability).mode == PolicyMode::Deny {
                 tool_router.disable_route(*tool_name);
             }
         }
@@ -166,14 +268,28 @@ impl RunOnMineServer {
         if !native::dbus_available() {
             tool_router.disable_route("linux_dbus_call");
         }
-        Ok(Self {
-            runtime,
-            browser,
-            admin: HelperClient::for_current_user()
-                .map_err(|error| HelperAvailability::from_error(&error)),
-            tool_router,
-            _session_permit: permit,
-        })
+        Self::disable_platform_workstation_tools(tool_router, voice_available);
+    }
+
+    fn disable_platform_workstation_tools(
+        tool_router: &mut ToolRouter<Self>,
+        voice_available: bool,
+    ) {
+        if !cfg!(target_os = "macos") {
+            for tool_name in [
+                "mac_info",
+                "mac_run_user_shell",
+                "mac_run_root_shell",
+                "mac_voice_notify",
+                "mac_voice_listen",
+                "mac_voice_ask",
+            ] {
+                tool_router.disable_route(tool_name);
+            }
+        } else if !voice_available {
+            tool_router.disable_route("mac_voice_listen");
+            tool_router.disable_route("mac_voice_ask");
+        }
     }
 
     pub(super) async fn authorize<T: Serialize>(

@@ -158,11 +158,10 @@ impl HelperManager {
             binary_present && policy_present && service_definition_complete && service_installed;
         let any_artifact =
             binary_present || policy_present || service_definition_present || service_installed;
-        let state = if matches!(policy_state, HelperAvailability::PermissionDenied)
-            || matches!(
-                service_query_state,
-                Some(HelperAvailability::PermissionDenied)
-            ) {
+        let state = if matches!(
+            service_query_state,
+            Some(HelperAvailability::PermissionDenied)
+        ) {
             HelperAvailability::PermissionDenied
         } else if service_query_state.is_some() {
             HelperAvailability::Unavailable
@@ -171,12 +170,13 @@ impl HelperManager {
         } else if !installed {
             match policy_state {
                 HelperAvailability::Unavailable => HelperAvailability::Unavailable,
+                HelperAvailability::PermissionDenied => HelperAvailability::PermissionDenied,
                 _ => HelperAvailability::Corrupt,
             }
         } else if !running {
             HelperAvailability::Disabled
-        } else if let Some(policy) = &policy {
-            match HelperClient::new(policy.owner.clone()) {
+        } else if let Some(owner) = helper_status_probe_owner(policy.as_ref(), &policy_state) {
+            match HelperClient::new(owner) {
                 Ok(client) => tokio::time::timeout(Duration::from_secs(2), client.availability())
                     .await
                     .unwrap_or(HelperAvailability::Unavailable),
@@ -200,6 +200,17 @@ impl HelperManager {
             detail,
         })
     }
+}
+
+fn helper_status_probe_owner(
+    policy: Option<&AdminPolicy>,
+    policy_state: &HelperAvailability,
+) -> Option<OwnerIdentity> {
+    policy.map(|value| value.owner.clone()).or_else(|| {
+        matches!(policy_state, HelperAvailability::PermissionDenied)
+            .then(|| super::current_user_identity().ok())
+            .flatten()
+    })
 }
 
 pub fn installed_policy_path() -> Result<PathBuf> {
@@ -1033,6 +1044,12 @@ mod tests {
             service_query_error_state(&missing_command),
             HelperAvailability::Unavailable
         );
+    }
+
+    #[test]
+    fn unreadable_root_policy_probes_helper_as_the_current_owner() {
+        let owner = helper_status_probe_owner(None, &HelperAvailability::PermissionDenied);
+        assert!(owner.is_some());
     }
 
     #[test]

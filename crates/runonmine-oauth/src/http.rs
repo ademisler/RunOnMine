@@ -9,6 +9,7 @@ use axum::middleware::{Next, from_fn};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,10 @@ pub fn oauth_router(service: Arc<OAuthService>) -> Router {
             get(authorization_server_metadata),
         )
         .route(
+            "/.well-known/oauth-authorization-server/mcp",
+            get(authorization_server_metadata),
+        )
+        .route(
             "/.well-known/oauth-protected-resource",
             get(protected_resource_metadata),
         )
@@ -40,6 +45,10 @@ pub fn oauth_router(service: Arc<OAuthService>) -> Router {
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/github/callback", get(github_callback))
         .route("/oauth/consent", post(consent))
+        .route("/oauth/consent.css", get(consent_stylesheet))
+        .route("/oauth/logo.svg", get(consent_logo))
+        .route("/oauth/assets/consent-v2.css", get(consent_stylesheet))
+        .route("/oauth/assets/runonmine-logo-v1.svg", get(consent_logo))
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
         .layer(from_fn(oauth_request_diagnostics))
@@ -155,11 +164,42 @@ struct TokenResponse {
     scope: String,
 }
 
+#[derive(Deserialize)]
+struct TokenFormRequest {
+    grant_type: String,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    redirect_uri: Option<url::Url>,
+    #[serde(default)]
+    code_verifier: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
 async fn token(
     State(service): State<Arc<OAuthService>>,
-    Form(request): Form<TokenRequest>,
+    headers: HeaderMap,
+    Form(request): Form<TokenFormRequest>,
 ) -> Result<Response, OAuthError> {
-    let issued = service.issue_token(&request)?;
+    let (client_id, client_secret) =
+        token_client_credentials(&headers, request.client_id, request.client_secret)?;
+    let request = TokenRequest {
+        grant_type: request.grant_type,
+        client_id,
+        code: request.code,
+        redirect_uri: request.redirect_uri,
+        code_verifier: request.code_verifier,
+        refresh_token: request.refresh_token,
+        scope: request.scope,
+    };
+    let issued = service.issue_token(&request, client_secret.as_deref())?;
     let body = TokenResponse {
         access_token: issued.access_token.expose_secret().to_owned(),
         token_type: issued.token_type,
@@ -172,6 +212,57 @@ async fn token(
     Ok(response)
 }
 
+fn token_client_credentials(
+    headers: &HeaderMap,
+    form_client_id: Option<String>,
+    form_client_secret: Option<String>,
+) -> Result<(String, Option<String>), OAuthError> {
+    let basic = basic_client_credentials(headers)?;
+    if let Some((client_id, secret)) = basic {
+        if form_client_id
+            .as_deref()
+            .is_some_and(|value| value != client_id)
+            || form_client_secret.is_some()
+        {
+            return Err(OAuthError::invalid_client());
+        }
+        Ok((client_id, Some(secret)))
+    } else {
+        let client_id = form_client_id.ok_or_else(OAuthError::invalid_client)?;
+        Ok((client_id, form_client_secret))
+    }
+}
+
+fn basic_client_credentials(headers: &HeaderMap) -> Result<Option<(String, String)>, OAuthError> {
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| OAuthError::invalid_client())?;
+    let encoded = value
+        .strip_prefix("Basic ")
+        .ok_or_else(OAuthError::invalid_client)?;
+    if encoded.is_empty() || encoded.len() > 4_096 {
+        return Err(OAuthError::invalid_client());
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| OAuthError::invalid_client())?;
+    let decoded = String::from_utf8(decoded).map_err(|_| OAuthError::invalid_client())?;
+    let (client_id, secret) = decoded
+        .split_once(':')
+        .ok_or_else(OAuthError::invalid_client)?;
+    if client_id.is_empty()
+        || client_id.len() > 256
+        || secret.len() < 32
+        || secret.len() > 1_024
+        || client_id.chars().any(char::is_control)
+        || secret.contains(char::is_whitespace)
+    {
+        return Err(OAuthError::invalid_client());
+    }
+    Ok(Some((client_id.to_owned(), secret.to_owned())))
+}
+
 async fn revoke(
     State(service): State<Arc<OAuthService>>,
     Form(request): Form<RevocationRequest>,
@@ -182,24 +273,90 @@ async fn revoke(
     Ok(response)
 }
 
+const CONSENT_CSS: &str = r#"
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#090b0f;color:#f7f8fa}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% -15%,#20283a 0,#0d1119 34%,#090b0f 68%);color:#f7f8fa}
+button,input{font:inherit}.shell{min-height:100vh;display:grid;place-items:center;padding:40px 20px}.card{width:min(760px,100%);background:rgba(17,20,27,.96);border:1px solid #2a303c;border-radius:24px;box-shadow:0 28px 80px rgba(0,0,0,.48);overflow:hidden}
+.brand{display:flex;align-items:center;gap:12px;padding:22px 28px;border-bottom:1px solid #272c36}.brand-logo{display:block;width:36px;height:36px;border-radius:11px;box-shadow:0 8px 24px rgba(52,211,153,.16)}.brand-copy{display:grid;gap:2px}.brand-copy strong{font-size:14px;letter-spacing:.01em}.brand-copy span{font-size:12px;color:#8e98aa}
+.content{padding:30px 30px 28px}.eyebrow{display:inline-flex;align-items:center;gap:8px;margin-bottom:12px;color:#aeb7c7;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.eyebrow::before{content:"";width:7px;height:7px;border-radius:50%;background:#5cdd9a;box-shadow:0 0 0 4px rgba(92,221,154,.1)}h1{margin:0;font-size:clamp(28px,4vw,38px);line-height:1.12;letter-spacing:-.035em}.subtitle{margin:13px 0 26px;color:#a9b1c0;font-size:15px;line-height:1.6}
+.client-card{border:1px solid #303744;border-radius:18px;background:#151922;overflow:hidden;margin-bottom:26px}.client-main{display:flex;align-items:center;gap:14px;padding:17px 18px}.client-avatar{display:grid;place-items:center;flex:0 0 auto;width:44px;height:44px;border-radius:13px;background:#232936;color:#dbe3f2;font-weight:800}.client-copy{min-width:0;flex:1}.client-name{font-size:16px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.client-meta{margin-top:3px;color:#8f99aa;font-size:12px}.trust-badge{flex:0 0 auto;padding:6px 9px;border-radius:999px;background:#2a2417;color:#f2c66d;border:1px solid #4a3c1f;font-size:11px;font-weight:700}.details{border-top:1px solid #2a303a}.details summary{cursor:pointer;padding:13px 18px;color:#aeb7c7;font-size:13px;font-weight:650;list-style:none}.details summary::-webkit-details-marker{display:none}.details summary::after{content:"+";float:right;color:#737f92;font-size:18px;line-height:14px}.details[open] summary::after{content:"–"}.detail-body{padding:2px 18px 18px}.detail-grid{display:grid;grid-template-columns:160px 1fr;gap:10px 16px;margin:0}.detail-grid dt{color:#7f899a;font-size:12px}.detail-grid dd{margin:0;color:#cfd6e2;font-size:12px;min-width:0;overflow-wrap:anywhere}.detail-grid code{font-family:"SFMono-Regular",Consolas,monospace;font-size:11px;color:#dfe5ee}.origin-list{margin:0;padding-left:18px}.origin-list li+li{margin-top:4px}.security-note{margin:16px 0 0;padding:12px 13px;border-radius:12px;background:#11151c;color:#929cac;font-size:12px;line-height:1.5}
+.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:0 0 12px}.section-head h2{margin:0;font-size:16px;letter-spacing:-.01em}.section-head span{color:#7f8999;font-size:12px}.scope-grid{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:10px}.scope-item{display:flex;gap:11px;padding:13px 14px;border-radius:14px;background:#12161e;border:1px solid #272d37}.scope-icon{flex:0 0 auto;width:24px;height:24px;border-radius:8px;background:#202634;display:grid;place-items:center;color:#8ca8ff;font-size:12px;font-weight:800}.scope-copy{min-width:0}.scope-copy code{font-family:"SFMono-Regular",Consolas,monospace;color:#e7eaf0;font-size:12px;font-weight:700}.scope-copy p{margin:5px 0 0;color:#8994a6;font-size:11px;line-height:1.45}
+.actions{display:flex;gap:10px;margin-top:26px}.button{appearance:none;border:0;border-radius:13px;padding:13px 18px;font-size:14px;font-weight:750;cursor:pointer;transition:transform .12s ease,background .12s ease,opacity .12s ease}.button:active{transform:translateY(1px)}.button:disabled{cursor:wait;opacity:.62}.button-secondary{margin-left:auto;background:#20252f;color:#d6dce6;border:1px solid #303744}.button-secondary:hover{background:#262c37}.button-primary{min-width:145px;background:#f1f4f8;color:#0b0d11}.button-primary:hover{background:#fff}.footnote{margin:15px 0 0;text-align:right;color:#737e90;font-size:11px;line-height:1.5}
+@media(max-width:640px){.shell{padding:0}.card{min-height:100vh;border:0;border-radius:0}.content{padding:26px 20px}.brand{padding:18px 20px}.scope-grid{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr;gap:4px}.detail-grid dd{margin-bottom:8px}.actions{flex-direction:column-reverse}.button,.button-primary{width:100%}.button-secondary{margin-left:0}.footnote{text-align:center}}
+"#;
+
+const CONSENT_LOGO: &str = include_str!("../../../packaging/assets/runonmine.svg");
+
+async fn consent_stylesheet() -> Response {
+    let mut response = CONSENT_CSS.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/css; charset=utf-8"),
+    );
+    no_store_headers(response.headers_mut());
+    response
+}
+
+async fn consent_logo() -> Response {
+    let mut response = CONSENT_LOGO.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+    );
+    no_store_headers(response.headers_mut());
+    response
+}
+
 fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Response {
     let client_identity = consent_client_identity(challenge);
     let scopes = consent_scope_list(&challenge.scopes);
+    let client_name = encode_text(&challenge.claimed_client_name);
     let consent_endpoint = service.consent_endpoint();
     let action = encode_double_quoted_attribute(consent_endpoint.as_str());
     let consent_id_value = challenge.id.to_string();
     let consent_id = encode_double_quoted_attribute(&consent_id_value);
     let csrf = encode_double_quoted_attribute(challenge.csrf.expose_secret());
     let body = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>RunOnMine authorization</title></head><body><main><h1>Allow AI access to this machine?</h1>{client_identity}<h2>Requested capabilities</h2>{scopes}<form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"consent_id\" value=\"{consent_id}\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button><button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button></form></main></body></html>"
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>RunOnMine authorization</title>
+<link rel="stylesheet" href="/oauth/assets/consent-v2.css">
+</head>
+<body>
+<div class="shell">
+<main class="card">
+<header class="brand"><img class="brand-logo" src="/oauth/assets/runonmine-logo-v1.svg" alt="RunOnMine"><div class="brand-copy"><strong>RunOnMine</strong><span>Secure authorization</span></div></header>
+<div class="content">
+<div class="eyebrow">Connection request</div>
+<h1>Allow {client_name} to access this computer?</h1>
+<p class="subtitle">Review exactly what this connection can do. Access is limited to the capabilities shown below and remains subject to RunOnMine policy.</p>
+{client_identity}
+<section aria-labelledby="capabilities-heading">
+<div class="section-head"><h2 id="capabilities-heading">Requested capabilities</h2><span>Review before continuing</span></div>
+{scopes}
+</section>
+<form class="actions" method="post" action="{action}">
+<input type="hidden" name="consent_id" value="{consent_id}">
+<input type="hidden" name="csrf" value="{csrf}">
+<button class="button button-secondary" type="submit" name="decision" value="deny">Cancel</button>
+<button class="button button-primary" type="submit" name="decision" value="allow">Allow access</button>
+</form>
+<p class="footnote">Only approve if you started this connection yourself.</p>
+</div>
+</main>
+</div>
+</body>
+</html>"#
     );
     let mut response = Html(body).into_response();
     no_store_headers(response.headers_mut());
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-        ),
+        consent_content_security_policy(challenge),
     );
     response.headers_mut().insert(
         header::REFERRER_POLICY,
@@ -210,6 +367,18 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+fn consent_content_security_policy(challenge: &ConsentChallenge) -> HeaderValue {
+    let value = format!(
+        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self' {}; frame-ancestors 'none'; base-uri 'none'",
+        challenge.requested_redirect_origin
+    );
+    HeaderValue::from_str(&value).unwrap_or_else(|_| {
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
+        )
+    })
 }
 
 fn consent_client_identity(challenge: &ConsentChallenge) -> String {
@@ -226,12 +395,20 @@ fn consent_client_identity(challenge: &ConsentChallenge) -> String {
         &challenge.requested_redirect_origin,
     );
     format!(
-        "<aside role=\"alert\"><strong>Unverified OAuth client</strong><p>The client supplied the name below. RunOnMine has not verified its name, publisher, or identity.</p></aside><dl><dt>Claimed name (unverified)</dt><dd>{claimed_name}</dd><dt>Client ID fingerprint</dt><dd><code>{fingerprint}</code></dd><dt>Registered</dt><dd><time datetime=\"{registered_at_attribute}\">{registered_at_text}</time></dd><dt>Redirect origin for this request</dt><dd><code>{requested_origin}</code></dd><dt>All registered redirect origins</dt><dd>{registered_origins}</dd></dl>"
+        r#"<section class="client-card" aria-label="OAuth client details">
+<div class="client-main"><div class="client-avatar">AI</div><div class="client-copy"><div class="client-name">{claimed_name}</div><div class="client-meta">OAuth client requesting access through RunOnMine</div></div><span class="trust-badge">Publisher unverified</span></div>
+<details class="details"><summary>Connection details</summary><div class="detail-body"><dl class="detail-grid">
+<dt>Client fingerprint</dt><dd><code>{fingerprint}</code></dd>
+<dt>Registered</dt><dd><time datetime="{registered_at_attribute}">{registered_at_text}</time></dd>
+<dt>Current redirect</dt><dd><code>{requested_origin}</code></dd>
+<dt>Allowed redirects</dt><dd>{registered_origins}</dd>
+</dl><p class="security-note">RunOnMine validates the registered callback and OAuth credentials, but does not independently verify the client's publisher identity.</p></div></details>
+</section>"#
     )
 }
 
 fn consent_redirect_origins(origins: &[String], requested_origin: &str) -> String {
-    let mut html = String::from("<ul>");
+    let mut html = String::from("<ul class=\"origin-list\">");
     for origin in origins {
         let is_requested = origin == requested_origin;
         let origin = encode_text(origin);
@@ -246,11 +423,11 @@ fn consent_redirect_origins(origins: &[String], requested_origin: &str) -> Strin
 }
 
 fn consent_scope_list(scopes: &crate::ScopeSet) -> String {
-    let mut html = String::from("<ul>");
+    let mut html = String::from("<ul class=\"scope-grid\">");
     for scope in scopes.iter() {
         let _ignored = write!(
             html,
-            "<li><code>{}</code> — {}</li>",
+            "<li class=\"scope-item\"><span class=\"scope-icon\">✓</span><div class=\"scope-copy\"><code>{}</code><p>{}</p></div></li>",
             encode_text(scope.as_str()),
             encode_text(scope.consent_text())
         );
@@ -277,6 +454,9 @@ fn no_store_redirect(target: &url::Url) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
     use url::Url;
 
     #[test]
@@ -296,15 +476,26 @@ mod tests {
             scopes: crate::ScopeSet::machine_read(),
         };
         let html = consent_client_identity(&challenge);
-        assert!(html.contains("Unverified OAuth client"));
-        assert!(html.contains("has not verified its name, publisher, or identity"));
-        assert!(html.contains("Claimed name (unverified)"));
+        assert!(html.contains("Publisher unverified"));
+        assert!(html.contains("does not independently verify the client's publisher identity"));
+        assert!(html.contains("OAuth client requesting access through RunOnMine"));
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(html.contains("sha256:abc&amp;def"));
         assert!(html.contains("2023-11-14T22:13:20Z"));
         assert!(html.contains("https://client.example</code> — current request"));
         assert!(html.contains("http://127.0.0.1:8787"));
+    }
+
+    #[test]
+    fn consent_assets_use_product_logo_without_client_side_submit_code() {
+        assert!(CONSENT_CSS.contains(".card"));
+        assert!(CONSENT_CSS.contains(".scope-grid"));
+        assert!(CONSENT_CSS.contains(".brand-logo"));
+        assert!(!CONSENT_CSS.contains("http://"));
+        assert!(!CONSENT_CSS.contains("https://"));
+        assert!(CONSENT_LOGO.contains("RunOnMine application icon"));
+        assert!(CONSENT_LOGO.contains("#34d399"));
     }
 
     #[test]
@@ -336,6 +527,88 @@ mod tests {
             assert!(registration_bearer_token(&headers).is_err());
         }
         assert!(registration_bearer_token(&HeaderMap::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn token_client_credentials_support_basic_and_post_without_mixing_methods()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client_id = "romc_chatgpt";
+        let secret = "confidential-client-secret-0123456789abcdef";
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{client_id}:{secret}"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {encoded}"))?,
+        );
+        assert_eq!(
+            token_client_credentials(&headers, None, None)?,
+            (client_id.to_owned(), Some(secret.to_owned()))
+        );
+        assert_eq!(
+            token_client_credentials(
+                &HeaderMap::new(),
+                Some(client_id.to_owned()),
+                Some(secret.to_owned())
+            )?,
+            (client_id.to_owned(), Some(secret.to_owned()))
+        );
+        assert!(
+            token_client_credentials(&headers, Some("different-client".to_owned()), None).is_err()
+        );
+        assert!(
+            token_client_credentials(
+                &headers,
+                Some(client_id.to_owned()),
+                Some(secret.to_owned())
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_client_credentials_reject_non_basic_authorization_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer not-valid-for-token-client-auth"),
+        );
+        assert!(token_client_credentials(&headers, None, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn oauth_router_serves_s256_on_mcp_authorization_metadata_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let service = OAuthService::new(
+            crate::OAuthServiceConfig {
+                connector_id: "oauth-metadata-test".to_owned(),
+                issuer: Url::parse("https://mine.example/")?,
+                protected_resource: Url::parse("https://mine.example/mcp")?,
+                github_client_id: "github-client".to_owned(),
+                github_callback_url: Url::parse("https://mine.example/oauth/github/callback")?,
+            },
+            Arc::new(crate::SqliteOAuthStore::in_memory()?),
+            crate::TokenHasher::new([7_u8; 32])?,
+            &secrecy::SecretString::from("registration-access-token-000000000000".to_owned()),
+            Arc::new(TestVerifier),
+        )?;
+        let response = oauth_router(Arc::new(service))
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server/mcp")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+        let value: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            value["code_challenge_methods_supported"],
+            serde_json::json!(["S256"])
+        );
+        assert_eq!(value["issuer"], "https://mine.example/");
         Ok(())
     }
 
@@ -405,11 +678,111 @@ mod tests {
             response.headers()[header::X_CONTENT_TYPE_OPTIONS],
             "nosniff"
         );
-        assert!(
-            response.headers()[header::CONTENT_SECURITY_POLICY]
-                .to_str()?
-                .contains("frame-ancestors 'none'")
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY].to_str()?;
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("style-src 'self'"));
+        assert!(csp.contains("img-src 'self'"));
+        assert!(csp.contains("form-action 'self' https://client.example"));
+        assert!(!csp.contains("script-src"));
+        assert!(!csp.contains("'unsafe-inline'"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_consent_post_redirects_and_replays_the_same_location()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use base64::Engine as _;
+        use secrecy::ExposeSecret as _;
+        use sha2::{Digest as _, Sha256};
+
+        let store = Arc::new(crate::SqliteOAuthStore::in_memory_scoped(
+            "oauth-native-form-test",
+        )?);
+        let service = Arc::new(OAuthService::new(
+            crate::OAuthServiceConfig {
+                connector_id: "oauth-native-form-test".to_owned(),
+                issuer: Url::parse("https://mine.example/")?,
+                protected_resource: Url::parse("https://mine.example/mcp")?,
+                github_client_id: "github-client".to_owned(),
+                github_callback_url: Url::parse("https://mine.example/oauth/github/callback")?,
+            },
+            store,
+            crate::TokenHasher::new([7_u8; 32])?,
+            &secrecy::SecretString::from("registration-access-token-000000000000".to_owned()),
+            Arc::new(TestVerifier),
+        )?);
+        let registered = service
+            .register_client(
+                DynamicClientRequest {
+                    redirect_uris: vec![Url::parse("https://client.example/callback")?],
+                    client_name: Some("ChatGPT".to_owned()),
+                    token_endpoint_auth_method: Some("none".to_owned()),
+                    grant_types: Some(vec![
+                        "authorization_code".to_owned(),
+                        "refresh_token".to_owned(),
+                    ]),
+                    response_types: Some(vec!["code".to_owned()]),
+                    scope: Some("machine:read".to_owned()),
+                },
+                "registration-access-token-000000000000",
+                "native-form-test",
+            )
+            .map_err(|error| std::io::Error::other(format!("register client: {error:?}")))?;
+        let verifier = "a".repeat(64);
+        let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        let authorization = service
+            .begin_authorization(crate::AuthorizationRequest {
+                response_type: "code".to_owned(),
+                client_id: registered.client_id,
+                redirect_uri: Url::parse("https://client.example/callback")?,
+                scope: "machine:read".to_owned(),
+                state: "client-state-native-form-123456789".to_owned(),
+                code_challenge,
+                code_challenge_method: "S256".to_owned(),
+                resource: Some(Url::parse("https://mine.example/mcp")?),
+            })
+            .map_err(|error| std::io::Error::other(format!("begin authorization: {error:?}")))?;
+        let challenge = service
+            .complete_github_callback(GitHubCallback {
+                code: "github-code".to_owned(),
+                state: authorization.provider_state.expose_secret().to_owned(),
+            })
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("complete github callback: {error:?}"))
+            })?;
+        let form = format!(
+            "consent_id={}&csrf={}&decision=allow",
+            challenge.id,
+            challenge.csrf.expose_secret()
         );
+        let router = oauth_router(service);
+        let mut locations = Vec::new();
+        for _ in 0..2 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/consent")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(Body::from(form.clone()))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            locations.push(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .ok_or("missing consent redirect")?
+                    .to_str()?
+                    .to_owned(),
+            );
+        }
+        assert_eq!(locations[0], locations[1]);
+        assert!(locations[0].starts_with("https://client.example/callback?code="));
+        assert!(locations[0].contains("state=client-state-native-form-123456789"));
         Ok(())
     }
 
@@ -452,7 +825,7 @@ mod tests {
         );
         assert!(html.contains("current request"));
         assert!(html.contains("&lt;tag&gt;"));
-        assert!(html.starts_with("<ul>"));
+        assert!(html.starts_with("<ul class=\"origin-list\">"));
         assert!(html.ends_with("</ul>"));
         Ok(())
     }

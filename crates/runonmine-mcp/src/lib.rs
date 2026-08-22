@@ -1,6 +1,7 @@
 //! Policy-aware MCP server and local transports.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +42,7 @@ mod http;
 mod managed_connectors;
 mod rate_limit;
 mod session;
+mod voice;
 pub use http::serve_loopback;
 use session::{IdleSessionManager, SessionPermit};
 
@@ -62,6 +64,7 @@ pub use connector_removal::{
     remove_connector_recoverably,
 };
 const MAX_COMMAND_BYTES: usize = 256 * 1_024;
+const MAX_ROOT_SHELL_BYTES: usize = 8 * 1_024;
 const MAX_SCRIPT_BYTES: usize = 256 * 1_024;
 const MAX_TEXT_INPUT_BYTES: usize = 256 * 1_024;
 const MAX_URL_BYTES: usize = 16 * 1_024;
@@ -79,6 +82,7 @@ pub struct RunOnMineServer {
     runtime: Runtime,
     browser: Arc<BrowserSession>,
     admin: Result<HelperClient, HelperAvailability>,
+    voice: Arc<VoiceService>,
     tool_router: ToolRouter<Self>,
     _session_permit: Arc<SessionPermit>,
 }
@@ -91,11 +95,352 @@ use arguments::{
     AdminExecArgs, DbusCallArgs, DesktopClickArgs, DesktopKeyArgs, DesktopListArgs,
     DesktopScreenshotArgs, DesktopTypeArgs, DesktopWindowArgs, EmptyArgs, EvaluateArgs, KeyArgs,
     ListArgs, MoveArgs, PatchArgs, PathArgs, PlatformScriptArgs, ReadArgs, ReadOutput,
-    ScreenshotArgs, SearchArgs, SelectorArgs, ShellArgs, TypeArgs, UrlArgs, WriteArgs,
+    ScreenshotArgs, SearchArgs, SelectorArgs, ShellArgs, TypeArgs, UrlArgs, VoiceAskArgs,
+    VoiceListenArgs, VoiceNotifyArgs, WriteArgs,
 };
+use voice::VoiceService;
 
 #[tool_router]
 impl RunOnMineServer {
+    #[tool(
+        description = "Return the Mac owner-workstation operating guide, including blocking voice interaction semantics and capability mappings",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn mac_info(
+        &self,
+        Parameters(arguments): Parameters<EmptyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.authorize(
+            "mac_info",
+            Capability::SystemRead,
+            "read owner workstation guidance",
+            &arguments,
+        )
+        .await?;
+        let connector = self.runtime.connector().map_err(|_| {
+            diagnostics::internal_error(
+                &self.runtime.0.connector_id,
+                diagnostics::DiagnosticCategory::ConnectorConfig,
+                "load_connector_for_mac_info",
+                Some("mac_info"),
+                None,
+                "Connector configuration is unavailable",
+            )
+        })?;
+        self.success(&json!({
+            "owner_workstation_access": connector.owner_workstation_access(),
+            "voice": self.voice.status(),
+            "agent_rules": [
+                "mac_voice_notify is one-way; never use it when an owner answer is required",
+                "mac_voice_ask is blocking; wait for its returned transcript before any dependent action",
+                "mac_voice_listen is blocking; wait for its returned transcript before using the owner response",
+                "if a returned transcript is empty or low-confidence, ask again instead of guessing",
+                "do not issue duplicate voice calls for the same message"
+            ],
+            "tool_mappings": {
+                "user_shell": ["shell_exec", "mac_run_user_shell"],
+                "root_shell": ["admin_exec", "mac_run_root_shell"],
+                "applescript": "macos_applescript",
+                "browser": "browser_*",
+                "desktop": "desktop_*"
+            }
+        }))
+    }
+
+    #[tool(
+        description = "Run a shell command as the signed-in macOS user; owner-workstation compatibility alias for shell_exec",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn mac_run_user_shell(
+        &self,
+        Parameters(arguments): Parameters<ShellArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut arguments = arguments;
+        validate_nonempty_text(&arguments.command, "Shell command", MAX_COMMAND_BYTES)?;
+        validate_optional_path(arguments.cwd.as_deref(), "Shell working directory")?;
+        let canonical_cwd =
+            canonical_shell_working_directory(arguments.cwd.as_deref()).map_err(|_| {
+                McpError::invalid_params("Shell working directory is unavailable", None)
+            })?;
+        arguments.cwd = Some(canonical_cwd.clone());
+        self.authorize_with_resources(
+            "mac_run_user_shell",
+            Capability::ShellExec,
+            "run a user shell command (content withheld)",
+            &arguments,
+            OwnedPolicyResources::shell(arguments.command.clone(), canonical_cwd),
+        )
+        .await?;
+        let requested = arguments
+            .timeout_seconds
+            .map_or(self.runtime.0.process_timeout, Duration::from_secs)
+            .min(self.runtime.0.max_process_timeout);
+        let request = ProcessRequest {
+            command: arguments.command.clone(),
+            cwd: arguments.cwd.clone(),
+            timeout: requested,
+            max_output_bytes: self.runtime.0.max_output_bytes,
+        };
+        match execute_shell(&request).await {
+            Ok(output) => {
+                let outcome = if output.timed_out {
+                    AuditOutcome::TimedOut
+                } else if output.exit_code == Some(0) {
+                    AuditOutcome::Succeeded
+                } else {
+                    AuditOutcome::Failed
+                };
+                self.runtime.audit().record(
+                    "mac_run_user_shell",
+                    Capability::ShellExec,
+                    outcome,
+                    &arguments,
+                    "user shell command completed (content withheld)",
+                );
+                self.success(&output)
+            }
+            Err(_) => {
+                Err(self.tool_failed("mac_run_user_shell", Capability::ShellExec, &arguments))
+            }
+        }
+    }
+
+    #[tool(
+        description = "Run an unrestricted root shell command on the owner's Mac through the separately installed, hash-pinned privileged helper profile",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn mac_run_root_shell(
+        &self,
+        Parameters(arguments): Parameters<ShellArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        validate_nonempty_text(
+            &arguments.command,
+            "Root shell command",
+            MAX_ROOT_SHELL_BYTES,
+        )?;
+        self.authorize(
+            "mac_run_root_shell",
+            Capability::AdminExec,
+            "run an owner root shell command (content withheld)",
+            &arguments,
+        )
+        .await?;
+        let client = self
+            .admin
+            .as_ref()
+            .map_err(|_| McpError::invalid_request("Privileged helper is unavailable", None))?;
+        let timeout = arguments
+            .timeout_seconds
+            .map_or(self.runtime.0.process_timeout, Duration::from_secs)
+            .min(MAX_ADMIN_TIMEOUT);
+        let request = HelperRequest::execute(
+            PathBuf::from("/bin/zsh"),
+            vec!["-c".to_owned(), arguments.command.clone()],
+            timeout,
+        )
+        .map_err(|_| McpError::invalid_params("Invalid root shell request", None))?;
+        let response =
+            tokio::time::timeout(timeout + Duration::from_secs(5), client.request(&request))
+                .await
+                .map_err(|_| {
+                    diagnostics::internal_error(
+                        &self.runtime.0.connector_id,
+                        diagnostics::DiagnosticCategory::PrivilegedHelper,
+                        "root_shell_helper_timeout",
+                        Some("mac_run_root_shell"),
+                        None,
+                        "Privileged helper timed out",
+                    )
+                })?
+                .map_err(|_| {
+                    self.tool_failed("mac_run_root_shell", Capability::AdminExec, &arguments)
+                })?;
+        match response.result {
+            HelperResult::Completed {
+                exit_code,
+                stdout_base64,
+                stderr_base64,
+                output_truncated,
+                timed_out,
+            } => {
+                let stdout = base64::engine::general_purpose::STANDARD
+                    .decode(stdout_base64)
+                    .map_err(|_| McpError::internal_error("Invalid privileged stdout", None))?;
+                let stderr = base64::engine::general_purpose::STANDARD
+                    .decode(stderr_base64)
+                    .map_err(|_| McpError::internal_error("Invalid privileged stderr", None))?;
+                let outcome = if timed_out {
+                    AuditOutcome::TimedOut
+                } else if exit_code == Some(0) {
+                    AuditOutcome::Succeeded
+                } else {
+                    AuditOutcome::Failed
+                };
+                self.runtime.audit().record(
+                    "mac_run_root_shell",
+                    Capability::AdminExec,
+                    outcome,
+                    &arguments,
+                    "root shell command completed (content withheld)",
+                );
+                self.success(&json!({
+                    "exit_code": exit_code,
+                    "stdout": String::from_utf8_lossy(&stdout),
+                    "stderr": String::from_utf8_lossy(&stderr),
+                    "truncated": output_truncated,
+                    "timed_out": timed_out,
+                }))
+            }
+            HelperResult::Rejected { .. } => Err(McpError::invalid_request(
+                "Privileged request was rejected locally",
+                None,
+            )),
+            HelperResult::Failed { .. } | HelperResult::Healthy { .. } => {
+                Err(self.tool_failed("mac_run_root_shell", Capability::AdminExec, &arguments))
+            }
+        }
+    }
+
+    #[tool(
+        description = "Speak a status/progress/completion message on the owner's Mac. ONE-WAY only: never use for questions or approvals that require an owner response.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn mac_voice_notify(
+        &self,
+        Parameters(arguments): Parameters<VoiceNotifyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.authorize(
+            "mac_voice_notify",
+            Capability::PlatformNative,
+            "speak an owner notification (content withheld)",
+            &arguments,
+        )
+        .await?;
+        let result = self
+            .voice
+            .notify(&arguments.text, &arguments.voice, arguments.rate_percent)
+            .await
+            .map_err(|_| {
+                self.tool_failed("mac_voice_notify", Capability::PlatformNative, &arguments)
+            })?;
+        self.runtime.audit().record(
+            "mac_voice_notify",
+            Capability::PlatformNative,
+            AuditOutcome::Succeeded,
+            &arguments,
+            if result.deduplicated {
+                "duplicate owner voice notification suppressed"
+            } else {
+                "owner voice notification completed"
+            },
+        );
+        self.success(&result)
+    }
+
+    #[tool(
+        description = "Listen to the owner through the Mac microphone and return a high-accuracy local Whisper transcript. BLOCKING: wait for this tool result before using the owner's answer. Recording ends after about 2.5 seconds of silence after speech.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn mac_voice_listen(
+        &self,
+        Parameters(arguments): Parameters<VoiceListenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.authorize(
+            "mac_voice_listen",
+            Capability::PlatformNative,
+            "listen for an owner voice response",
+            &arguments,
+        )
+        .await?;
+        let result = self
+            .voice
+            .listen(arguments.listen_seconds, &arguments.language, "")
+            .await
+            .map_err(|_| {
+                self.tool_failed("mac_voice_listen", Capability::PlatformNative, &arguments)
+            })?;
+        self.runtime.audit().record(
+            "mac_voice_listen",
+            Capability::PlatformNative,
+            AuditOutcome::Succeeded,
+            &arguments,
+            "owner voice transcription completed (content withheld)",
+        );
+        self.success(&result)
+    }
+
+    #[tool(
+        description = "Ask the owner a question aloud, then listen and return the local Whisper transcript. BLOCKING TWO-WAY interaction: MUST wait for this result and MUST NOT continue dependent actions before it returns. Duplicate identical asks are deduplicated and reuse the completed transcript.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn mac_voice_ask(
+        &self,
+        Parameters(arguments): Parameters<VoiceAskArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.authorize(
+            "mac_voice_ask",
+            Capability::PlatformNative,
+            "ask the owner a voice question and await the answer (content withheld)",
+            &arguments,
+        )
+        .await?;
+        let result = self
+            .voice
+            .ask(
+                &arguments.question,
+                arguments.listen_seconds,
+                &arguments.voice,
+                arguments.rate_percent,
+                &arguments.language,
+            )
+            .await
+            .map_err(|_| {
+                self.tool_failed("mac_voice_ask", Capability::PlatformNative, &arguments)
+            })?;
+        self.runtime.audit().record(
+            "mac_voice_ask",
+            Capability::PlatformNative,
+            AuditOutcome::Succeeded,
+            &arguments,
+            if result.deduplicated() {
+                "duplicate owner voice question reused the completed transcript"
+            } else {
+                "owner voice question completed (transcript content withheld)"
+            },
+        );
+        self.success(&result)
+    }
+
     #[tool(
         description = "Return non-secret operating system and RunOnMine capability information",
         annotations(
@@ -1281,7 +1626,7 @@ impl RunOnMineServer {
 #[tool_handler(
     router = self.tool_router,
     name = "runonmine",
-    instructions = "RunOnMine exposes only tools allowed by the machine owner's local policy. Ask-mode tools require approval on the machine."
+    instructions = "RunOnMine exposes only tools allowed by the machine owner's local policy. Ask-mode tools require approval on the machine. On macOS, mac_voice_notify is one-way. For any question requiring the owner to answer aloud, use mac_voice_ask (or mac_voice_listen after a question already asked) and wait for the returned transcript before continuing any dependent action."
 )]
 impl ServerHandler for RunOnMineServer {
     async fn call_tool(
@@ -1291,7 +1636,8 @@ impl ServerHandler for RunOnMineServer {
     ) -> Result<CallToolResponse, McpError> {
         diagnostics::scope_request(async {
             if !self.request_allows_tool(&request.name, &context)
-                || (request.name == "admin_exec" && !self.admin_available().await)
+                || (matches!(request.name.as_ref(), "admin_exec" | "mac_run_root_shell")
+                    && !self.admin_available().await)
             {
                 return Err(McpError::invalid_params("tool not found", None));
             }
@@ -1313,7 +1659,8 @@ impl ServerHandler for RunOnMineServer {
             .into_iter()
             .filter(|tool| {
                 self.request_allows_tool(tool.name.as_ref(), &context)
-                    && (tool.name != "admin_exec" || admin_available)
+                    && (!matches!(tool.name.as_ref(), "admin_exec" | "mac_run_root_shell")
+                        || admin_available)
             })
             .collect();
         Ok(ListToolsResult::with_all_items(tools))
@@ -1351,6 +1698,12 @@ const DESKTOP_INPUT_TOOLS: &[&str] = &["desktop_click", "desktop_type", "desktop
 
 const TOOL_CAPABILITIES: &[(&str, Capability)] = &[
     ("machine_info", Capability::SystemRead),
+    ("mac_info", Capability::SystemRead),
+    ("mac_run_user_shell", Capability::ShellExec),
+    ("mac_run_root_shell", Capability::AdminExec),
+    ("mac_voice_notify", Capability::PlatformNative),
+    ("mac_voice_listen", Capability::PlatformNative),
+    ("mac_voice_ask", Capability::PlatformNative),
     ("fs_list", Capability::FilesRead),
     ("fs_read", Capability::FilesRead),
     ("fs_search", Capability::FilesRead),
