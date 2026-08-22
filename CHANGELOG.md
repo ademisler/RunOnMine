@@ -1,5 +1,6 @@
 # Changelog
 
+- Serve OAuth authorization metadata at the MCP resource-specific well-known alias and advertise the resource-specific protected-resource metadata URL in 401 challenges, preserving explicit `S256` PKCE discovery for strict MCP clients such as ChatGPT.
 - Add owner-provisioned confidential OAuth clients for ChatGPT-style MCP setup: exact HTTPS redirect allowlists, one-time owner-only Client ID/Secret export, keyed client-secret hashes, `client_secret_basic`/`client_secret_post` token authentication, and unchanged token-gated DCR.
 - Cloudflare Named Tunnel ingress now renders the bare loopback authority without `/mcp` or a trailing slash, and managed connector readiness follows real supervisor health/backoff events instead of process spawn.
 - macOS user-service installation now stages the canonical `runonmine` CLI bytes and invokes them as `agent run`, preventing a separate ad-hoc agent identity from blocking on CLI-created Keychain credentials.

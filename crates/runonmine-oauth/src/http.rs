@@ -30,6 +30,10 @@ pub fn oauth_router(service: Arc<OAuthService>) -> Router {
             get(authorization_server_metadata),
         )
         .route(
+            "/.well-known/oauth-authorization-server/mcp",
+            get(authorization_server_metadata),
+        )
+        .route(
             "/.well-known/oauth-protected-resource",
             get(protected_resource_metadata),
         )
@@ -360,6 +364,9 @@ fn no_store_redirect(target: &url::Url) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
     use url::Url;
 
     #[test]
@@ -468,6 +475,40 @@ mod tests {
             HeaderValue::from_static("Bearer not-valid-for-token-client-auth"),
         );
         assert!(token_client_credentials(&headers, None, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn oauth_router_serves_s256_on_mcp_authorization_metadata_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let service = OAuthService::new(
+            crate::OAuthServiceConfig {
+                connector_id: "oauth-metadata-test".to_owned(),
+                issuer: Url::parse("https://mine.example/")?,
+                protected_resource: Url::parse("https://mine.example/mcp")?,
+                github_client_id: "github-client".to_owned(),
+                github_callback_url: Url::parse("https://mine.example/oauth/github/callback")?,
+            },
+            Arc::new(crate::SqliteOAuthStore::in_memory()?),
+            crate::TokenHasher::new([7_u8; 32])?,
+            &secrecy::SecretString::from("registration-access-token-000000000000".to_owned()),
+            Arc::new(TestVerifier),
+        )?;
+        let response = oauth_router(Arc::new(service))
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server/mcp")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+        let value: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            value["code_challenge_methods_supported"],
+            serde_json::json!(["S256"])
+        );
+        assert_eq!(value["issuer"], "https://mine.example/");
+        Ok(())
     }
 
     #[test]

@@ -545,15 +545,19 @@ fn build_oauth_connector(
         &registration_access_token,
         Arc::new(verifier),
     )?;
-    let resource_metadata = public_base
-        .join(".well-known/oauth-protected-resource")
-        .context("OAuth protected resource metadata URL is invalid")?;
+    let resource_metadata = oauth_resource_metadata_url(&public_base)?;
     Ok(OAuthHttpConnector {
         runtime: Runtime::load_from_paths(paths, &connector.id)?,
         service: Arc::new(service),
         public_host,
         resource_metadata,
     })
+}
+
+fn oauth_resource_metadata_url(public_base: &Url) -> Result<Url> {
+    public_base
+        .join(".well-known/oauth-protected-resource/mcp")
+        .context("OAuth protected resource metadata URL is invalid")
 }
 
 fn validate_local_http_token(value: &str) -> Result<()> {
@@ -1502,6 +1506,23 @@ mod tests {
         bind_session(&mut sessions, "delete_me".to_owned(), local, started);
         assert!(remove_session_binding(&mut sessions, "delete_me"));
         assert!(!remove_session_binding(&mut sessions, "delete_me"));
+    }
+
+    #[test]
+    fn oauth_challenge_uses_resource_specific_metadata_endpoint() -> Result<()> {
+        let base = Url::parse("https://mcp.example.com/")?;
+        let metadata = oauth_resource_metadata_url(&base)?;
+        assert_eq!(
+            metadata.as_str(),
+            "https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+        );
+        let response = unauthorized(&metadata);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[WWW_AUTHENTICATE],
+            "Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource/mcp\""
+        );
+        Ok(())
     }
 
     #[test]

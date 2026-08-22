@@ -116,7 +116,11 @@ The recommended Cloudflare mode uses Cloudflare only as the HTTPS carrier. The
 Rust agent owns protected-resource metadata, authorization-server metadata,
 dynamic client registration, authorization code flow, PKCE S256, consent, CSRF
 protection, token rotation, and revocation. GitHub proves the configured machine
-owner's identity.
+owner's identity. Strict MCP discovery is supported at both the root OAuth
+metadata endpoint and the resource-specific `/.well-known/oauth-authorization-server/mcp`
+alias; unauthenticated `/mcp` responses advertise
+`/.well-known/oauth-protected-resource/mcp`. Both authorization metadata routes
+explicitly advertise `code_challenge_methods_supported: ["S256"]`.
 
 Dynamic client registration is not anonymous. `/oauth/register` requires the
 256-bit owner-controlled initial access token from the connector credential
