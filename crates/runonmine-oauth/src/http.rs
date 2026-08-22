@@ -47,6 +47,8 @@ pub fn oauth_router(service: Arc<OAuthService>) -> Router {
         .route("/oauth/consent", post(consent))
         .route("/oauth/consent.css", get(consent_stylesheet))
         .route("/oauth/logo.svg", get(consent_logo))
+        .route("/oauth/assets/consent-v2.css", get(consent_stylesheet))
+        .route("/oauth/assets/runonmine-logo-v1.svg", get(consent_logo))
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
         .layer(from_fn(oauth_request_diagnostics))
@@ -291,10 +293,7 @@ async fn consent_stylesheet() -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/css; charset=utf-8"),
     );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
-    );
+    no_store_headers(response.headers_mut());
     response
 }
 
@@ -304,10 +303,7 @@ async fn consent_logo() -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
-    );
+    no_store_headers(response.headers_mut());
     response
 }
 
@@ -328,12 +324,12 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>RunOnMine authorization</title>
-<link rel="stylesheet" href="/oauth/consent.css">
+<link rel="stylesheet" href="/oauth/assets/consent-v2.css">
 </head>
 <body>
 <div class="shell">
 <main class="card">
-<header class="brand"><img class="brand-logo" src="/oauth/logo.svg" alt="RunOnMine"><div class="brand-copy"><strong>RunOnMine</strong><span>Secure authorization</span></div></header>
+<header class="brand"><img class="brand-logo" src="/oauth/assets/runonmine-logo-v1.svg" alt="RunOnMine"><div class="brand-copy"><strong>RunOnMine</strong><span>Secure authorization</span></div></header>
 <div class="content">
 <div class="eyebrow">Connection request</div>
 <h1>Allow {client_name} to access this computer?</h1>
