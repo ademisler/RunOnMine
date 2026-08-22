@@ -184,7 +184,7 @@ reuse revokes the token family. Only keyed, domain-separated token, client-secre
 hashes are stored in SQLite. The GitHub client secret, hashing key, and
 registration access token remain in the platform credential store.
 
-The browser consent page is self-contained and uses only same-origin CSS and JavaScript under a strict CSP. The submit handler prevents repeated clicks, and the authorization service also keeps a bounded 30-second in-memory replay record keyed by consent ID, CSRF hash, and decision. An identical retry returns the same redirect without issuing a second authorization code; a mismatched decision or CSRF fails closed. Replay state is never persisted and expires automatically.
+The browser consent page is self-contained, uses the real packaged RunOnMine logo, and loads only same-origin CSS under a strict CSP. Approval uses a native HTML form with no client-side submit interception, while the authorization service keeps a bounded 30-second in-memory replay record keyed by consent ID, CSRF hash, and decision. An identical retry returns the same redirect without issuing a second authorization code; a mismatched decision or CSRF fails closed. Replay state is never persisted and expires automatically.
 
 The public hostname, Cloudflare tunnel ID, credentials file, GitHub OAuth client
 ID, GitHub owner display login, and immutable positive GitHub numeric owner ID are required. Only the numeric ID authorizes the owner; the login is display metadata and is atomically refreshed after a verified same-ID GitHub rename. The CLI prompts for secrets rather

@@ -12,7 +12,7 @@ pre-release development and does not yet provide compatibility guarantees.
 
 ## Unreleased
 
-- Make the OAuth consent screen polished, self-contained, and double-submit safe: same-origin CSP-bound CSS/JS prevents repeated browser submissions, while a 30-second in-memory replay guard returns the same consent result for an identical consent ID, CSRF value, and decision instead of turning a successful approval into `access_denied`.
+- Make the OAuth consent screen polished and redirect-safe: it uses the real RunOnMine logo plus same-origin CSP-bound CSS, relies on a native HTML form for the browser redirect, and keeps a 30-second in-memory replay guard so an identical repeated approval returns the same redirect instead of turning a successful approval into `access_denied`.
 - Add an explicit owner-workstation mode for GitHub-owner-authenticated Cloudflare Named Tunnels. `--owner-full-access` keeps safe defaults unchanged but permits the selected policy to bypass the generic remote ceiling on that one connector; the macOS desktop surfaces the choice with a dangerous-access warning. Add `admin install --owner-root-shell` for an explicitly requested hash-pinned `/bin/zsh -c` privileged profile.
 - Add macOS owner-workstation MCP tools (`mac_info`, user/root shell aliases, and blocking local voice notify/listen/ask), a native AVAudioEngine recorder with 2.5-second speech-end detection, SHA-256-verified local Whisper large-v3-turbo/large-v3 fallback plus Silero VAD setup, and serialized/deduplicated voice playback to prevent repeated agent speech.
 

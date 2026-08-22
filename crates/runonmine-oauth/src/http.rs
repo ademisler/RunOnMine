@@ -46,7 +46,7 @@ pub fn oauth_router(service: Arc<OAuthService>) -> Router {
         .route("/oauth/github/callback", get(github_callback))
         .route("/oauth/consent", post(consent))
         .route("/oauth/consent.css", get(consent_stylesheet))
-        .route("/oauth/consent.js", get(consent_script))
+        .route("/oauth/logo.svg", get(consent_logo))
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
         .layer(from_fn(oauth_request_diagnostics))
@@ -275,7 +275,7 @@ const CONSENT_CSS: &str = r#"
 :root{color-scheme:dark;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#090b0f;color:#f7f8fa}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% -15%,#20283a 0,#0d1119 34%,#090b0f 68%);color:#f7f8fa}
 button,input{font:inherit}.shell{min-height:100vh;display:grid;place-items:center;padding:40px 20px}.card{width:min(760px,100%);background:rgba(17,20,27,.96);border:1px solid #2a303c;border-radius:24px;box-shadow:0 28px 80px rgba(0,0,0,.48);overflow:hidden}
-.brand{display:flex;align-items:center;gap:12px;padding:22px 28px;border-bottom:1px solid #272c36}.brand-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:linear-gradient(145deg,#7c5cff,#4b8cff);font-weight:800;box-shadow:0 8px 24px rgba(98,99,255,.3)}.brand-copy{display:grid;gap:2px}.brand-copy strong{font-size:14px;letter-spacing:.01em}.brand-copy span{font-size:12px;color:#8e98aa}
+.brand{display:flex;align-items:center;gap:12px;padding:22px 28px;border-bottom:1px solid #272c36}.brand-logo{display:block;width:36px;height:36px;border-radius:11px;box-shadow:0 8px 24px rgba(52,211,153,.16)}.brand-copy{display:grid;gap:2px}.brand-copy strong{font-size:14px;letter-spacing:.01em}.brand-copy span{font-size:12px;color:#8e98aa}
 .content{padding:30px 30px 28px}.eyebrow{display:inline-flex;align-items:center;gap:8px;margin-bottom:12px;color:#aeb7c7;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.eyebrow::before{content:"";width:7px;height:7px;border-radius:50%;background:#5cdd9a;box-shadow:0 0 0 4px rgba(92,221,154,.1)}h1{margin:0;font-size:clamp(28px,4vw,38px);line-height:1.12;letter-spacing:-.035em}.subtitle{margin:13px 0 26px;color:#a9b1c0;font-size:15px;line-height:1.6}
 .client-card{border:1px solid #303744;border-radius:18px;background:#151922;overflow:hidden;margin-bottom:26px}.client-main{display:flex;align-items:center;gap:14px;padding:17px 18px}.client-avatar{display:grid;place-items:center;flex:0 0 auto;width:44px;height:44px;border-radius:13px;background:#232936;color:#dbe3f2;font-weight:800}.client-copy{min-width:0;flex:1}.client-name{font-size:16px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.client-meta{margin-top:3px;color:#8f99aa;font-size:12px}.trust-badge{flex:0 0 auto;padding:6px 9px;border-radius:999px;background:#2a2417;color:#f2c66d;border:1px solid #4a3c1f;font-size:11px;font-weight:700}.details{border-top:1px solid #2a303a}.details summary{cursor:pointer;padding:13px 18px;color:#aeb7c7;font-size:13px;font-weight:650;list-style:none}.details summary::-webkit-details-marker{display:none}.details summary::after{content:"+";float:right;color:#737f92;font-size:18px;line-height:14px}.details[open] summary::after{content:"–"}.detail-body{padding:2px 18px 18px}.detail-grid{display:grid;grid-template-columns:160px 1fr;gap:10px 16px;margin:0}.detail-grid dt{color:#7f899a;font-size:12px}.detail-grid dd{margin:0;color:#cfd6e2;font-size:12px;min-width:0;overflow-wrap:anywhere}.detail-grid code{font-family:"SFMono-Regular",Consolas,monospace;font-size:11px;color:#dfe5ee}.origin-list{margin:0;padding-left:18px}.origin-list li+li{margin-top:4px}.security-note{margin:16px 0 0;padding:12px 13px;border-radius:12px;background:#11151c;color:#929cac;font-size:12px;line-height:1.5}
 .section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:0 0 12px}.section-head h2{margin:0;font-size:16px;letter-spacing:-.01em}.section-head span{color:#7f8999;font-size:12px}.scope-grid{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:10px}.scope-item{display:flex;gap:11px;padding:13px 14px;border-radius:14px;background:#12161e;border:1px solid #272d37}.scope-icon{flex:0 0 auto;width:24px;height:24px;border-radius:8px;background:#202634;display:grid;place-items:center;color:#8ca8ff;font-size:12px;font-weight:800}.scope-copy{min-width:0}.scope-copy code{font-family:"SFMono-Regular",Consolas,monospace;color:#e7eaf0;font-size:12px;font-weight:700}.scope-copy p{margin:5px 0 0;color:#8994a6;font-size:11px;line-height:1.45}
@@ -283,9 +283,7 @@ button,input{font:inherit}.shell{min-height:100vh;display:grid;place-items:cente
 @media(max-width:640px){.shell{padding:0}.card{min-height:100vh;border:0;border-radius:0}.content{padding:26px 20px}.brand{padding:18px 20px}.scope-grid{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr;gap:4px}.detail-grid dd{margin-bottom:8px}.actions{flex-direction:column-reverse}.button,.button-primary{width:100%}.button-secondary{margin-left:0}.footnote{text-align:center}}
 "#;
 
-const CONSENT_JS: &str = r#"
-(()=>{const form=document.querySelector('[data-consent-form]');if(!form)return;form.addEventListener('submit',event=>{if(form.dataset.submitting==='true'){event.preventDefault();return}const submitter=event.submitter;if(!(submitter instanceof HTMLButtonElement))return;const decision=submitter.value;if(decision!=='allow'&&decision!=='deny')return;event.preventDefault();form.dataset.submitting='true';const hidden=document.createElement('input');hidden.type='hidden';hidden.name='decision';hidden.value=decision;form.appendChild(hidden);for(const button of form.querySelectorAll('button[name="decision"]')){button.disabled=true;button.removeAttribute('name')}if(decision==='allow')submitter.textContent='Connecting…';HTMLFormElement.prototype.submit.call(form)})})();
-"#;
+const CONSENT_LOGO: &str = include_str!("../../../packaging/assets/runonmine.svg");
 
 async fn consent_stylesheet() -> Response {
     let mut response = CONSENT_CSS.into_response();
@@ -300,11 +298,11 @@ async fn consent_stylesheet() -> Response {
     response
 }
 
-async fn consent_script() -> Response {
-    let mut response = CONSENT_JS.into_response();
+async fn consent_logo() -> Response {
+    let mut response = CONSENT_LOGO.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("application/javascript; charset=utf-8"),
+        HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -331,12 +329,11 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
 <meta name="color-scheme" content="dark">
 <title>RunOnMine authorization</title>
 <link rel="stylesheet" href="/oauth/consent.css">
-<script defer src="/oauth/consent.js"></script>
 </head>
 <body>
 <div class="shell">
 <main class="card">
-<header class="brand"><div class="brand-mark">R</div><div class="brand-copy"><strong>RunOnMine</strong><span>Secure authorization</span></div></header>
+<header class="brand"><img class="brand-logo" src="/oauth/logo.svg" alt="RunOnMine"><div class="brand-copy"><strong>RunOnMine</strong><span>Secure authorization</span></div></header>
 <div class="content">
 <div class="eyebrow">Connection request</div>
 <h1>Allow {client_name} to access this computer?</h1>
@@ -346,7 +343,7 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
 <div class="section-head"><h2 id="capabilities-heading">Requested capabilities</h2><span>Review before continuing</span></div>
 {scopes}
 </section>
-<form class="actions" method="post" action="{action}" data-consent-form>
+<form class="actions" method="post" action="{action}">
 <input type="hidden" name="consent_id" value="{consent_id}">
 <input type="hidden" name="csrf" value="{csrf}">
 <button class="button button-secondary" type="submit" name="decision" value="deny">Cancel</button>
@@ -364,7 +361,7 @@ fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Respons
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         ),
     );
     response.headers_mut().insert(
@@ -485,15 +482,14 @@ mod tests {
     }
 
     #[test]
-    fn consent_assets_enforce_single_submit_without_external_dependencies() {
+    fn consent_assets_use_product_logo_without_client_side_submit_code() {
         assert!(CONSENT_CSS.contains(".card"));
         assert!(CONSENT_CSS.contains(".scope-grid"));
+        assert!(CONSENT_CSS.contains(".brand-logo"));
         assert!(!CONSENT_CSS.contains("http://"));
         assert!(!CONSENT_CSS.contains("https://"));
-        assert!(CONSENT_JS.contains("dataset.submitting"));
-        assert!(CONSENT_JS.contains("HTMLFormElement.prototype.submit.call(form)"));
-        assert!(!CONSENT_JS.contains("fetch("));
-        assert!(!CONSENT_JS.contains("XMLHttpRequest"));
+        assert!(CONSENT_LOGO.contains("RunOnMine application icon"));
+        assert!(CONSENT_LOGO.contains("#34d399"));
     }
 
     #[test]
@@ -679,8 +675,107 @@ mod tests {
         let csp = response.headers()[header::CONTENT_SECURITY_POLICY].to_str()?;
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("style-src 'self'"));
-        assert!(csp.contains("script-src 'self'"));
+        assert!(csp.contains("img-src 'self'"));
+        assert!(!csp.contains("script-src"));
         assert!(!csp.contains("'unsafe-inline'"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_consent_post_redirects_and_replays_the_same_location()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use base64::Engine as _;
+        use secrecy::ExposeSecret as _;
+        use sha2::{Digest as _, Sha256};
+
+        let store = Arc::new(crate::SqliteOAuthStore::in_memory_scoped(
+            "oauth-native-form-test",
+        )?);
+        let service = Arc::new(OAuthService::new(
+            crate::OAuthServiceConfig {
+                connector_id: "oauth-native-form-test".to_owned(),
+                issuer: Url::parse("https://mine.example/")?,
+                protected_resource: Url::parse("https://mine.example/mcp")?,
+                github_client_id: "github-client".to_owned(),
+                github_callback_url: Url::parse("https://mine.example/oauth/github/callback")?,
+            },
+            store,
+            crate::TokenHasher::new([7_u8; 32])?,
+            &secrecy::SecretString::from("registration-access-token-000000000000".to_owned()),
+            Arc::new(TestVerifier),
+        )?);
+        let registered = service
+            .register_client(
+                DynamicClientRequest {
+                    redirect_uris: vec![Url::parse("https://client.example/callback")?],
+                    client_name: Some("ChatGPT".to_owned()),
+                    token_endpoint_auth_method: Some("none".to_owned()),
+                    grant_types: Some(vec![
+                        "authorization_code".to_owned(),
+                        "refresh_token".to_owned(),
+                    ]),
+                    response_types: Some(vec!["code".to_owned()]),
+                    scope: Some("machine:read".to_owned()),
+                },
+                "registration-access-token-000000000000",
+                "native-form-test",
+            )
+            .map_err(|error| std::io::Error::other(format!("register client: {error:?}")))?;
+        let verifier = "a".repeat(64);
+        let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        let authorization = service
+            .begin_authorization(crate::AuthorizationRequest {
+                response_type: "code".to_owned(),
+                client_id: registered.client_id,
+                redirect_uri: Url::parse("https://client.example/callback")?,
+                scope: "machine:read".to_owned(),
+                state: "client-state-native-form-123456789".to_owned(),
+                code_challenge,
+                code_challenge_method: "S256".to_owned(),
+                resource: Some(Url::parse("https://mine.example/mcp")?),
+            })
+            .map_err(|error| std::io::Error::other(format!("begin authorization: {error:?}")))?;
+        let challenge = service
+            .complete_github_callback(GitHubCallback {
+                code: "github-code".to_owned(),
+                state: authorization.provider_state.expose_secret().to_owned(),
+            })
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("complete github callback: {error:?}"))
+            })?;
+        let form = format!(
+            "consent_id={}&csrf={}&decision=allow",
+            challenge.id,
+            challenge.csrf.expose_secret()
+        );
+        let router = oauth_router(service);
+        let mut locations = Vec::new();
+        for _ in 0..2 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/consent")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(Body::from(form.clone()))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            locations.push(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .ok_or("missing consent redirect")?
+                    .to_str()?
+                    .to_owned(),
+            );
+        }
+        assert_eq!(locations[0], locations[1]);
+        assert!(locations[0].starts_with("https://client.example/callback?code="));
+        assert!(locations[0].contains("state=client-state-native-form-123456789"));
         Ok(())
     }
 
