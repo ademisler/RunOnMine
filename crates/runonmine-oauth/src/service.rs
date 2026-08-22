@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use chrono::{Duration, Utc};
@@ -29,6 +29,7 @@ const REFRESH_TOKEN_TTL: Duration = Duration::days(30);
 const AUTHORIZATION_TRANSACTION_TTL: Duration = Duration::minutes(10);
 const AUTHORIZATION_CLAIM_TTL: Duration = Duration::seconds(30);
 const CONSENT_TTL: Duration = Duration::minutes(5);
+const CONSENT_REPLAY_TTL: Duration = Duration::seconds(30);
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
 const REGISTRATION_WINDOW_SECONDS: i64 = 60;
 const REGISTRATIONS_PER_SOURCE_WINDOW: usize = 5;
@@ -78,12 +79,21 @@ struct GitHubCallbackPreparation {
     registered_redirect_origins: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct ConsentReplay {
+    csrf_hash: crate::SecretHash,
+    decision: ConsentDecision,
+    redirect: Url,
+    expires_at: chrono::DateTime<Utc>,
+}
+
 pub struct OAuthService {
     config: OAuthServiceConfig,
     store: Arc<dyn OAuthStore>,
     hasher: TokenHasher,
     registration_access_hash: crate::SecretHash,
     github: Arc<dyn GitHubOwnerVerifier>,
+    consent_replays: Mutex<HashMap<Uuid, ConsentReplay>>,
 }
 
 impl std::fmt::Debug for OAuthService {
@@ -95,6 +105,7 @@ impl std::fmt::Debug for OAuthService {
             .field("hasher", &self.hasher)
             .field("registration_access_hash", &"[REDACTED]")
             .field("github", &"dyn GitHubOwnerVerifier")
+            .field("consent_replays", &"[REDACTED]")
             .finish()
     }
 }
@@ -123,6 +134,7 @@ impl OAuthService {
             hasher,
             registration_access_hash,
             github,
+            consent_replays: Mutex::new(HashMap::new()),
         })
     }
 
@@ -490,47 +502,67 @@ impl OAuthService {
         if csrf.is_empty() || csrf.len() > 1_024 {
             return Err(OAuthError::invalid_request());
         }
-        let consent = self
-            .store
-            .take_consent(
-                id,
-                &self.hasher.hash(HashPurpose::ConsentCsrf, csrf),
-                Utc::now(),
-            )
-            .map_err(|error| match error {
-                StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
-                unexpected => self.store_server_error("take_consent", &unexpected),
-            })?;
-        if decision == ConsentDecision::Deny {
-            return Ok(ConsentResult {
-                redirect: authorization_error_redirect(
-                    consent.redirect_uri,
-                    "access_denied",
-                    &consent.client_state,
-                    &self.config.issuer,
-                ),
-            });
+        let csrf_hash = self.hasher.hash(HashPurpose::ConsentCsrf, csrf);
+        let now = Utc::now();
+        let mut replays = self
+            .consent_replays
+            .lock()
+            .map_err(|_| OAuthError::server())?;
+        replays.retain(|_, replay| replay.expires_at > now);
+        if let Some(replay) = replays.get(&id) {
+            if replay.decision == decision && replay.csrf_hash.constant_time_eq(&csrf_hash) {
+                return Ok(ConsentResult {
+                    redirect: replay.redirect.clone(),
+                });
+            }
+            return Err(OAuthError::access_denied());
         }
-        let code = generate_secret()?;
-        self.store
-            .put_authorization_code(&AuthorizationCodeGrant {
-                code_hash: self
-                    .hasher
-                    .hash(HashPurpose::AuthorizationCode, code.expose_secret()),
-                client_id: consent.client_id,
-                redirect_uri: consent.redirect_uri.clone(),
-                scopes: consent.scopes,
-                code_challenge: consent.code_challenge,
-                subject: consent.subject,
-                expires_at: Utc::now() + AUTHORIZATION_CODE_TTL,
-            })
-            .map_err(|error| self.store_server_error("store_authorization_code", &error))?;
-        let mut redirect = consent.redirect_uri;
-        redirect
-            .query_pairs_mut()
-            .append_pair("code", code.expose_secret())
-            .append_pair("state", &consent.client_state)
-            .append_pair("iss", self.config.issuer.as_str());
+        let consent =
+            self.store
+                .take_consent(id, &csrf_hash, now)
+                .map_err(|error| match error {
+                    StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
+                    unexpected => self.store_server_error("take_consent", &unexpected),
+                })?;
+        let redirect = if decision == ConsentDecision::Deny {
+            authorization_error_redirect(
+                consent.redirect_uri,
+                "access_denied",
+                &consent.client_state,
+                &self.config.issuer,
+            )
+        } else {
+            let code = generate_secret()?;
+            self.store
+                .put_authorization_code(&AuthorizationCodeGrant {
+                    code_hash: self
+                        .hasher
+                        .hash(HashPurpose::AuthorizationCode, code.expose_secret()),
+                    client_id: consent.client_id,
+                    redirect_uri: consent.redirect_uri.clone(),
+                    scopes: consent.scopes,
+                    code_challenge: consent.code_challenge,
+                    subject: consent.subject,
+                    expires_at: now + AUTHORIZATION_CODE_TTL,
+                })
+                .map_err(|error| self.store_server_error("store_authorization_code", &error))?;
+            let mut redirect = consent.redirect_uri;
+            redirect
+                .query_pairs_mut()
+                .append_pair("code", code.expose_secret())
+                .append_pair("state", &consent.client_state)
+                .append_pair("iss", self.config.issuer.as_str());
+            redirect
+        };
+        replays.insert(
+            id,
+            ConsentReplay {
+                csrf_hash,
+                decision,
+                redirect: redirect.clone(),
+                expires_at: now + CONSENT_REPLAY_TTL,
+            },
+        );
         Ok(ConsentResult { redirect })
     }
 
@@ -1061,6 +1093,40 @@ mod tests {
             .query_pairs()
             .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
             .ok_or_else(OAuthError::server)
+    }
+
+    #[tokio::test]
+    async fn repeated_consent_submission_replays_the_same_result() -> Result<(), OAuthError> {
+        let service = service()?;
+        let client = register(&service)?;
+        let start = begin_test_authorization(&service, &client.client_id)?;
+        let consent = service
+            .complete_github_callback(GitHubCallback {
+                code: "github-code-replay".to_owned(),
+                state: start.provider_state.expose_secret().to_owned(),
+            })
+            .await?;
+        let first = service.submit_consent(
+            consent.id,
+            consent.csrf.expose_secret(),
+            ConsentDecision::Allow,
+        )?;
+        let second = service.submit_consent(
+            consent.id,
+            consent.csrf.expose_secret(),
+            ConsentDecision::Allow,
+        )?;
+        assert_eq!(first.redirect, second.redirect);
+        assert!(first.redirect.query_pairs().any(|(key, _)| key == "code"));
+        assert!(matches!(
+            service.submit_consent(
+                consent.id,
+                consent.csrf.expose_secret(),
+                ConsentDecision::Deny,
+            ),
+            Err(error) if error.code == crate::OAuthErrorCode::AccessDenied
+        ));
+        Ok(())
     }
 
     #[test]

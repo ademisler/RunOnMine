@@ -45,6 +45,8 @@ pub fn oauth_router(service: Arc<OAuthService>) -> Router {
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/github/callback", get(github_callback))
         .route("/oauth/consent", post(consent))
+        .route("/oauth/consent.css", get(consent_stylesheet))
+        .route("/oauth/consent.js", get(consent_script))
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
         .layer(from_fn(oauth_request_diagnostics))
@@ -269,23 +271,100 @@ async fn revoke(
     Ok(response)
 }
 
+const CONSENT_CSS: &str = r#"
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#090b0f;color:#f7f8fa}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% -15%,#20283a 0,#0d1119 34%,#090b0f 68%);color:#f7f8fa}
+button,input{font:inherit}.shell{min-height:100vh;display:grid;place-items:center;padding:40px 20px}.card{width:min(760px,100%);background:rgba(17,20,27,.96);border:1px solid #2a303c;border-radius:24px;box-shadow:0 28px 80px rgba(0,0,0,.48);overflow:hidden}
+.brand{display:flex;align-items:center;gap:12px;padding:22px 28px;border-bottom:1px solid #272c36}.brand-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:linear-gradient(145deg,#7c5cff,#4b8cff);font-weight:800;box-shadow:0 8px 24px rgba(98,99,255,.3)}.brand-copy{display:grid;gap:2px}.brand-copy strong{font-size:14px;letter-spacing:.01em}.brand-copy span{font-size:12px;color:#8e98aa}
+.content{padding:30px 30px 28px}.eyebrow{display:inline-flex;align-items:center;gap:8px;margin-bottom:12px;color:#aeb7c7;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.eyebrow::before{content:"";width:7px;height:7px;border-radius:50%;background:#5cdd9a;box-shadow:0 0 0 4px rgba(92,221,154,.1)}h1{margin:0;font-size:clamp(28px,4vw,38px);line-height:1.12;letter-spacing:-.035em}.subtitle{margin:13px 0 26px;color:#a9b1c0;font-size:15px;line-height:1.6}
+.client-card{border:1px solid #303744;border-radius:18px;background:#151922;overflow:hidden;margin-bottom:26px}.client-main{display:flex;align-items:center;gap:14px;padding:17px 18px}.client-avatar{display:grid;place-items:center;flex:0 0 auto;width:44px;height:44px;border-radius:13px;background:#232936;color:#dbe3f2;font-weight:800}.client-copy{min-width:0;flex:1}.client-name{font-size:16px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.client-meta{margin-top:3px;color:#8f99aa;font-size:12px}.trust-badge{flex:0 0 auto;padding:6px 9px;border-radius:999px;background:#2a2417;color:#f2c66d;border:1px solid #4a3c1f;font-size:11px;font-weight:700}.details{border-top:1px solid #2a303a}.details summary{cursor:pointer;padding:13px 18px;color:#aeb7c7;font-size:13px;font-weight:650;list-style:none}.details summary::-webkit-details-marker{display:none}.details summary::after{content:"+";float:right;color:#737f92;font-size:18px;line-height:14px}.details[open] summary::after{content:"–"}.detail-body{padding:2px 18px 18px}.detail-grid{display:grid;grid-template-columns:160px 1fr;gap:10px 16px;margin:0}.detail-grid dt{color:#7f899a;font-size:12px}.detail-grid dd{margin:0;color:#cfd6e2;font-size:12px;min-width:0;overflow-wrap:anywhere}.detail-grid code{font-family:"SFMono-Regular",Consolas,monospace;font-size:11px;color:#dfe5ee}.origin-list{margin:0;padding-left:18px}.origin-list li+li{margin-top:4px}.security-note{margin:16px 0 0;padding:12px 13px;border-radius:12px;background:#11151c;color:#929cac;font-size:12px;line-height:1.5}
+.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:0 0 12px}.section-head h2{margin:0;font-size:16px;letter-spacing:-.01em}.section-head span{color:#7f8999;font-size:12px}.scope-grid{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:10px}.scope-item{display:flex;gap:11px;padding:13px 14px;border-radius:14px;background:#12161e;border:1px solid #272d37}.scope-icon{flex:0 0 auto;width:24px;height:24px;border-radius:8px;background:#202634;display:grid;place-items:center;color:#8ca8ff;font-size:12px;font-weight:800}.scope-copy{min-width:0}.scope-copy code{font-family:"SFMono-Regular",Consolas,monospace;color:#e7eaf0;font-size:12px;font-weight:700}.scope-copy p{margin:5px 0 0;color:#8994a6;font-size:11px;line-height:1.45}
+.actions{display:flex;gap:10px;margin-top:26px}.button{appearance:none;border:0;border-radius:13px;padding:13px 18px;font-size:14px;font-weight:750;cursor:pointer;transition:transform .12s ease,background .12s ease,opacity .12s ease}.button:active{transform:translateY(1px)}.button:disabled{cursor:wait;opacity:.62}.button-secondary{margin-left:auto;background:#20252f;color:#d6dce6;border:1px solid #303744}.button-secondary:hover{background:#262c37}.button-primary{min-width:145px;background:#f1f4f8;color:#0b0d11}.button-primary:hover{background:#fff}.footnote{margin:15px 0 0;text-align:right;color:#737e90;font-size:11px;line-height:1.5}
+@media(max-width:640px){.shell{padding:0}.card{min-height:100vh;border:0;border-radius:0}.content{padding:26px 20px}.brand{padding:18px 20px}.scope-grid{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr;gap:4px}.detail-grid dd{margin-bottom:8px}.actions{flex-direction:column-reverse}.button,.button-primary{width:100%}.button-secondary{margin-left:0}.footnote{text-align:center}}
+"#;
+
+const CONSENT_JS: &str = r#"
+(()=>{const form=document.querySelector('[data-consent-form]');if(!form)return;form.addEventListener('submit',event=>{if(form.dataset.submitting==='true'){event.preventDefault();return}const submitter=event.submitter;if(!(submitter instanceof HTMLButtonElement))return;const decision=submitter.value;if(decision!=='allow'&&decision!=='deny')return;event.preventDefault();form.dataset.submitting='true';const hidden=document.createElement('input');hidden.type='hidden';hidden.name='decision';hidden.value=decision;form.appendChild(hidden);for(const button of form.querySelectorAll('button[name="decision"]')){button.disabled=true;button.removeAttribute('name')}if(decision==='allow')submitter.textContent='Connecting…';HTMLFormElement.prototype.submit.call(form)})})();
+"#;
+
+async fn consent_stylesheet() -> Response {
+    let mut response = CONSENT_CSS.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/css; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    response
+}
+
+async fn consent_script() -> Response {
+    let mut response = CONSENT_JS.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/javascript; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    response
+}
+
 fn consent_page(service: &OAuthService, challenge: &ConsentChallenge) -> Response {
     let client_identity = consent_client_identity(challenge);
     let scopes = consent_scope_list(&challenge.scopes);
+    let client_name = encode_text(&challenge.claimed_client_name);
     let consent_endpoint = service.consent_endpoint();
     let action = encode_double_quoted_attribute(consent_endpoint.as_str());
     let consent_id_value = challenge.id.to_string();
     let consent_id = encode_double_quoted_attribute(&consent_id_value);
     let csrf = encode_double_quoted_attribute(challenge.csrf.expose_secret());
     let body = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>RunOnMine authorization</title></head><body><main><h1>Allow AI access to this machine?</h1>{client_identity}<h2>Requested capabilities</h2>{scopes}<form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"consent_id\" value=\"{consent_id}\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button><button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button></form></main></body></html>"
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>RunOnMine authorization</title>
+<link rel="stylesheet" href="/oauth/consent.css">
+<script defer src="/oauth/consent.js"></script>
+</head>
+<body>
+<div class="shell">
+<main class="card">
+<header class="brand"><div class="brand-mark">R</div><div class="brand-copy"><strong>RunOnMine</strong><span>Secure authorization</span></div></header>
+<div class="content">
+<div class="eyebrow">Connection request</div>
+<h1>Allow {client_name} to access this computer?</h1>
+<p class="subtitle">Review exactly what this connection can do. Access is limited to the capabilities shown below and remains subject to RunOnMine policy.</p>
+{client_identity}
+<section aria-labelledby="capabilities-heading">
+<div class="section-head"><h2 id="capabilities-heading">Requested capabilities</h2><span>Review before continuing</span></div>
+{scopes}
+</section>
+<form class="actions" method="post" action="{action}" data-consent-form>
+<input type="hidden" name="consent_id" value="{consent_id}">
+<input type="hidden" name="csrf" value="{csrf}">
+<button class="button button-secondary" type="submit" name="decision" value="deny">Cancel</button>
+<button class="button button-primary" type="submit" name="decision" value="allow">Allow access</button>
+</form>
+<p class="footnote">Only approve if you started this connection yourself.</p>
+</div>
+</main>
+</div>
+</body>
+</html>"#
     );
     let mut response = Html(body).into_response();
     no_store_headers(response.headers_mut());
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         ),
     );
     response.headers_mut().insert(
@@ -313,12 +392,20 @@ fn consent_client_identity(challenge: &ConsentChallenge) -> String {
         &challenge.requested_redirect_origin,
     );
     format!(
-        "<aside role=\"alert\"><strong>Unverified OAuth client</strong><p>The client supplied the name below. RunOnMine has not verified its name, publisher, or identity.</p></aside><dl><dt>Claimed name (unverified)</dt><dd>{claimed_name}</dd><dt>Client ID fingerprint</dt><dd><code>{fingerprint}</code></dd><dt>Registered</dt><dd><time datetime=\"{registered_at_attribute}\">{registered_at_text}</time></dd><dt>Redirect origin for this request</dt><dd><code>{requested_origin}</code></dd><dt>All registered redirect origins</dt><dd>{registered_origins}</dd></dl>"
+        r#"<section class="client-card" aria-label="OAuth client details">
+<div class="client-main"><div class="client-avatar">AI</div><div class="client-copy"><div class="client-name">{claimed_name}</div><div class="client-meta">OAuth client requesting access through RunOnMine</div></div><span class="trust-badge">Publisher unverified</span></div>
+<details class="details"><summary>Connection details</summary><div class="detail-body"><dl class="detail-grid">
+<dt>Client fingerprint</dt><dd><code>{fingerprint}</code></dd>
+<dt>Registered</dt><dd><time datetime="{registered_at_attribute}">{registered_at_text}</time></dd>
+<dt>Current redirect</dt><dd><code>{requested_origin}</code></dd>
+<dt>Allowed redirects</dt><dd>{registered_origins}</dd>
+</dl><p class="security-note">RunOnMine validates the registered callback and OAuth credentials, but does not independently verify the client's publisher identity.</p></div></details>
+</section>"#
     )
 }
 
 fn consent_redirect_origins(origins: &[String], requested_origin: &str) -> String {
-    let mut html = String::from("<ul>");
+    let mut html = String::from("<ul class=\"origin-list\">");
     for origin in origins {
         let is_requested = origin == requested_origin;
         let origin = encode_text(origin);
@@ -333,11 +420,11 @@ fn consent_redirect_origins(origins: &[String], requested_origin: &str) -> Strin
 }
 
 fn consent_scope_list(scopes: &crate::ScopeSet) -> String {
-    let mut html = String::from("<ul>");
+    let mut html = String::from("<ul class=\"scope-grid\">");
     for scope in scopes.iter() {
         let _ignored = write!(
             html,
-            "<li><code>{}</code> — {}</li>",
+            "<li class=\"scope-item\"><span class=\"scope-icon\">✓</span><div class=\"scope-copy\"><code>{}</code><p>{}</p></div></li>",
             encode_text(scope.as_str()),
             encode_text(scope.consent_text())
         );
@@ -386,15 +473,27 @@ mod tests {
             scopes: crate::ScopeSet::machine_read(),
         };
         let html = consent_client_identity(&challenge);
-        assert!(html.contains("Unverified OAuth client"));
-        assert!(html.contains("has not verified its name, publisher, or identity"));
-        assert!(html.contains("Claimed name (unverified)"));
+        assert!(html.contains("Publisher unverified"));
+        assert!(html.contains("does not independently verify the client's publisher identity"));
+        assert!(html.contains("OAuth client requesting access through RunOnMine"));
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(html.contains("sha256:abc&amp;def"));
         assert!(html.contains("2023-11-14T22:13:20Z"));
         assert!(html.contains("https://client.example</code> — current request"));
         assert!(html.contains("http://127.0.0.1:8787"));
+    }
+
+    #[test]
+    fn consent_assets_enforce_single_submit_without_external_dependencies() {
+        assert!(CONSENT_CSS.contains(".card"));
+        assert!(CONSENT_CSS.contains(".scope-grid"));
+        assert!(!CONSENT_CSS.contains("http://"));
+        assert!(!CONSENT_CSS.contains("https://"));
+        assert!(CONSENT_JS.contains("dataset.submitting"));
+        assert!(CONSENT_JS.contains("HTMLFormElement.prototype.submit.call(form)"));
+        assert!(!CONSENT_JS.contains("fetch("));
+        assert!(!CONSENT_JS.contains("XMLHttpRequest"));
     }
 
     #[test]
@@ -577,11 +676,11 @@ mod tests {
             response.headers()[header::X_CONTENT_TYPE_OPTIONS],
             "nosniff"
         );
-        assert!(
-            response.headers()[header::CONTENT_SECURITY_POLICY]
-                .to_str()?
-                .contains("frame-ancestors 'none'")
-        );
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY].to_str()?;
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("style-src 'self'"));
+        assert!(csp.contains("script-src 'self'"));
+        assert!(!csp.contains("'unsafe-inline'"));
         Ok(())
     }
 
@@ -624,7 +723,7 @@ mod tests {
         );
         assert!(html.contains("current request"));
         assert!(html.contains("&lt;tag&gt;"));
-        assert!(html.starts_with("<ul>"));
+        assert!(html.starts_with("<ul class=\"origin-list\">"));
         assert!(html.ends_with("</ul>"));
         Ok(())
     }
