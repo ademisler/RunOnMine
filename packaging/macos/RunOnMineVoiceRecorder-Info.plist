@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>RunOnMine Voice Recorder</string>
+  <key>CFBundleExecutable</key>
+  <string>runonmine-record-audio</string>
+  <key>CFBundleIconFile</key>
+  <string>runonmine.icns</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.runonmine.voice-recorder</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>RunOnMine Voice Recorder</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>RunOnMine uses the microphone only when you explicitly ask it to listen for a voice response.</string>
+</dict>
+</plist>

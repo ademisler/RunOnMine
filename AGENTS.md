@@ -5,7 +5,7 @@
 - Keep the HTTP listener on loopback. Never expose `/mcp` directly on a public bind address.
 - Local HTTP must remain disabled by default and must require its credential-store bearer token.
 - Never print, serialize, log, or persist plaintext connector credentials or OAuth tokens.
-- Internet-facing connectors must not bypass the remote safety ceiling. Administrator execution, external CDP attachment, and private-network browser access remain unavailable remotely.
+- Internet-facing connectors keep the remote safety ceiling by default. The only reviewed exception is an explicit `owner_full_access` opt-in on a GitHub-owner-authenticated Cloudflare Named Tunnel; it must default to false, remain visible in CLI/UI, retain OAuth scopes/policy/audit enforcement, and must never apply to Quick Tunnel or OpenAI connectors.
 - Approval grants must be scoped to the exact connector, tool, and argument hash unless a separately reviewed policy feature explicitly narrows a resource boundary.
 - Dangerous actions must fail closed when authorization or audit persistence is unavailable.
 - Do not weaken selected-root filesystem checks, managed-binary receipt verification, process environment clearing, output limits, or process-tree termination.

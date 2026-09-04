@@ -97,11 +97,30 @@ runonmine connect cloudflare oauth \
   --registration-token-output /absolute/private/oauth-registration.json
 ```
 
+For a dedicated machine you own, an explicit workstation mode is also available:
+
+```console
+runonmine connect cloudflare oauth \
+  --owner-full-access \
+  --registration-token-output /absolute/private/oauth-registration.json
+runonmine policy preset full --connector <connector-id>
+```
+
+`--owner-full-access` is intentionally dangerous. It disables the generic remote
+safety ceiling only for that GitHub-owner-authenticated Named Tunnel. OAuth
+scopes, requester identity, configured policy rules, selected roots, audit
+integrity, and helper allowlists still apply. It is never enabled implicitly and
+does not exist for Quick Tunnel or OpenAI connectors.
+
 The recommended Cloudflare mode uses Cloudflare only as the HTTPS carrier. The
 Rust agent owns protected-resource metadata, authorization-server metadata,
 dynamic client registration, authorization code flow, PKCE S256, consent, CSRF
 protection, token rotation, and revocation. GitHub proves the configured machine
-owner's identity.
+owner's identity. Strict MCP discovery is supported at both the root OAuth
+metadata endpoint and the resource-specific `/.well-known/oauth-authorization-server/mcp`
+alias; unauthenticated `/mcp` responses advertise
+`/.well-known/oauth-protected-resource/mcp`. Both authorization metadata routes
+explicitly advertise `code_challenge_methods_supported: ["S256"]`.
 
 Dynamic client registration is not anonymous. `/oauth/register` requires the
 256-bit owner-controlled initial access token from the connector credential
@@ -117,6 +136,25 @@ runonmine oauth registration-token rotate <connector-id> --output /absolute/priv
 
 Rotation takes effect after the agent restarts. Emergency lock stops the service
 and rotates every OAuth registration token before access can be restored.
+
+Platforms that let the owner supply an OAuth Client ID and Client Secret do not need to use
+DCR. Provision a confidential client locally with the exact HTTPS callback URL copied from
+the client platform:
+
+```console
+runonmine oauth clients provision <connector-id> \
+  --name ChatGPT \
+  --redirect-uri 'https://chatgpt.com/connector/oauth/<exact-callback-id>' \
+  --output /absolute/private/chatgpt-oauth-client.json
+```
+
+Do not invent or generalize the callback URL. The command refuses non-HTTPS redirects,
+requires the explicit owner-full Cloudflare OAuth connector, and never prints the secret.
+The export is create-new and owner-only. With no `--scope` arguments the confidential
+client receives all RunOnMine OAuth scopes; repeat `--scope <scope>` to narrow it. The
+server stores only a keyed, domain-separated client-secret hash. Token exchange accepts
+`client_secret_basic` and `client_secret_post`, while a public DCR client rejects an
+unexpected secret. Deleting the client cascades its secret hash and authorization state.
 
 Registration payloads are fully validated before they can consume capacity. A
 registration that omits `scope` receives only `machine:read`; clients must name
@@ -142,9 +180,11 @@ characters are rejected from client names. Review the fingerprint and origins,
 not the claimed name alone, before allowing access.
 
 Access tokens last 15 minutes. Refresh tokens rotate and expire after 30 days;
-reuse revokes the token family. Only keyed, domain-separated token and source
+reuse revokes the token family. Only keyed, domain-separated token, client-secret, and source
 hashes are stored in SQLite. The GitHub client secret, hashing key, and
 registration access token remain in the platform credential store.
+
+The browser consent page is self-contained, uses the real packaged RunOnMine logo, and loads only same-origin CSS under a strict CSP. Approval uses a native HTML form with no client-side submit interception, while the authorization service keeps a bounded 30-second in-memory replay record keyed by consent ID, CSRF hash, and decision. An identical retry returns the same redirect without issuing a second authorization code; a mismatched decision or CSRF fails closed. Replay state is never persisted and expires automatically.
 
 The public hostname, Cloudflare tunnel ID, credentials file, GitHub OAuth client
 ID, GitHub owner display login, and immutable positive GitHub numeric owner ID are required. Only the numeric ID authorizes the owner; the login is display metadata and is atomically refreshed after a verified same-ID GitHub rename. The CLI prompts for secrets rather

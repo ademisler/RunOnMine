@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::{ScopeSet, SecretHash, StoreError};
 
-const OAUTH_SCHEMA_VERSION: i64 = 6;
+const OAUTH_SCHEMA_VERSION: i64 = 7;
 const TEST_CONNECTOR_ID: &str = "test-connector";
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -106,6 +106,7 @@ pub trait OAuthStore: Send + Sync {
         limits: &RegistrationLimits,
     ) -> Result<RegistrationOutcome, StoreError>;
     fn client(&self, client_id: &str) -> Result<Option<RegisteredClient>, StoreError>;
+    fn client_secret_hash(&self, client_id: &str) -> Result<Option<SecretHash>, StoreError>;
     fn touch_client(
         &self,
         client_id: &str,
@@ -317,6 +318,50 @@ impl SqliteOAuthStore {
                    )",
                 params![client_id, connector_id],
             )?)
+        })
+    }
+
+    pub fn register_confidential_client(
+        &self,
+        client: &RegisteredClient,
+        secret_hash: &SecretHash,
+    ) -> Result<(), StoreError> {
+        let connector_id = self.scoped_connector_id()?.to_owned();
+        if client.connector_id != connector_id {
+            return Err(StoreError::Corrupt(
+                "OAuth client does not belong to this connector namespace",
+            ));
+        }
+        let client = client.clone();
+        let secret_hash = *secret_hash;
+        self.call(move |connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let redirects = serde_json::to_string(&client.redirect_uris)
+                .map_err(|_| StoreError::Corrupt("client redirect URI serialization failed"))?;
+            transaction.execute(
+                "INSERT INTO oauth_clients (
+                    client_id, connector_id, client_name, redirect_uris, scopes, issued_at,
+                    expires_at, last_used_at, registration_source_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    client.client_id,
+                    connector_id,
+                    client.client_name,
+                    redirects,
+                    client.scopes.to_space_delimited(),
+                    client.issued_at.timestamp(),
+                    client.expires_at.timestamp(),
+                    client.last_used_at.map(|value| value.timestamp()),
+                    client.registration_source_hash,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO oauth_client_credentials (client_id, secret_hash) VALUES (?1, ?2)",
+                params![client.client_id, secret_hash.as_bytes().as_slice()],
+            )?;
+            transaction.commit()?;
+            Ok(())
         })
     }
 
@@ -592,6 +637,10 @@ fn create_oauth_tables(connection: &Connection) -> Result<(), StoreError> {
             ON oauth_clients(expires_at);
          CREATE INDEX IF NOT EXISTS oauth_clients_connector_idx
             ON oauth_clients(connector_id, issued_at);
+         CREATE TABLE IF NOT EXISTS oauth_client_credentials (
+            client_id TEXT PRIMARY KEY REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+            secret_hash BLOB NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS oauth_authorizations (
             provider_state_hash BLOB PRIMARY KEY,
             client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
@@ -827,6 +876,27 @@ impl OAuthStore for SqliteOAuthStore {
         let connector_id = self.scoped_connector_id()?.to_owned();
         let client_id = client_id.to_owned();
         self.call(move |connection| client_connection(connection, &connector_id, &client_id))
+    }
+
+    fn client_secret_hash(&self, client_id: &str) -> Result<Option<SecretHash>, StoreError> {
+        let connector_id = self.scoped_connector_id()?.to_owned();
+        let client_id = client_id.to_owned();
+        self.call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT oauth_client_credentials.secret_hash
+                     FROM oauth_client_credentials
+                     JOIN oauth_clients ON oauth_clients.client_id = oauth_client_credentials.client_id
+                     WHERE oauth_clients.connector_id = ?1
+                       AND oauth_clients.client_id = ?2
+                       AND oauth_clients.expires_at > ?3",
+                    params![connector_id, client_id, Utc::now().timestamp()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?
+                .map(|bytes| SecretHash::from_slice(&bytes))
+                .transpose()
+        })
     }
 
     fn touch_client(
@@ -1600,6 +1670,25 @@ mod tests {
                 assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn confidential_client_secret_hash_is_scoped_and_cascades_on_delete() -> Result<(), StoreError>
+    {
+        let store = SqliteOAuthStore::in_memory_scoped(TEST_CONNECTOR_ID)?;
+        let now = Utc::now();
+        let client = registered_client(
+            "romc-confidential",
+            "local-owner",
+            now,
+            now + chrono::Duration::days(365),
+        );
+        let expected = SecretHash::from_slice(&[9_u8; 32])?;
+        store.register_confidential_client(&client, &expected)?;
+        assert_eq!(store.client_secret_hash(&client.client_id)?, Some(expected));
+        assert!(store.delete_client(&client.client_id)?);
+        assert_eq!(store.client_secret_hash(&client.client_id)?, None);
         Ok(())
     }
 

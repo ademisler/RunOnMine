@@ -24,10 +24,19 @@ If the page changes origin while approval is pending, the new origin is evaluate
 again; repeated changes fail closed.
 
 A final safety ceiling is then applied to internet-facing Cloudflare and OpenAI
-connectors. File writes, user shell, browser actions, desktop control, and
-platform-native scripting can never resolve above `ask`; administrator execution
-always resolves to `deny`. Local stdio and loopback connectors retain the
+connectors by default. File writes, user shell, browser actions, desktop control,
+and platform-native scripting can never resolve above `ask`; administrator
+execution resolves to `deny`. Local stdio and loopback connectors retain the
 configured result.
+
+One deliberately dangerous exception exists for owner-operated workstations. A
+Cloudflare Named Tunnel created with `--owner-full-access` may use the configured
+policy without that final ceiling after GitHub owner authentication. The setting
+defaults to false, applies only to `CloudflareOauth`, does not expand OAuth
+scopes, does not bypass explicit policy denies or audit requirements, and never
+applies to Quick Tunnel or OpenAI connectors. With the `full` preset and the
+separately installed macOS owner-root-shell helper profile, this can expose
+administrator execution remotely.
 
 `deny` removes the tool from discovery and rejects direct calls. `ask` creates a
 local approval request for up to 90 seconds. Owner decisions wake the pending
@@ -67,10 +76,13 @@ before storage and display. Persistent exact-action grants can be listed and
 revoked with `runonmine approvals grants ...`. MCP clients cannot list, grant,
 or deny approvals.
 
-For an internet-facing connector, a connector policy still cannot bypass the
-remote safety ceiling. Exact grants authorize only the reviewed requester and
-argument hash. Explicit `deny` rules are checked before grants, so a grant created
-earlier cannot override a later policy revocation. Tools with multiple
+For an ordinary internet-facing connector, connector policy cannot bypass the
+remote safety ceiling. The explicit owner-workstation Cloudflare Named Tunnel
+exception described above uses the configured policy directly, while OAuth
+scopes and requester identity remain mandatory. Exact grants authorize only the
+reviewed requester and argument hash. Explicit `deny` rules are checked before
+grants, so a grant created earlier cannot override a later policy revocation.
+Tools with multiple
 security-relevant resources authorize all of them; for example, `fs_move`
 evaluates both its source and destination paths. Filesystem policy matching uses
 the same selected-root path identity as execution, so relative paths cannot avoid

@@ -34,7 +34,11 @@ impl AuthorizationServerMetadata {
             response_types_supported: vec!["code"],
             response_modes_supported: vec!["query"],
             grant_types_supported: vec!["authorization_code", "refresh_token"],
-            token_endpoint_auth_methods_supported: vec!["none"],
+            token_endpoint_auth_methods_supported: vec![
+                "client_secret_basic",
+                "client_secret_post",
+                "none",
+            ],
             code_challenge_methods_supported: vec!["S256"],
             authorization_response_iss_parameter_supported: true,
             protected_resources: vec![resource.clone()],
@@ -91,6 +95,9 @@ mod tests {
             "https://mine.example/connector/oauth/authorize"
         );
         assert_eq!(metadata.code_challenge_methods_supported, ["S256"]);
-        assert_eq!(metadata.token_endpoint_auth_methods_supported, ["none"]);
+        assert_eq!(
+            metadata.token_endpoint_auth_methods_supported,
+            ["client_secret_basic", "client_secret_post", "none"]
+        );
     }
 }

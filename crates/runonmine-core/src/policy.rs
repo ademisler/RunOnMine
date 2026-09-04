@@ -354,6 +354,15 @@ fn apply_remote_safety_ceiling(
     ) {
         return decision;
     }
+
+    // A machine owner may explicitly opt a GitHub-owner-authenticated Named
+    // Tunnel into workstation mode. This does not change defaults: the flag is
+    // false unless set locally during connector creation, and Quick/OpenAI
+    // connectors never receive this exception. OAuth scopes and all configured
+    // policy rules still apply before this point.
+    if connector.owner_workstation_access() {
+        return decision;
+    }
     let capped_mode = match capability {
         Capability::AdminExec => PolicyMode::Deny,
         Capability::FilesWrite
@@ -565,6 +574,29 @@ mod tests {
         assert_eq!(shell.source, DecisionSource::RemoteSafetyCeiling);
         let admin = PolicyEngine.evaluate(&connector, "admin_exec", Capability::AdminExec);
         assert_eq!(admin.mode, PolicyMode::Deny);
+    }
+
+    #[test]
+    fn owner_workstation_named_tunnel_can_use_full_policy() {
+        let mut connector = ConnectorConfig::local_default();
+        connector.kind = ConnectorKind::CloudflareOauth;
+        connector.policy_preset = PolicyPreset::Full;
+        connector.cloudflare_named = Some(crate::config::CloudflareNamedSettings {
+            tunnel_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+            credentials_file: PathBuf::from("/tmp/credentials.json"),
+            hostname: "mcp.example.com".to_owned(),
+            owner_full_access: true,
+            cloudflared_path: None,
+            metrics_port: 47_824,
+        });
+
+        let shell = PolicyEngine.evaluate(&connector, "shell_exec", Capability::ShellExec);
+        assert_eq!(shell.mode, PolicyMode::Allow);
+        assert_eq!(shell.source, DecisionSource::Preset);
+
+        let admin = PolicyEngine.evaluate(&connector, "admin_exec", Capability::AdminExec);
+        assert_eq!(admin.mode, PolicyMode::Allow);
+        assert_eq!(admin.source, DecisionSource::Preset);
     }
 
     #[test]

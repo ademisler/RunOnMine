@@ -305,10 +305,15 @@ async fn teardown_active_browser(mut active: ActiveBrowser, mode: TeardownMode) 
             active.page.execute(FetchDisableParams::default()),
         )
         .await;
-        if active.page_owned {
-            let _ignored =
-                tokio::time::timeout(Duration::from_secs(2), active.page.clone().close()).await;
-        }
+    }
+    // A page created inside an externally attached Chromium is still owned by
+    // RunOnMine even though the browser process is not. Close that page during
+    // forced session teardown as well so reconnects never orphan automation tabs.
+    // Pages that existed before RunOnMine attached remain page_owned=false and
+    // are never closed here.
+    if active.page_owned && (mode == TeardownMode::Graceful || !active.owned_process) {
+        let _ignored =
+            tokio::time::timeout(Duration::from_secs(2), active.page.clone().close()).await;
     }
 
     let mut process_stopped = !active.owned_process;
@@ -995,10 +1000,17 @@ impl BrowserSession {
         if !launch.owned_process {
             launch.browser.fetch_targets().await?;
         }
-        let existing_page = launch.browser.pages().await?.into_iter().next();
-        let (page, page_owned) = match existing_page {
-            Some(page) => (page, launch.owned_process),
-            None => (launch.browser.new_page("about:blank").await?, true),
+        let (page, page_owned) = if launch.owned_process {
+            let existing_page = launch.browser.pages().await?.into_iter().next();
+            match existing_page {
+                Some(page) => (page, true),
+                None => (launch.browser.new_page("about:blank").await?, true),
+            }
+        } else {
+            // External CDP points at the owner's already-running Chromium. Never
+            // adopt one of their existing tabs. Create a dedicated RunOnMine tab
+            // so navigate/click/type/close operations cannot touch user pages.
+            (launch.browser.new_page("about:blank").await?, true)
         };
         let interceptor_task = install_request_guard(
             &page,
