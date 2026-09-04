@@ -26,10 +26,12 @@ use super::authorization::{
 use super::runtime::{
     RequestAccess, RequestPrincipal, Runtime, diagnostic_category, oauth_scopes_allow_capability,
 };
+#[cfg(target_os = "macos")]
+use super::voice::VoiceService;
 use super::{
     BROWSER_TOOLS, DESKTOP_CAPTURE_TOOLS, DESKTOP_INPUT_TOOLS, FILE_TOOLS, REQUEST_ACCESS,
     RunOnMineServer, TOOL_CAPABILITIES, argument_hash, authorization, browser_should_be_headless,
-    diagnostics, voice::VoiceService,
+    diagnostics,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -131,6 +133,7 @@ impl RunOnMineServer {
         let app_config = AppConfig::load(&paths.config_file())?;
         let (browser, browser_available) =
             Self::build_browser(&runtime, &connector, &paths, &app_config)?;
+        #[cfg(target_os = "macos")]
         let voice = Arc::new(VoiceService::discover()?);
         let mut tool_router = Self::tool_router();
         Self::disable_unavailable_tools(
@@ -138,13 +141,23 @@ impl RunOnMineServer {
             &runtime,
             &connector,
             browser_available,
-            voice.status().available,
+            {
+                #[cfg(target_os = "macos")]
+                {
+                    voice.status().available
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    false
+                }
+            },
         );
         Ok(Self {
             runtime,
             browser,
             admin: HelperClient::for_current_user()
                 .map_err(|error| HelperAvailability::from_error(&error)),
+            #[cfg(target_os = "macos")]
             voice,
             tool_router,
             _session_permit: permit,
