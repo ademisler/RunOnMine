@@ -26,10 +26,12 @@ use super::authorization::{
 use super::runtime::{
     RequestAccess, RequestPrincipal, Runtime, diagnostic_category, oauth_scopes_allow_capability,
 };
+#[cfg(target_os = "macos")]
+use super::voice::VoiceService;
 use super::{
     BROWSER_TOOLS, DESKTOP_CAPTURE_TOOLS, DESKTOP_INPUT_TOOLS, FILE_TOOLS, REQUEST_ACCESS,
     RunOnMineServer, TOOL_CAPABILITIES, argument_hash, authorization, browser_should_be_headless,
-    diagnostics, voice::VoiceService,
+    diagnostics,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -131,6 +133,7 @@ impl RunOnMineServer {
         let app_config = AppConfig::load(&paths.config_file())?;
         let (browser, browser_available) =
             Self::build_browser(&runtime, &connector, &paths, &app_config)?;
+        #[cfg(target_os = "macos")]
         let voice = Arc::new(VoiceService::discover()?);
         let mut tool_router = Self::tool_router();
         Self::disable_unavailable_tools(
@@ -138,6 +141,7 @@ impl RunOnMineServer {
             &runtime,
             &connector,
             browser_available,
+            #[cfg(target_os = "macos")]
             voice.status().available,
         );
         Ok(Self {
@@ -145,6 +149,7 @@ impl RunOnMineServer {
             browser,
             admin: HelperClient::for_current_user()
                 .map_err(|error| HelperAvailability::from_error(&error)),
+            #[cfg(target_os = "macos")]
             voice,
             tool_router,
             _session_permit: permit,
@@ -228,7 +233,7 @@ impl RunOnMineServer {
         runtime: &Runtime,
         connector: &ConnectorConfig,
         browser_available: bool,
-        voice_available: bool,
+        #[cfg(target_os = "macos")] voice_available: bool,
     ) {
         let engine = PolicyEngine;
         for (tool_name, capability) in TOOL_CAPABILITIES {
@@ -268,25 +273,8 @@ impl RunOnMineServer {
         if !native::dbus_available() {
             tool_router.disable_route("linux_dbus_call");
         }
-        Self::disable_platform_workstation_tools(tool_router, voice_available);
-    }
-
-    fn disable_platform_workstation_tools(
-        tool_router: &mut ToolRouter<Self>,
-        voice_available: bool,
-    ) {
-        if !cfg!(target_os = "macos") {
-            for tool_name in [
-                "mac_info",
-                "mac_run_user_shell",
-                "mac_run_root_shell",
-                "mac_voice_notify",
-                "mac_voice_listen",
-                "mac_voice_ask",
-            ] {
-                tool_router.disable_route(tool_name);
-            }
-        } else if !voice_available {
+        #[cfg(target_os = "macos")]
+        if !voice_available {
             tool_router.disable_route("mac_voice_listen");
             tool_router.disable_route("mac_voice_ask");
         }

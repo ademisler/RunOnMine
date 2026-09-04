@@ -1,6 +1,7 @@
 //! Policy-aware MCP server and local transports.
 
 use std::collections::BTreeSet;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +43,7 @@ mod http;
 mod managed_connectors;
 mod rate_limit;
 mod session;
+#[cfg(target_os = "macos")]
 mod voice;
 pub use http::serve_loopback;
 use session::{IdleSessionManager, SessionPermit};
@@ -64,6 +66,7 @@ pub use connector_removal::{
     remove_connector_recoverably,
 };
 const MAX_COMMAND_BYTES: usize = 256 * 1_024;
+#[cfg(target_os = "macos")]
 const MAX_ROOT_SHELL_BYTES: usize = 8 * 1_024;
 const MAX_SCRIPT_BYTES: usize = 256 * 1_024;
 const MAX_TEXT_INPUT_BYTES: usize = 256 * 1_024;
@@ -82,6 +85,7 @@ pub struct RunOnMineServer {
     runtime: Runtime,
     browser: Arc<BrowserSession>,
     admin: Result<HelperClient, HelperAvailability>,
+    #[cfg(target_os = "macos")]
     voice: Arc<VoiceService>,
     tool_router: ToolRouter<Self>,
     _session_permit: Arc<SessionPermit>,
@@ -95,13 +99,16 @@ use arguments::{
     AdminExecArgs, DbusCallArgs, DesktopClickArgs, DesktopKeyArgs, DesktopListArgs,
     DesktopScreenshotArgs, DesktopTypeArgs, DesktopWindowArgs, EmptyArgs, EvaluateArgs, KeyArgs,
     ListArgs, MoveArgs, PatchArgs, PathArgs, PlatformScriptArgs, ReadArgs, ReadOutput,
-    ScreenshotArgs, SearchArgs, SelectorArgs, ShellArgs, TypeArgs, UrlArgs, VoiceAskArgs,
-    VoiceListenArgs, VoiceNotifyArgs, WriteArgs,
+    ScreenshotArgs, SearchArgs, SelectorArgs, ShellArgs, TypeArgs, UrlArgs, WriteArgs,
 };
+#[cfg(target_os = "macos")]
+use arguments::{VoiceAskArgs, VoiceListenArgs, VoiceNotifyArgs};
+#[cfg(target_os = "macos")]
 use voice::VoiceService;
 
 #[tool_router]
 impl RunOnMineServer {
+    #[cfg(target_os = "macos")]
     #[tool(
         description = "Return the Mac owner-workstation operating guide, including blocking voice interaction semantics and capability mappings",
         annotations(
@@ -152,6 +159,7 @@ impl RunOnMineServer {
         }))
     }
 
+    #[cfg(target_os = "macos")]
     #[tool(
         description = "Run a shell command as the signed-in macOS user; owner-workstation compatibility alias for shell_exec",
         annotations(
@@ -215,6 +223,7 @@ impl RunOnMineServer {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[tool(
         description = "Run an unrestricted root shell command on the owner's Mac through the separately installed, hash-pinned privileged helper profile",
         annotations(
@@ -316,6 +325,7 @@ impl RunOnMineServer {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[tool(
         description = "Speak a status/progress/completion message on the owner's Mac. ONE-WAY only: never use for questions or approvals that require an owner response.",
         annotations(
@@ -357,6 +367,7 @@ impl RunOnMineServer {
         self.success(&result)
     }
 
+    #[cfg(target_os = "macos")]
     #[tool(
         description = "Listen to the owner through the Mac microphone and return a high-accuracy local Whisper transcript. BLOCKING: wait for this tool result before using the owner's answer. Recording ends after about 2.5 seconds of silence after speech.",
         annotations(
@@ -394,6 +405,7 @@ impl RunOnMineServer {
         self.success(&result)
     }
 
+    #[cfg(target_os = "macos")]
     #[tool(
         description = "Ask the owner a question aloud, then listen and return the local Whisper transcript. BLOCKING TWO-WAY interaction: MUST wait for this result and MUST NOT continue dependent actions before it returns. Duplicate identical asks are deduplicated and reuse the completed transcript.",
         annotations(
