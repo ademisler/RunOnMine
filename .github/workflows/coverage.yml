@@ -30,7 +30,7 @@ jobs:
           printf 'CARGO_TARGET_DIR=%s\n' "$target" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "llvm-tools-preview" ""
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Enforce measured coverage targets
