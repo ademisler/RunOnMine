@@ -163,7 +163,7 @@ impl NamedTunnelConfig {
             yaml_string(self.protocol.as_str()),
             yaml_string(&self.metrics_address.to_string()),
             yaml_string(&self.hostname),
-            yaml_string(self.origin.as_str()),
+            yaml_string(&self.origin.origin().ascii_serialization()),
         )
     }
 
@@ -259,7 +259,7 @@ impl NamedTunnelConfigBuilder {
     pub fn build(self) -> Result<NamedTunnelConfig> {
         validate_tunnel_id(&self.tunnel_id)?;
         validate_hostname(&self.hostname)?;
-        validate_loopback_origin(&self.origin)?;
+        validate_named_tunnel_origin(&self.origin)?;
         validate_private_absolute_path(&self.credentials_file, "credentials file")?;
         validate_absolute_config_path(&self.config_path)?;
         let metrics_address = self
@@ -421,6 +421,14 @@ fn validate_loopback_origin(url: &Url) -> Result<()> {
     };
     if !loopback || url.port().is_none_or(|port| port == 0) {
         bail!("Cloudflare origin must use an explicit loopback IP and non-zero port");
+    }
+    Ok(())
+}
+
+fn validate_named_tunnel_origin(url: &Url) -> Result<()> {
+    validate_loopback_origin(url)?;
+    if url.path() != "/" {
+        bail!("Cloudflare Named Tunnel origin must not contain a path");
     }
     Ok(())
 }
@@ -648,16 +656,28 @@ mod tests {
         }
         let config = NamedTunnelConfig::builder(
             "11111111-2222-3333-4444-555555555555",
-            credentials,
+            credentials.clone(),
             "mine.example.com",
-            Url::parse("http://127.0.0.1:47821/mcp")?,
+            Url::parse("http://127.0.0.1:47821/")?,
             directory.path().join("cloudflared.yml"),
         )
         .metrics_address("127.0.0.1:47822".parse()?)
         .build()?;
         let yaml = config.render_yaml();
         assert!(yaml.contains("service: http_status:404"));
-        assert!(yaml.contains("127.0.0.1:47821/mcp"));
+        assert!(yaml.contains("service: \"http://127.0.0.1:47821\""));
+        assert!(!yaml.contains("127.0.0.1:47821/mcp"));
+
+        let with_path = NamedTunnelConfig::builder(
+            "11111111-2222-3333-4444-555555555555",
+            credentials,
+            "mine.example.com",
+            Url::parse("http://127.0.0.1:47821/mcp")?,
+            directory.path().join("cloudflared-path.yml"),
+        )
+        .metrics_address("127.0.0.1:47823".parse()?)
+        .build();
+        assert!(with_path.is_err());
         Ok(())
     }
 

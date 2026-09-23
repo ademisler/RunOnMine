@@ -144,8 +144,10 @@ runonmine policy show
 New connectors start with **Safe**: reads are available, writes/execution ask
 locally, and administrator execution is denied. **Developer** is intended for
 trusted selected-root coding work. **Automation** (`full` in the CLI) is the
-broadest local preset and should be used only on a dedicated or tightly scoped
-machine.
+broadest preset and should be used only on a dedicated or tightly scoped
+machine. Internet-facing connectors still receive the normal remote safety
+ceiling unless a Cloudflare Named Tunnel is explicitly created as an
+owner-workstation connector with `--owner-full-access`.
 
 ### 3. Run the agent
 
@@ -182,6 +184,29 @@ runonmine connect local-http enable \
 For remote access, use a managed Cloudflare or OpenAI connector instead of
 opening the MCP listener to the network. See [Connection modes](docs/connections.md).
 
+### Owner workstation mode
+
+A machine owner who intentionally wants a trusted remote AI workstation can use
+the managed Cloudflare Named Tunnel with `--owner-full-access`, then select the
+`full` policy. This is deliberately opt-in: it can permit user shell, browser,
+desktop, platform-native automation, and—when the separately installed helper
+profile allows it—administrator execution. OAuth scopes, GitHub owner identity,
+selected roots, audit integrity, and Emergency Lock still apply. For OAuth clients that
+support owner-supplied credentials, RunOnMine can provision a confidential client with an
+exact HTTPS callback allowlist; its secret is exported once to an owner-only file and only a
+domain-separated hash is retained in local state. Dynamic registration remains separately
+protected by the owner-controlled registration token.
+
+On macOS, optional local voice tools can be prepared with:
+
+```console
+./scripts/setup-macos-voice.sh
+```
+
+This installs a dedicated macOS voice-recorder helper app (the first listen may
+prompt for Microphone permission) and verifies the local Whisper/VAD models in
+RunOnMine's private data directory. See [macOS](docs/platforms/macos.md).
+
 ## Everyday controls
 
 | Task | Command / UI |
@@ -214,7 +239,7 @@ machine automation is harmless:
 
 - MCP is never bound directly to a public network interface.
 - Remote connectors cannot approve their own dangerous requests.
-- Remote administrator execution is denied by a non-bypassable safety ceiling.
+- Remote connectors use a restrictive safety ceiling by default. A GitHub-owner-authenticated Cloudflare Named Tunnel may bypass that ceiling only through the explicit dangerous `--owner-full-access` workstation opt-in.
 - Shell processes start from a cleared environment; Windows PowerShell profiles are disabled.
 - The optional privileged helper is **absent by default** and requires separate,
   explicit installation.

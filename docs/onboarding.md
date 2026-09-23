@@ -27,7 +27,7 @@ and asks locally before writes or execution. The available product profiles are:
 | --- | --- | --- |
 | **Safe** | `safe` | Read-oriented use with local approval for writes, shell, browser actions, desktop actions, and platform-native operations. Administrator execution is denied. |
 | **Developer** | `developer` | Selected-root file writes and shell execution may run automatically. Browser and desktop actions still ask locally. Administrator execution is denied. |
-| **Automation** | `full` | Broadest local policy. Use only on a dedicated machine or narrowly scoped connector. Remote safety ceilings still prevent automatic dangerous actions and deny remote administrator execution. |
+| **Automation** | `full` | Broadest policy. Use only on a dedicated machine or narrowly scoped connector. Remote safety ceilings still apply unless a GitHub-owner-authenticated Cloudflare Named Tunnel was explicitly created with `--owner-full-access`. |
 
 The optional privileged helper is not installed by setup and is not implied by
 any preset. It has a separate explicit installation and executable-specific
@@ -78,7 +78,7 @@ for the intended workflow and remove it when no longer needed.
 - It never binds the MCP server to a public network interface.
 - It never installs the privileged helper during normal setup.
 - It never lets a remote connector approve its own dangerous request.
-- It never gives remote connectors administrator execution.
+- It never gives ordinary remote connectors administrator execution; the only exception is an explicit owner-workstation Cloudflare Named Tunnel combined with Full policy and a separately installed administrator helper profile.
 - It never starts the user's daily browser profile with remote debugging.
 - It never treats a missing, corrupt, or unverifiable security state as safe.
 

@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use chrono::{Duration, Utc};
@@ -29,6 +29,7 @@ const REFRESH_TOKEN_TTL: Duration = Duration::days(30);
 const AUTHORIZATION_TRANSACTION_TTL: Duration = Duration::minutes(10);
 const AUTHORIZATION_CLAIM_TTL: Duration = Duration::seconds(30);
 const CONSENT_TTL: Duration = Duration::minutes(5);
+const CONSENT_REPLAY_TTL: Duration = Duration::seconds(30);
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
 const REGISTRATION_WINDOW_SECONDS: i64 = 60;
 const REGISTRATIONS_PER_SOURCE_WINDOW: usize = 5;
@@ -78,12 +79,21 @@ struct GitHubCallbackPreparation {
     registered_redirect_origins: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct ConsentReplay {
+    csrf_hash: crate::SecretHash,
+    decision: ConsentDecision,
+    redirect: Url,
+    expires_at: chrono::DateTime<Utc>,
+}
+
 pub struct OAuthService {
     config: OAuthServiceConfig,
     store: Arc<dyn OAuthStore>,
     hasher: TokenHasher,
     registration_access_hash: crate::SecretHash,
     github: Arc<dyn GitHubOwnerVerifier>,
+    consent_replays: Mutex<HashMap<Uuid, ConsentReplay>>,
 }
 
 impl std::fmt::Debug for OAuthService {
@@ -95,6 +105,7 @@ impl std::fmt::Debug for OAuthService {
             .field("hasher", &self.hasher)
             .field("registration_access_hash", &"[REDACTED]")
             .field("github", &"dyn GitHubOwnerVerifier")
+            .field("consent_replays", &"[REDACTED]")
             .finish()
     }
 }
@@ -123,6 +134,7 @@ impl OAuthService {
             hasher,
             registration_access_hash,
             github,
+            consent_replays: Mutex::new(HashMap::new()),
         })
     }
 
@@ -490,54 +502,79 @@ impl OAuthService {
         if csrf.is_empty() || csrf.len() > 1_024 {
             return Err(OAuthError::invalid_request());
         }
-        let consent = self
-            .store
-            .take_consent(
-                id,
-                &self.hasher.hash(HashPurpose::ConsentCsrf, csrf),
-                Utc::now(),
-            )
-            .map_err(|error| match error {
-                StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
-                unexpected => self.store_server_error("take_consent", &unexpected),
-            })?;
-        if decision == ConsentDecision::Deny {
-            return Ok(ConsentResult {
-                redirect: authorization_error_redirect(
-                    consent.redirect_uri,
-                    "access_denied",
-                    &consent.client_state,
-                    &self.config.issuer,
-                ),
-            });
+        let csrf_hash = self.hasher.hash(HashPurpose::ConsentCsrf, csrf);
+        let now = Utc::now();
+        let mut replays = self
+            .consent_replays
+            .lock()
+            .map_err(|_| OAuthError::server())?;
+        replays.retain(|_, replay| replay.expires_at > now);
+        if let Some(replay) = replays.get(&id) {
+            if replay.decision == decision && replay.csrf_hash.constant_time_eq(&csrf_hash) {
+                return Ok(ConsentResult {
+                    redirect: replay.redirect.clone(),
+                });
+            }
+            return Err(OAuthError::access_denied());
         }
-        let code = generate_secret()?;
-        self.store
-            .put_authorization_code(&AuthorizationCodeGrant {
-                code_hash: self
-                    .hasher
-                    .hash(HashPurpose::AuthorizationCode, code.expose_secret()),
-                client_id: consent.client_id,
-                redirect_uri: consent.redirect_uri.clone(),
-                scopes: consent.scopes,
-                code_challenge: consent.code_challenge,
-                subject: consent.subject,
-                expires_at: Utc::now() + AUTHORIZATION_CODE_TTL,
-            })
-            .map_err(|error| self.store_server_error("store_authorization_code", &error))?;
-        let mut redirect = consent.redirect_uri;
-        redirect
-            .query_pairs_mut()
-            .append_pair("code", code.expose_secret())
-            .append_pair("state", &consent.client_state)
-            .append_pair("iss", self.config.issuer.as_str());
+        let consent =
+            self.store
+                .take_consent(id, &csrf_hash, now)
+                .map_err(|error| match error {
+                    StoreError::NotFound | StoreError::InvalidGrant => OAuthError::access_denied(),
+                    unexpected => self.store_server_error("take_consent", &unexpected),
+                })?;
+        let redirect = if decision == ConsentDecision::Deny {
+            authorization_error_redirect(
+                consent.redirect_uri,
+                "access_denied",
+                &consent.client_state,
+                &self.config.issuer,
+            )
+        } else {
+            let code = generate_secret()?;
+            self.store
+                .put_authorization_code(&AuthorizationCodeGrant {
+                    code_hash: self
+                        .hasher
+                        .hash(HashPurpose::AuthorizationCode, code.expose_secret()),
+                    client_id: consent.client_id,
+                    redirect_uri: consent.redirect_uri.clone(),
+                    scopes: consent.scopes,
+                    code_challenge: consent.code_challenge,
+                    subject: consent.subject,
+                    expires_at: now + AUTHORIZATION_CODE_TTL,
+                })
+                .map_err(|error| self.store_server_error("store_authorization_code", &error))?;
+            let mut redirect = consent.redirect_uri;
+            redirect
+                .query_pairs_mut()
+                .append_pair("code", code.expose_secret())
+                .append_pair("state", &consent.client_state)
+                .append_pair("iss", self.config.issuer.as_str());
+            redirect
+        };
+        replays.insert(
+            id,
+            ConsentReplay {
+                csrf_hash,
+                decision,
+                redirect: redirect.clone(),
+                expires_at: now + CONSENT_REPLAY_TTL,
+            },
+        );
         Ok(ConsentResult { redirect })
     }
 
-    pub fn issue_token(&self, request: &TokenRequest) -> Result<IssuedToken, OAuthError> {
+    pub fn issue_token(
+        &self,
+        request: &TokenRequest,
+        client_secret: Option<&str>,
+    ) -> Result<IssuedToken, OAuthError> {
         if request.client_id.is_empty() || request.client_id.len() > 256 {
             return Err(OAuthError::invalid_client());
         }
+        self.authenticate_token_client(&request.client_id, client_secret)?;
         let access = generate_secret()?;
         let refresh = generate_secret()?;
         let now = Utc::now();
@@ -598,6 +635,39 @@ impl OAuthService {
         }
         .map_err(|error| self.store_grant_error("issue_token", error))?;
         Ok(token_response(access, refresh, grant))
+    }
+
+    fn authenticate_token_client(
+        &self,
+        client_id: &str,
+        client_secret: Option<&str>,
+    ) -> Result<(), OAuthError> {
+        self.store
+            .client(client_id)
+            .map_err(|error| self.store_server_error("load_token_client", &error))?
+            .ok_or_else(OAuthError::invalid_client)?;
+        let expected = self
+            .store
+            .client_secret_hash(client_id)
+            .map_err(|error| self.store_server_error("load_token_client_secret", &error))?;
+        match expected {
+            Some(expected) => {
+                let supplied = client_secret.ok_or_else(OAuthError::invalid_client)?;
+                if supplied.len() < 32
+                    || supplied.len() > 1_024
+                    || supplied.contains(char::is_whitespace)
+                {
+                    return Err(OAuthError::invalid_client());
+                }
+                let supplied = self.hasher.hash(HashPurpose::ClientSecret, supplied);
+                if !expected.constant_time_eq(&supplied) {
+                    return Err(OAuthError::invalid_client());
+                }
+            }
+            None if client_secret.is_some() => return Err(OAuthError::invalid_client()),
+            None => {}
+        }
+        Ok(())
     }
 
     pub fn revoke(&self, request: &RevocationRequest) -> Result<(), OAuthError> {
@@ -933,6 +1003,44 @@ mod tests {
         register_from_source(service, "test-source")
     }
 
+    fn confidential_service() -> Result<
+        (
+            OAuthService,
+            Arc<SqliteOAuthStore>,
+            RegisteredClient,
+            String,
+        ),
+        OAuthError,
+    > {
+        let store = Arc::new(
+            SqliteOAuthStore::in_memory().map_err(|error| map_store_server_error(&error))?,
+        );
+        let service = service_with_store(store.clone())?;
+        let secret = "confidential-client-secret-0123456789abcdef".to_owned();
+        let now = Utc::now();
+        let client = RegisteredClient {
+            connector_id: "test-connector".to_owned(),
+            client_id: "romc_test-confidential-client".to_owned(),
+            client_name: "Confidential test client".to_owned(),
+            redirect_uris: vec![
+                Url::parse("https://client.example/callback")
+                    .map_err(|_| OAuthError::invalid_request())?,
+            ],
+            scopes: ScopeSet::parse("machine:read files:read files:write")?,
+            issued_at: now,
+            expires_at: now + Duration::days(365),
+            last_used_at: None,
+            registration_source_hash: "local-test".to_owned(),
+        };
+        store
+            .register_confidential_client(
+                &client,
+                &service.hasher.hash(HashPurpose::ClientSecret, &secret),
+            )
+            .map_err(|error| map_store_server_error(&error))?;
+        Ok((service, store, client, secret))
+    }
+
     fn begin_test_authorization(
         service: &OAuthService,
         client_id: &str,
@@ -985,6 +1093,40 @@ mod tests {
             .query_pairs()
             .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
             .ok_or_else(OAuthError::server)
+    }
+
+    #[tokio::test]
+    async fn repeated_consent_submission_replays_the_same_result() -> Result<(), OAuthError> {
+        let service = service()?;
+        let client = register(&service)?;
+        let start = begin_test_authorization(&service, &client.client_id)?;
+        let consent = service
+            .complete_github_callback(GitHubCallback {
+                code: "github-code-replay".to_owned(),
+                state: start.provider_state.expose_secret().to_owned(),
+            })
+            .await?;
+        let first = service.submit_consent(
+            consent.id,
+            consent.csrf.expose_secret(),
+            ConsentDecision::Allow,
+        )?;
+        let second = service.submit_consent(
+            consent.id,
+            consent.csrf.expose_secret(),
+            ConsentDecision::Allow,
+        )?;
+        assert_eq!(first.redirect, second.redirect);
+        assert!(first.redirect.query_pairs().any(|(key, _)| key == "code"));
+        assert!(matches!(
+            service.submit_consent(
+                consent.id,
+                consent.csrf.expose_secret(),
+                ConsentDecision::Deny,
+            ),
+            Err(error) if error.code == crate::OAuthErrorCode::AccessDenied
+        ));
+        Ok(())
     }
 
     #[test]
@@ -1250,9 +1392,65 @@ mod tests {
         let service = service()?;
         let client = register(&service)?;
         let code = authorize(&service, &client.client_id).await?;
-        let first = service.issue_token(&TokenRequest {
+        let first = service.issue_token(
+            &TokenRequest {
+                grant_type: "authorization_code".to_owned(),
+                client_id: client.client_id.clone(),
+                code: Some(code),
+                redirect_uri: Some(
+                    Url::parse("https://client.example/callback")
+                        .map_err(|_| OAuthError::invalid_request())?,
+                ),
+                code_verifier: Some(verifier()),
+                refresh_token: None,
+                scope: None,
+            },
+            None,
+        )?;
+        let grant = service.authenticate_access(
+            first.access_token.expose_secret(),
+            Scope::MachineRead,
+            &ScopeSet::all(),
+        )?;
+        assert_eq!(grant.subject, "github:42");
+        let old_refresh = first.refresh_token.expose_secret().to_owned();
+        let second = service.issue_token(
+            &TokenRequest {
+                grant_type: "refresh_token".to_owned(),
+                client_id: client.client_id.clone(),
+                code: None,
+                redirect_uri: None,
+                code_verifier: None,
+                refresh_token: Some(old_refresh.clone()),
+                scope: Some("machine:read".to_owned()),
+            },
+            None,
+        )?;
+        assert_eq!(second.scope.to_space_delimited(), "machine:read");
+        let reused = service.issue_token(
+            &TokenRequest {
+                grant_type: "refresh_token".to_owned(),
+                client_id: client.client_id,
+                code: None,
+                redirect_uri: None,
+                code_verifier: None,
+                refresh_token: Some(old_refresh),
+                scope: None,
+            },
+            None,
+        );
+        assert!(reused.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confidential_client_requires_secret_without_consuming_code() -> Result<(), OAuthError>
+    {
+        let (service, _store, client, secret) = confidential_service()?;
+        let code = authorize(&service, &client.client_id).await?;
+        let request = TokenRequest {
             grant_type: "authorization_code".to_owned(),
-            client_id: client.client_id.clone(),
+            client_id: client.client_id,
             code: Some(code),
             redirect_uri: Some(
                 Url::parse("https://client.example/callback")
@@ -1261,34 +1459,44 @@ mod tests {
             code_verifier: Some(verifier()),
             refresh_token: None,
             scope: None,
-        })?;
-        let grant = service.authenticate_access(
-            first.access_token.expose_secret(),
-            Scope::MachineRead,
-            &ScopeSet::all(),
-        )?;
-        assert_eq!(grant.subject, "github:42");
-        let old_refresh = first.refresh_token.expose_secret().to_owned();
-        let second = service.issue_token(&TokenRequest {
-            grant_type: "refresh_token".to_owned(),
-            client_id: client.client_id.clone(),
-            code: None,
-            redirect_uri: None,
-            code_verifier: None,
-            refresh_token: Some(old_refresh.clone()),
-            scope: Some("machine:read".to_owned()),
-        })?;
-        assert_eq!(second.scope.to_space_delimited(), "machine:read");
-        let reused = service.issue_token(&TokenRequest {
-            grant_type: "refresh_token".to_owned(),
+        };
+        assert!(matches!(
+            service.issue_token(&request, None),
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidClient
+        ));
+        assert!(matches!(
+            service.issue_token(&request, Some("wrong-confidential-client-secret-00000000")),
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidClient
+        ));
+        assert!(service.issue_token(&request, Some(&secret)).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn public_dynamic_client_rejects_injected_secret() -> Result<(), OAuthError> {
+        let service = service()?;
+        let client = register(&service)?;
+        let code = authorize(&service, &client.client_id).await?;
+        let request = TokenRequest {
+            grant_type: "authorization_code".to_owned(),
             client_id: client.client_id,
-            code: None,
-            redirect_uri: None,
-            code_verifier: None,
-            refresh_token: Some(old_refresh),
+            code: Some(code),
+            redirect_uri: Some(
+                Url::parse("https://client.example/callback")
+                    .map_err(|_| OAuthError::invalid_request())?,
+            ),
+            code_verifier: Some(verifier()),
+            refresh_token: None,
             scope: None,
-        });
-        assert!(reused.is_err());
+        };
+        assert!(matches!(
+            service.issue_token(
+                &request,
+                Some("unexpected-client-secret-0123456789abcdef")
+            ),
+            Err(error) if error.code == crate::OAuthErrorCode::InvalidClient
+        ));
+        assert!(service.issue_token(&request, None).is_ok());
         Ok(())
     }
 
@@ -1400,9 +1608,9 @@ mod tests {
             refresh_token: None,
             scope: None,
         };
-        assert!(service.issue_token(&request).is_err());
+        assert!(service.issue_token(&request, None).is_err());
         request.code_verifier = Some(verifier());
-        assert!(service.issue_token(&request).is_ok());
+        assert!(service.issue_token(&request, None).is_ok());
         Ok(())
     }
 
@@ -1411,18 +1619,21 @@ mod tests {
         let service = service()?;
         let client = register(&service)?;
         let code = authorize(&service, &client.client_id).await?;
-        let token = service.issue_token(&TokenRequest {
-            grant_type: "authorization_code".to_owned(),
-            client_id: client.client_id,
-            code: Some(code),
-            redirect_uri: Some(
-                Url::parse("https://client.example/callback")
-                    .map_err(|_| OAuthError::invalid_request())?,
-            ),
-            code_verifier: Some(verifier()),
-            refresh_token: None,
-            scope: None,
-        })?;
+        let token = service.issue_token(
+            &TokenRequest {
+                grant_type: "authorization_code".to_owned(),
+                client_id: client.client_id,
+                code: Some(code),
+                redirect_uri: Some(
+                    Url::parse("https://client.example/callback")
+                        .map_err(|_| OAuthError::invalid_request())?,
+                ),
+                code_verifier: Some(verifier()),
+                refresh_token: None,
+                scope: None,
+            },
+            None,
+        )?;
         let local = ScopeSet::all();
         assert!(
             service
@@ -1454,18 +1665,21 @@ mod tests {
         let service = service()?;
         let client = register(&service)?;
         let code = authorize(&service, &client.client_id).await?;
-        let token = service.issue_token(&TokenRequest {
-            grant_type: "authorization_code".to_owned(),
-            client_id: client.client_id,
-            code: Some(code),
-            redirect_uri: Some(
-                Url::parse("https://client.example/callback")
-                    .map_err(|_| OAuthError::invalid_request())?,
-            ),
-            code_verifier: Some(verifier()),
-            refresh_token: None,
-            scope: None,
-        })?;
+        let token = service.issue_token(
+            &TokenRequest {
+                grant_type: "authorization_code".to_owned(),
+                client_id: client.client_id,
+                code: Some(code),
+                redirect_uri: Some(
+                    Url::parse("https://client.example/callback")
+                        .map_err(|_| OAuthError::invalid_request())?,
+                ),
+                code_verifier: Some(verifier()),
+                refresh_token: None,
+                scope: None,
+            },
+            None,
+        )?;
         let local = ScopeSet::parse("machine:read").unwrap_or_default();
         assert!(
             service

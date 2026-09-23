@@ -11,7 +11,8 @@ use connector_transactions::{local_http_secret_name, update_config_with_secrets}
 pub(crate) use connectors::{connect, setup};
 use connectors::{
     ensure_private_directory, generate_path_secret, load_connector_binary,
-    validate_private_output_path, write_oauth_registration_credentials,
+    validate_private_output_path, write_oauth_client_credentials,
+    write_oauth_registration_credentials,
 };
 pub(crate) use doctor_command::doctor;
 
@@ -359,7 +360,7 @@ pub(super) fn oauth(command: OauthCommand) -> Result<()> {
     let paths = AppPaths::discover()?;
     let store = SqliteOAuthStore::open(&paths.state_db())?;
     match command {
-        OauthCommand::Clients { command } => oauth_clients(&store, command),
+        OauthCommand::Clients { command } => oauth_clients(&paths, &store, command),
         OauthCommand::Sessions { command } => oauth_sessions(&store, command),
         OauthCommand::RegistrationToken { command } => oauth_registration_token(&paths, command),
         OauthCommand::Cleanup => {
@@ -370,7 +371,11 @@ pub(super) fn oauth(command: OauthCommand) -> Result<()> {
     }
 }
 
-fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Result<()> {
+fn oauth_clients(
+    paths: &AppPaths,
+    store: &SqliteOAuthStore,
+    command: OauthClientCommand,
+) -> Result<()> {
     match command {
         OauthClientCommand::List => {
             let clients = store.registered_clients()?;
@@ -398,6 +403,22 @@ fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Resul
                 );
             }
         }
+        OauthClientCommand::Provision {
+            connector_id,
+            name,
+            redirect_uris,
+            scopes,
+            output,
+        } => {
+            provision_confidential_oauth_client(
+                paths,
+                &connector_id,
+                &name,
+                &redirect_uris,
+                &scopes,
+                &output,
+            )?;
+        }
         OauthClientCommand::Revoke {
             connector_id,
             client_id,
@@ -417,6 +438,102 @@ fn oauth_clients(store: &SqliteOAuthStore, command: OauthClientCommand) -> Resul
             );
         }
     }
+    Ok(())
+}
+
+fn provision_confidential_oauth_client(
+    paths: &AppPaths,
+    connector_id: &str,
+    name: &str,
+    redirect_uris: &[Url],
+    requested_scopes: &[String],
+    output: &Path,
+) -> Result<()> {
+    validate_private_output_path(Some(output))?;
+    let name = name.trim();
+    if name.is_empty() || name.len() > 100 || name.chars().any(char::is_control) {
+        bail!("OAuth client name must be a bounded printable value");
+    }
+    if redirect_uris.is_empty() || redirect_uris.len() > 16 {
+        bail!("at least one and at most 16 OAuth redirect URIs are required");
+    }
+    for redirect in redirect_uris {
+        if redirect.scheme() != "https"
+            || redirect.host_str().is_none()
+            || redirect.fragment().is_some()
+            || !redirect.username().is_empty()
+            || redirect.password().is_some()
+        {
+            bail!(
+                "confidential OAuth redirect URIs must be credential-free HTTPS URLs without fragments"
+            );
+        }
+    }
+
+    let config = AppConfig::load(&paths.config_file()).context("run `runonmine setup` first")?;
+    let connector = oauth_connector(&config, connector_id)?;
+    if !connector.owner_workstation_access() {
+        bail!(
+            "confidential owner client provisioning requires an owner-full Cloudflare OAuth connector"
+        );
+    }
+
+    let scopes = if requested_scopes.is_empty() {
+        ScopeSet::all()
+    } else {
+        ScopeSet::parse(&requested_scopes.join(" "))?
+    };
+    if scopes.is_empty() || !scopes.is_subset(&ScopeSet::all()) {
+        bail!("OAuth client scopes must be a non-empty subset of supported scopes");
+    }
+
+    let secrets = default_secret_store(paths)?;
+    let hash_key = secrets
+        .get(&format!("connector.{connector_id}.oauth_hash_key"))?
+        .context("OAuth hash key is missing")?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(hash_key.expose_secret())
+        .context("OAuth hash key is invalid")?;
+    let hash_key: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("OAuth hash key has an invalid length"))?;
+    let hasher = TokenHasher::new(hash_key)?;
+
+    let client_id_secret = generate_secret()?;
+    let client_id = format!("romc_{}", client_id_secret.expose_secret());
+    let client_secret = generate_secret()?;
+    let now = chrono::Utc::now();
+    let client = RegisteredClient {
+        connector_id: connector_id.to_owned(),
+        client_id: client_id.clone(),
+        client_name: name.to_owned(),
+        redirect_uris: redirect_uris.to_vec(),
+        scopes: scopes.clone(),
+        issued_at: now,
+        expires_at: now + chrono::Duration::days(365),
+        last_used_at: None,
+        registration_source_hash: "local-owner-confidential".to_owned(),
+    };
+    let scoped_store = SqliteOAuthStore::open_scoped(&paths.state_db(), connector_id)?;
+    scoped_store.register_confidential_client(
+        &client,
+        &hasher.hash(HashPurpose::ClientSecret, client_secret.expose_secret()),
+    )?;
+    let scope_text = scopes.to_space_delimited();
+    if let Err(error) = write_oauth_client_credentials(
+        output,
+        connector_id,
+        &client_id,
+        client_secret.expose_secret(),
+        redirect_uris,
+        &scope_text,
+    ) {
+        let _ignored = scoped_store.delete_client(&client_id);
+        return Err(error)
+            .context("confidential OAuth client was rolled back after credential export failed");
+    }
+    println!("Provisioned confidential OAuth client {client_id} for connector {connector_id}.");
+    println!("Client secret written once to {}.", output.display());
     Ok(())
 }
 
@@ -563,8 +680,38 @@ pub(super) fn admin(command: AdminCommand) -> Result<()> {
         AdminCommand::Install {
             allowed_programs,
             profile_file,
+            owner_root_shell,
         } => {
-            validate_admin_install_inputs(&allowed_programs, profile_file.as_deref())?;
+            validate_admin_install_inputs(
+                &allowed_programs,
+                profile_file.as_deref(),
+                owner_root_shell,
+            )?;
+            if owner_root_shell {
+                #[cfg(not(target_os = "macos"))]
+                bail!("--owner-root-shell is supported only on macOS");
+
+                #[cfg(target_os = "macos")]
+                {
+                    let mut document = if let Some(path) = profile_file.as_deref() {
+                        ProgramProfileDocument::load(path)?
+                    } else {
+                        ProgramProfileDocument {
+                            version: PROGRAM_PROFILE_VERSION,
+                            programs: Vec::new(),
+                        }
+                    };
+                    document.programs.push(owner_root_shell_profile());
+                    let mut generated = tempfile::NamedTempFile::new()?;
+                    serde_json::to_writer_pretty(&mut generated, &document)?;
+                    generated.flush()?;
+                    return install_admin_helper(
+                        &helper,
+                        &allowed_programs,
+                        Some(generated.path()),
+                    );
+                }
+            }
             install_admin_helper(&helper, &allowed_programs, profile_file.as_deref())
         }
         AdminCommand::Uninstall => run_elevated_helper(&helper, &["uninstall".into()]),
@@ -572,12 +719,34 @@ pub(super) fn admin(command: AdminCommand) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn owner_root_shell_profile() -> AdminProgramRule {
+    AdminProgramRule {
+        program: PathBuf::from("/bin/zsh"),
+        commands: vec![AdminCommandSchema {
+            subcommand: None,
+            flags: vec![AdminFlagSchema {
+                name: "-c".to_owned(),
+                value: Some(AdminArgumentSchema::Text {
+                    max_length: 8 * 1024,
+                    allow_leading_dash: true,
+                    allow_response_file: true,
+                }),
+                repeatable: false,
+            }],
+            forbidden_flags: Vec::new(),
+            positionals: Vec::new(),
+        }],
+    }
+}
+
 fn validate_admin_install_inputs(
     allowed_programs: &[PathBuf],
     profile_file: Option<&Path>,
+    owner_root_shell: bool,
 ) -> Result<()> {
-    if allowed_programs.is_empty() && profile_file.is_none() {
-        bail!("admin install requires --allow-program or --profile-file");
+    if allowed_programs.is_empty() && profile_file.is_none() && !owner_root_shell {
+        bail!("admin install requires --allow-program, --profile-file, or --owner-root-shell");
     }
     for path in allowed_programs {
         if !path.is_absolute() {
@@ -945,7 +1114,9 @@ pub(super) fn spawn_sibling(name: &str, args: &[&str]) -> Result<()> {
 }
 
 pub(super) fn sibling_executable(name: &str) -> Result<PathBuf> {
-    let current = std::env::current_exe()?;
+    let current = std::env::current_exe()?
+        .canonicalize()
+        .context("failed to resolve the RunOnMine executable")?;
     let directory = current
         .parent()
         .context("RunOnMine executable has no parent directory")?;
@@ -1130,11 +1301,39 @@ mod tests {
 
     #[test]
     fn admin_install_inputs_fail_before_elevation_when_missing_or_relative() {
-        assert!(validate_admin_install_inputs(&[], None).is_err());
-        assert!(validate_admin_install_inputs(&[PathBuf::from("relative-program")], None).is_err());
+        assert!(validate_admin_install_inputs(&[], None, false).is_err());
         assert!(
-            validate_admin_install_inputs(&[], Some(Path::new("relative-profile.json"))).is_err()
+            validate_admin_install_inputs(&[PathBuf::from("relative-program")], None, false)
+                .is_err()
         );
+        assert!(
+            validate_admin_install_inputs(&[], Some(Path::new("relative-profile.json")), false)
+                .is_err()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn owner_root_shell_profile_is_explicit_zsh_c_text_only() {
+        let profile = owner_root_shell_profile();
+        assert_eq!(profile.program, PathBuf::from("/bin/zsh"));
+        assert_eq!(profile.commands.len(), 1);
+        let command = &profile.commands[0];
+        assert!(command.subcommand.is_none());
+        assert!(command.positionals.is_empty());
+        assert!(command.forbidden_flags.is_empty());
+        assert_eq!(command.flags.len(), 1);
+        assert_eq!(command.flags[0].name, "-c");
+        assert!(!command.flags[0].repeatable);
+        assert!(matches!(
+            command.flags[0].value,
+            Some(AdminArgumentSchema::Text {
+                max_length: 8192,
+                allow_leading_dash: true,
+                allow_response_file: true,
+            })
+        ));
+        assert!(validate_admin_install_inputs(&[], None, true).is_ok());
     }
 
     #[cfg(unix)]
