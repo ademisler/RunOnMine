@@ -41,7 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@f133eefe930d61f0d9371efd474daf0125ed3dd1 # 1.95.0
         with:
           toolchain: 1.95.0
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-mutants@27.0.0
       - name: Mutate ${{ matrix.name }} state machine
@@ -51,7 +51,7 @@ jobs:
           --file "${{ matrix.file }}"
           --re "${{ matrix.examine }}"
           --jobs 2 --timeout 180
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: runonmine-mutants-${{ matrix.name }}

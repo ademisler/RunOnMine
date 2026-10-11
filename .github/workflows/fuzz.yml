@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh nightly-2026-07-18
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-fuzz@0.13.2
       - name: Build ${{ matrix.target }} fuzz target
@@ -53,7 +53,7 @@ jobs:
           cargo +nightly-2026-07-18 fuzz run ${{ matrix.target }}
           --target x86_64-unknown-linux-gnu --
           -max_total_time=90 -rss_limit_mb=2048 -timeout=15
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: runonmine-fuzz-${{ matrix.target }}
