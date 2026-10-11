@@ -39,6 +39,7 @@ the final authority when a document and implementation disagree.
   and executable identity.
 - [Connector provenance](connector-provenance.md): threshold-signed catalogs,
   receipts, updates, and key rotation.
+- [Security incident recovery](SECURITY_INCIDENT_RECOVERY_2026-10-11.md): clean-room Git history reset, source verification, and operational caveats.
 
 ## Testing and release
 
