@@ -1,0 +1,32 @@
+[package]
+name = "runonmine-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+publish.workspace = true
+
+[package.metadata.dist]
+dist = true
+
+[features]
+default = ["desktop-control"]
+desktop-control = ["runonmine-mcp/desktop-control"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+runonmine-core.workspace = true
+runonmine-mcp.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

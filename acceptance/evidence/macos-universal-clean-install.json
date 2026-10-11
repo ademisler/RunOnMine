@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "platform": "macos-universal",
+  "artifact": "RunOnMine_0.1.0-beta.1_universal.dmg",
+  "artifact_sha256": "bbd35f1fbeedcd1d3e35b19f0b6873f0b924f2f81e38828192371b003b74a828",
+  "source_revision": "620aed5635c8e2ca428715e5da3089f4bbbf4585",
+  "tester": "OpenAI automated acceptance on owner-authorized Apple Silicon Mac",
+  "tested_at": "2026-08-09T05:45:27Z",
+  "steps": [
+    {"id":"install","status":"passed","evidence":"DMG mounted read-only; RunOnMine.app copied to /Applications; bundle ID, four universal binaries, version and code-signature structure verified"},
+    {"id":"reboot","status":"passed","evidence":"macOS boot session UUID changed after the installed per-user LaunchAgent was configured"},
+    {"id":"agent_ready","status":"passed","evidence":"LaunchAgent remained loaded and loopback health returned ready after reboot"},
+    {"id":"mcp_initialize","status":"passed","evidence":"post-reboot Streamable HTTP client initialized an authenticated MCP session"},
+    {"id":"approved_tool_call","status":"passed","evidence":"owner-approved fs_write succeeded once; admin_exec remained denied by the MCP acceptance client"},
+    {"id":"connector","status":"passed","evidence":"Cloudflare Quick Tunnel reached ready before and after reboot without recording its secret public URL; the canonical external binary remained pinned to SHA-256 f35c50089cd25f77a4cb5a2152036bc26db15aa31fbe11f7995d2e42a4ed6257"},
+    {"id":"desktop_launch","status":"passed","evidence":"installed arm64 desktop launched from the application bundle in the active GUI session"},
+    {"id":"desktop_views","status":"passed","evidence":"all seven security-control views rendered in both arm64 and Rosetta x86_64 slices"},
+    {"id":"native_shell","status":"passed","evidence":"native menu-bar integration reported available and closing the main window kept the process alive"},
+    {"id":"single_instance","status":"passed","evidence":"a second installed desktop process exited and restored the hidden primary window"},
+    {"id":"native_slice_launch","status":"passed","evidence":"arm64 slice produced the validated seven-view acceptance report"},
+    {"id":"rosetta_slice_launch","status":"passed","evidence":"x86_64 slice launched under Rosetta and produced the validated seven-view acceptance report"},
+    {"id":"uninstall","status":"passed","evidence":"LaunchAgent was removed, managed credentials/data were purged, and RunOnMine.app was deleted"},
+    {"id":"residue_check","status":"passed","evidence":"no application bundle, LaunchAgent, RunOnMine process, loopback agent listener, or managed data directory remained"}
+  ],
+  "residues": []
+}

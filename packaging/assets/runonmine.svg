@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">RunOnMine application icon</title>
+  <desc id="desc">A mint R monogram inside a dark green rounded square.</desc>
+  <rect x="48" y="48" width="928" height="928" rx="192" fill="#071c17"/>
+  <path fill="#34d399" d="M272 224h112v576H272V224Zm112 0h256c74.7 0 112 37.3 112 112v96c0 69.3-32 106.7-96 112l144 256H672L536 560H384V448h240c10.7 0 16-5.3 16-16v-80c0-10.7-5.3-16-16-16H384V224Z"/>
+</svg>

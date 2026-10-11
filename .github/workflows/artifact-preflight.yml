@@ -1,0 +1,259 @@
+name: Artifact preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artifact-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            packager: packaging/Packager.linux-x86_64.toml
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            packager: packaging/Packager.linux-aarch64.toml
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "${{ matrix.target }}"
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Run isolated CLI and MCP acceptance
+        run: |
+          ./scripts/acceptance/cli-smoke.sh
+          RUNONMINE_MCP_SOAK_ITERATIONS=25 ./scripts/acceptance/mcp-http-smoke.sh
+      - name: Build native portable artifact
+        run: >-
+          cargo build --release --locked --target ${{ matrix.target }}
+          --no-default-features -p runonmine -p runonmine-agent -p runonmine-helper
+      - run: cargo run --locked -p xtask -- package --target ${{ matrix.target }}
+      - name: Validate SBOM and artifact
+        run: |
+          sbom=$(find dist -maxdepth 1 -name '*-${{ matrix.target }}-unsigned.sbom.json' -print -quit)
+          archive=$(find dist -maxdepth 1 \( -name '*-${{ matrix.target }}-unsigned.tar.gz' -o -name '*-${{ matrix.target }}-unsigned.zip' \) -print -quit)
+          cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target ${{ matrix.target }}
+          ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+          cargo run --locked -p xtask -- stage-packager --target ${{ matrix.target }}
+          ./packaging/package-linux-deb.sh "${{ matrix.packager }}" runonmine runonmine-desktop
+          deb=$(find dist -maxdepth 1 -name 'runonmine_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine runonmine-desktop
+          python3 scripts/acceptance/write-artifact-preflight.py \
+            --platform ${{ matrix.platform }} --artifact "$archive" \
+            --output "dist/${{ matrix.platform }}-preflight.json" \
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,deb_metadata,uninstall,residue_check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-${{ matrix.platform }}-preflight
+          path: dist/*
+          if-no-files-found: error
+
+
+  linux-desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus-x11 desktop-file-utils pkg-config xvfb \
+            libdrm-dev libegl1-mesa-dev libgbm-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-0
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-unknown-linux-gnu
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Run isolated CLI and MCP acceptance
+        run: |
+          ./scripts/acceptance/cli-smoke.sh
+          RUNONMINE_MCP_SOAK_ITERATIONS=25 ./scripts/acceptance/mcp-http-smoke.sh
+      - name: Build Linux desktop applications
+        run: >-
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
+      - name: Render and validate all Linux desktop views
+        run: >-
+          ./scripts/acceptance/desktop-parity-smoke.sh
+          "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
+      - run: cargo run --locked -p xtask -- package --target x86_64-unknown-linux-gnu --desktop
+      - name: Validate desktop SBOM and portable artifact
+        run: |
+          sbom=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.sbom.json' -print -quit)
+          archive=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.tar.gz' -print -quit)
+          cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target x86_64-unknown-linux-gnu --desktop
+          ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+      - run: cargo run --locked -p xtask -- stage-packager --target x86_64-unknown-linux-gnu --desktop
+      - run: ./packaging/package-linux-desktop.sh
+      - name: Inspect Linux desktop DEB metadata
+        run: |
+          deb=$(find dist -maxdepth 1 -name 'runonmine-desktop_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine-desktop runonmine
+      - name: Install, launch, and remove the desktop DEB
+        run: |
+          deb=$(find dist -maxdepth 1 -name '*.deb' -print -quit)
+          test -n "$deb"
+          sudo dpkg --install "$deb"
+          test -x /usr/bin/runonmine
+          test -x /usr/bin/runonmine-agent
+          test -x /usr/bin/runonmine-helper
+          test -x /usr/bin/runonmine-desktop
+          test -f /usr/share/applications/runonmine-desktop.desktop
+          desktop-file-validate /usr/share/applications/runonmine-desktop.desktop
+          grep -Fx 'Exec=runonmine-desktop ' /usr/share/applications/runonmine-desktop.desktop
+          grep -Fx 'Icon=runonmine-desktop' /usr/share/applications/runonmine-desktop.desktop
+          ./scripts/acceptance/desktop-parity-smoke.sh /usr/bin/runonmine-desktop
+          sudo dpkg --remove runonmine-desktop
+          test ! -e /usr/bin/runonmine-desktop
+          test ! -e /usr/share/applications/runonmine-desktop.desktop
+      - name: Write Linux desktop preflight evidence
+        run: |
+          archive=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.tar.gz' -print -quit)
+          python3 scripts/acceptance/write-artifact-preflight.py \
+            --platform linux-desktop-x86_64 --artifact "$archive" \
+            --output dist/linux-desktop-x86_64-preflight.json \
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,deb_metadata,deb_install,uninstall,residue_check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-linux-desktop-x86_64-preflight
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "aarch64-apple-darwin,x86_64-apple-darwin"
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Run native isolated acceptance
+        run: |
+          ./scripts/acceptance/cli-smoke.sh
+          RUNONMINE_MCP_SOAK_ITERATIONS=25 ./scripts/acceptance/mcp-http-smoke.sh
+          cargo build --locked -p runonmine-desktop
+          ./scripts/acceptance/desktop-launch-smoke.sh target/debug/runonmine-desktop
+      - name: Build universal portable artifact
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin --workspace --exclude xtask
+          cargo build --release --locked --target x86_64-apple-darwin --workspace --exclude xtask
+          cargo run --locked -p xtask -- universal-macos
+          cargo run --locked -p xtask -- package --target universal-apple-darwin
+      - name: Package unsigned macOS DMG with empty signing secrets
+        env:
+          APPLE_CERTIFICATE: ""
+          APPLE_CERTIFICATE_PASSWORD: ""
+          APPLE_ID: ""
+          APPLE_PASSWORD: ""
+          APPLE_TEAM_ID: ""
+          APPLE_API_KEY: ""
+          APPLE_API_ISSUER: ""
+          APPLE_API_KEY_PATH: ""
+          APPLE_API_KEY_P8: ""
+          APPLE_KEYCHAIN_PROFILE: ""
+          RUNONMINE_APPLE_SIGNING_IDENTITY: ""
+        run: |
+          cargo run --locked -p xtask -- stage-packager --target universal-apple-darwin
+          ./packaging/package-macos.sh
+          dmg=$(find dist -maxdepth 1 -type f -name "RunOnMine*.dmg" -print -quit)
+          test -n "$dmg"
+      - name: Validate SBOM and artifact
+        run: |
+          sbom=$(find dist -maxdepth 1 -name '*universal-apple-darwin-unsigned.sbom.json' -print -quit)
+          archive=$(find dist -maxdepth 1 -name '*universal-apple-darwin-unsigned.tar.gz' -print -quit)
+          cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target universal-apple-darwin
+          ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+          python3 scripts/acceptance/write-artifact-preflight.py \
+            --platform macos-universal --artifact "$archive" \
+            --output dist/macos-universal-preflight.json \
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,uninstall,residue_check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-macos-universal-preflight
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-pc-windows-msvc
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-packager@0.11.8
+      - run: choco install nsis --yes --no-progress
+      - name: Build native debug and run isolated acceptance
+        shell: pwsh
+        run: |
+          cargo build --locked -p runonmine -p runonmine-agent -p runonmine-desktop
+          ./scripts/acceptance/windows-pe-resources.ps1 -Desktop target/debug/runonmine-desktop.exe
+          ./scripts/acceptance/windows-smoke.ps1 `
+            -RunOnMine target/debug/runonmine.exe `
+            -Agent target/debug/runonmine-agent.exe `
+            -Desktop target/debug/runonmine-desktop.exe `
+            -McpClient scripts/acceptance/mcp-http-smoke.py `
+            -SkipInteractiveDesktop
+      - name: Build portable artifact
+        shell: pwsh
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --workspace --exclude xtask
+      - shell: pwsh
+        run: cargo run --locked -p xtask -- package --target x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: cargo run --locked -p xtask -- stage-packager --target x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: cargo packager --release --config packaging/Packager.windows.toml
+      - name: Install and remove Windows desktop package
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter 'runonmine-desktop_*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Windows NSIS installer is missing' }
+          ./scripts/acceptance/windows-installer-smoke.ps1 -Installer $installer.FullName -SkipInteractiveDesktop
+      - name: Validate SBOM and artifact
+        shell: bash
+        run: |
+          sbom=$(find dist -maxdepth 1 -name '*x86_64-pc-windows-msvc-unsigned.sbom.json' -print -quit)
+          archive=$(find dist -maxdepth 1 -name '*x86_64-pc-windows-msvc-unsigned.zip' -print -quit)
+          cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target x86_64-pc-windows-msvc
+          ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+          python scripts/acceptance/write-artifact-preflight.py \
+            --platform windows-x86_64 --artifact "$archive" \
+            --output dist/windows-x86_64-preflight.json \
+            --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,nsis_install,uninstall,residue_check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-windows-x86_64-preflight
+          path: dist/*
+          if-no-files-found: error

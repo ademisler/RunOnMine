@@ -1,0 +1,141 @@
+[workspace]
+resolver = "2"
+members = [
+  "apps/runonmine",
+  "apps/runonmine-agent",
+  "apps/runonmine-desktop",
+  "apps/runonmine-helper",
+  "crates/runonmine-core",
+  "crates/runonmine-mcp",
+  "crates/runonmine-oauth",
+  "crates/runonmine-browser",
+  "crates/runonmine-connectors",
+  "crates/runonmine-platform",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.1.0-beta.1"
+edition = "2024"
+rust-version = "1.95"  # rust-toolchain.toml pins 1.95.0
+license = "Apache-2.0"
+repository = "https://github.com/ademisler/RunOnMine"
+homepage = "https://runonmine.github.io/"
+authors = ["RunOnMine contributors"]
+description = "Local-first MCP security gateway for controlled AI access to machines you own."
+publish = false
+
+[workspace.dependencies]
+runonmine-browser = { version = "=0.1.0-beta.1", path = "crates/runonmine-browser" }
+runonmine-connectors = { version = "=0.1.0-beta.1", path = "crates/runonmine-connectors" }
+runonmine-core = { version = "=0.1.0-beta.1", path = "crates/runonmine-core" }
+runonmine-mcp = { version = "=0.1.0-beta.1", path = "crates/runonmine-mcp", default-features = false }
+runonmine-oauth = { version = "=0.1.0-beta.1", path = "crates/runonmine-oauth" }
+runonmine-platform = { version = "=0.1.0-beta.1", path = "crates/runonmine-platform" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.8.9", features = ["form", "http1", "json", "tokio"] }
+base64 = "0.22"
+blake3 = "1.8"
+cap-std = "4.0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chromiumoxide = "0.9.1"
+chacha20poly1305 = "0.10"
+clap = { version = "4.5", features = ["derive", "env"] }
+command-group = { version = "5.0.1", features = ["with-tokio"] }
+directories = "6.0"
+ed25519-dalek = "3.0"
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts"] }
+wgpu = { version = "29.0.4", default-features = false }
+egui = "0.35.0"
+hex = "0.4"
+hmac = "0.13"
+hostname = "0.4"
+futures = "0.3"
+fs2 = "0.4"
+flate2 = "1.1"
+getrandom = "0.3"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
+keyring = { version = "4.1.5", features = ["v1"] }
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "tokio"] }
+html-escape = "0.2"
+libc = "0.2"
+nix = { version = "0.31.3", default-features = false, features = ["fs", "user"] }
+notify = "8.2"
+proptest = "1.9"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
+rpassword = "7.4"
+rmcp = { version = "=3.1.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "chrono", "uuid"] }
+schemars = "1.0"
+secrecy = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+subtle = "2.6"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["limit"] }
+toml = "0.9"
+tar = "0.4"
+tempfile = "3.23"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tray-icon = { version = "0.24.1", default-features = false }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
+walkdir = "2.5"
+zip = { version = "6.0", default-features = false, features = ["deflate"] }
+zeroize = "1.8"
+enigo = { version = "0.6.1", default-features = true }
+xcap = { version = "0.9.7", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# cargo-dist is used for reproducible headless archives and release planning.
+# Native desktop installers are assembled separately by cargo-packager.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.32.0"
+packages = ["runonmine", "runonmine-agent", "runonmine-helper"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
+installers = []
+default-features = false
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+checksum = "sha256"
+
+[patch.crates-io]
+# xcb 1.7.0 still publishes a vulnerable quick-xml 0.30 build dependency.
+# This pinned upstream revision keeps the same xcb release API while moving
+# its build-only XML parser to quick-xml 0.41.
+xcb = { git = "https://github.com/rust-x-bindings/rust-xcb.git", rev = "8f1a726abc8cb9f62169d0032a94e268fc3379af" }

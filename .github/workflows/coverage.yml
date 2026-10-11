@@ -1,0 +1,53 @@
+name: Coverage
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 5 * * 3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-sweep
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  headless-lines:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - name: Configure ephemeral Cargo target
+        run: |
+          target="${RUNNER_TEMP}/runonmine-coverage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'CARGO_TARGET_DIR=%s\n' "$target" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "llvm-tools-preview" ""
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - name: Enforce measured coverage targets
+        run: |
+          cargo llvm-cov --workspace --exclude runonmine-desktop \
+            --no-default-features --locked --lcov --output-path coverage.lcov
+          python3 scripts/ci/check-lcov.py coverage.lcov \
+            --global 70 --critical 90 --changed 80
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-scheduled-coverage-lcov
+          path: coverage.lcov
+          if-no-files-found: error
+      - name: Remove ephemeral build outputs
+        if: always()
+        run: |
+          if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+            rm -rf -- "$CARGO_TARGET_DIR"
+          fi
+          rm -f -- coverage.lcov

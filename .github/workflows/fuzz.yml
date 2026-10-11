@@ -1,0 +1,61 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-main
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: -C target-feature=-crt-static
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fuzz-target:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: fuzz-${{ matrix.target }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - config_toml
+          - policy_engine
+          - oauth_models
+          - browser_urls
+          - helper_frames
+          - mcp_sessions
+          - archive_entries
+          - approval_transitions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh nightly-2026-07-18
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: Build ${{ matrix.target }} fuzz target
+        run: >-
+          cargo +nightly-2026-07-18 fuzz build ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu
+      - name: Run ${{ matrix.target }} fuzz target
+        run: >-
+          cargo +nightly-2026-07-18 fuzz run ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu --
+          -max_total_time=90 -rss_limit_mb=2048 -timeout=15
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: runonmine-fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

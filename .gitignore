@@ -1,0 +1,36 @@
+.DS_Store
+target/
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+*.swp
+
+# Local reference implementation. Never publish it.
+/Eski örnek/
+/Eski örnek/
+
+# Local runtime state and secrets.
+/.runonmine/
+config.toml
+!.cargo/config.toml
+state.db
+state.db-*
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Packaging output.
+dist/
+artifacts/
+
+
+# Fuzzing output and generated corpora.
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/target/
+/coverage.lcov
+*.profraw

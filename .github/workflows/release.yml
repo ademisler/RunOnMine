@@ -1,0 +1,284 @@
+name: Release candidate
+
+on:
+  push:
+    tags:
+      - "v*-beta.*"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Release profile"
+        required: true
+        type: choice
+        default: private-beta
+        options:
+          - private-beta
+          - public-beta
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'public-beta' }}
+
+jobs:
+  release-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      candidate_revision: ${{ steps.candidate.outputs.revision }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-dist@0.32.0
+      - run: cargo run --locked -p xtask -- verify-versions
+      - name: Verify release tag
+        if: github.ref_type == 'tag'
+        run: cargo run --locked -p xtask -- verify-release-tag --tag "${{ github.ref_name }}"
+      - run: cargo run --locked -p xtask -- release-readiness --profile "${RELEASE_PROFILE}"
+      - name: Resolve frozen candidate revision
+        id: candidate
+        run: echo "revision=$(cargo run --quiet --locked -p xtask -- release-candidate-revision)" >> "$GITHUB_OUTPUT"
+      - name: Check out frozen candidate source
+        run: git checkout --detach "${{ steps.candidate.outputs.revision }}"
+      - run: cargo run --locked -p xtask -- verify-versions
+      - run: python3 scripts/release/check-duplicate-dependencies.py
+      - name: Record beta signing policy
+        run: |
+          echo "Public beta may be distributed unsigned when that status is disclosed in the release notes."
+          echo "If signing credentials are configured, the platform packaging step remains fail-closed and verifies them."
+      - run: dist plan --output-format=json
+
+  macos-universal:
+    needs: release-plan
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      RUNONMINE_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "aarch64-apple-darwin,x86_64-apple-darwin"
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-dist@0.32.0,cargo-packager@0.11.8
+      - name: Prepare App Store Connect API key
+        if: env.RUNONMINE_APPLE_SIGNING_IDENTITY != ''
+        run: |
+          key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY}.p8"
+          python3 - "$key_path" <<'PY'
+          import base64, os, pathlib, sys
+          payload=os.environ["APPLE_API_KEY_P8"].encode()
+          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(payload, validate=True))
+          PY
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+      - name: Build cargo-dist headless archives
+        run: >-
+          dist build --artifacts=local
+          --target=aarch64-apple-darwin --target=x86_64-apple-darwin
+      - name: Build both desktop architectures
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin --workspace --exclude xtask
+          cargo build --release --locked --target x86_64-apple-darwin --workspace --exclude xtask
+      - run: cargo run --locked -p xtask -- universal-macos
+      - run: cargo run --locked -p xtask -- package --target universal-apple-darwin
+      - name: Validate macOS SBOM
+        run: cargo run --locked -p xtask -- validate-sbom --path "$(find dist -maxdepth 1 -name '*universal-apple-darwin-unsigned.sbom.json' -print -quit)" --target universal-apple-darwin
+      - run: cargo run --locked -p xtask -- stage-packager --target universal-apple-darwin
+      - run: ./packaging/package-macos.sh
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-macos-universal
+          path: |
+            dist/*
+            target/distrib/*
+          if-no-files-found: error
+
+  linux:
+    needs: release-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            packager: packaging/Packager.linux-x86_64.toml
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            packager: packaging/Packager.linux-aarch64.toml
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "${{ matrix.target }}"
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-dist@0.32.0,cargo-packager@0.11.8
+      - run: dist build --artifacts=local --target=${{ matrix.target }}
+      - name: Build headless applications
+        run: >-
+          cargo build --release --locked --target ${{ matrix.target }}
+          --no-default-features -p runonmine -p runonmine-agent -p runonmine-helper
+      - run: cargo run --locked -p xtask -- package --target ${{ matrix.target }}
+      - name: Validate Linux SBOM
+        run: cargo run --locked -p xtask -- validate-sbom --path "$(find dist -maxdepth 1 -name '*-${{ matrix.target }}-unsigned.sbom.json' -print -quit)" --target ${{ matrix.target }}
+      - run: cargo run --locked -p xtask -- stage-packager --target ${{ matrix.target }}
+      - name: Package and inspect Linux DEB
+        run: |
+          ./packaging/package-linux-deb.sh "${{ matrix.packager }}" runonmine runonmine-desktop
+          deb=$(find dist -maxdepth 1 -name 'runonmine_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine runonmine-desktop
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-${{ matrix.target }}
+          path: |
+            dist/*
+            target/distrib/*
+          if-no-files-found: error
+
+
+  linux-desktop:
+    needs: release-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus-x11 desktop-file-utils pkg-config xvfb \
+            libdrm-dev libegl1-mesa-dev libgbm-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-0
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-unknown-linux-gnu
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Build Linux desktop applications
+        run: >-
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          -p runonmine -p runonmine-agent -p runonmine-helper -p runonmine-desktop
+      - name: Render and validate all Linux desktop views
+        run: >-
+          ./scripts/acceptance/desktop-parity-smoke.sh
+          "$PWD/target/x86_64-unknown-linux-gnu/release/runonmine-desktop"
+      - run: cargo run --locked -p xtask -- package --target x86_64-unknown-linux-gnu --desktop
+      - name: Validate Linux desktop SBOM and archive
+        run: |
+          sbom=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.sbom.json' -print -quit)
+          archive=$(find dist -maxdepth 1 -name 'runonmine-desktop-*-x86_64-unknown-linux-gnu-unsigned.tar.gz' -print -quit)
+          cargo run --locked -p xtask -- validate-sbom --path "$sbom" --target x86_64-unknown-linux-gnu --desktop
+          ./scripts/acceptance/package-inspect.sh "$archive" "$sbom"
+      - run: cargo run --locked -p xtask -- stage-packager --target x86_64-unknown-linux-gnu --desktop
+      - run: ./packaging/package-linux-desktop.sh
+      - name: Inspect Linux desktop DEB metadata
+        run: |
+          deb=$(find dist -maxdepth 1 -name 'runonmine-desktop_*.deb' -print -quit)
+          ./scripts/acceptance/linux-deb-metadata.sh "$deb" runonmine-desktop runonmine
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-linux-desktop-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    needs: release-plan
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ needs.release-plan.outputs.candidate_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "x86_64-pc-windows-msvc"
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-dist@0.32.0,cargo-packager@0.11.8
+      - run: choco install nsis --yes --no-progress
+      - run: dist build --artifacts=local --target=x86_64-pc-windows-msvc
+      - run: cargo build --release --locked --target x86_64-pc-windows-msvc --workspace --exclude xtask
+      - name: Validate Windows executable resources
+        shell: pwsh
+        run: ./scripts/acceptance/windows-pe-resources.ps1 -Desktop target/x86_64-pc-windows-msvc/release/runonmine-desktop.exe
+      - run: cargo run --locked -p xtask -- package --target x86_64-pc-windows-msvc
+      - name: Validate Windows SBOM
+        shell: pwsh
+        run: |
+          $sbom = Get-ChildItem dist -Filter '*-x86_64-pc-windows-msvc-unsigned.sbom.json' | Select-Object -First 1
+          if (-not $sbom) { throw 'Windows SBOM is missing' }
+          cargo run --locked -p xtask -- validate-sbom --path $sbom.FullName --target x86_64-pc-windows-msvc
+      - run: cargo run --locked -p xtask -- stage-packager --target x86_64-pc-windows-msvc
+      - run: cargo packager --release --config packaging/Packager.windows.toml
+      - name: Install and remove Windows desktop package
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter 'runonmine-desktop_*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Windows NSIS installer is missing' }
+          ./scripts/acceptance/windows-installer-smoke.ps1 -Installer $installer.FullName
+      - run: cargo run --locked -p xtask -- checksums
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runonmine-x86_64-pc-windows-msvc
+          path: |
+            dist/*
+            target/distrib/*
+          if-no-files-found: error
+
+  publish-draft:
+    needs: [release-plan, macos-universal, linux, linux-desktop, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          draft: true
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: artifacts/**/*
+          body: |
+            RunOnMine ${{ env.RELEASE_PROFILE }} candidate built from frozen source `${{ needs.release-plan.outputs.candidate_revision }}`.
+            Beta artifacts may be unsigned. macOS uses the Developer ID/notarization path only when signing credentials are configured; otherwise it uses the checked ad-hoc hardened-runtime package path. Windows installers may also be unsigned.
+            Public-beta readiness still requires the declared exact-candidate platform, hosted-CI, runner-isolation, protected-main, and owner-risk gates. Independent external review and publisher signing remain recommended hardening, not beta blockers.
+            Verify every artifact against its accompanying SHA-256 checksum before use.
+            SBOM files are provided in CycloneDX JSON format.
+            This draft does not change repository visibility.

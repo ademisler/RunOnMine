@@ -1,0 +1,70 @@
+[package]
+name = "runonmine-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+publish.workspace = true
+
+[features]
+default = ["desktop-ui"]
+desktop-ui = ["dep:eframe", "dep:egui", "dep:tray-icon", "dep:ksni", "dep:wgpu"]
+
+[dependencies]
+anyhow.workspace = true
+command-group.workspace = true
+egui = { workspace = true, optional = true }
+image.workspace = true
+runonmine-core.workspace = true
+runonmine-oauth.workspace = true
+runonmine-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+url.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# eframe's full `wgpu` feature enables every graphics backend. Keep the Windows
+# control center on Direct3D 12 only, including the system WARP fallback.
+eframe = { workspace = true, optional = true, features = ["wgpu_no_default_features"] }
+tray-icon = { workspace = true, optional = true }
+# `gpu-allocator` accepts several incompatible pre-1.0 `windows` releases.
+# Cargo.lock pins its edge to the same 0.62 line used by wgpu-hal.
+wgpu = { workspace = true, optional = true, features = ["dx12"] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+eframe = { workspace = true, optional = true, features = ["glow"] }
+nix.workspace = true
+tray-icon = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, optional = true, features = ["glow", "x11", "wayland"] }
+ksni = { workspace = true, optional = true }
+nix.workspace = true
+
+[build-dependencies]
+winresource = "0.1.31"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[package.metadata.winresource]
+ProductName = "RunOnMine"
+FileDescription = "RunOnMine security control center"
+OriginalFilename = "runonmine-desktop.exe"
+CompanyName = "RunOnMine contributors"
+LegalCopyright = "Copyright RunOnMine contributors"
