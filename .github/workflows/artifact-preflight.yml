@@ -37,7 +37,7 @@ jobs:
         with: { fetch-depth: 0, persist-credentials: false }
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "${{ matrix.target }}"
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-packager@0.11.8
       - name: Run isolated CLI and MCP acceptance
@@ -63,7 +63,7 @@ jobs:
             --platform ${{ matrix.platform }} --artifact "$archive" \
             --output "dist/${{ matrix.platform }}-preflight.json" \
             --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,deb_metadata,uninstall,residue_check
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runonmine-${{ matrix.platform }}-preflight
           path: dist/*
@@ -87,7 +87,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-0
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-unknown-linux-gnu
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-packager@0.11.8
       - name: Run isolated CLI and MCP acceptance
@@ -139,7 +139,7 @@ jobs:
             --platform linux-desktop-x86_64 --artifact "$archive" \
             --output dist/linux-desktop-x86_64-preflight.json \
             --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,deb_metadata,deb_install,uninstall,residue_check
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runonmine-linux-desktop-x86_64-preflight
           path: dist/*
@@ -153,7 +153,7 @@ jobs:
         with: { fetch-depth: 0, persist-credentials: false }
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" "aarch64-apple-darwin,x86_64-apple-darwin"
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-packager@0.11.8
       - name: Run native isolated acceptance
@@ -196,7 +196,7 @@ jobs:
             --platform macos-universal --artifact "$archive" \
             --output dist/macos-universal-preflight.json \
             --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,uninstall,residue_check
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runonmine-macos-universal-preflight
           path: dist/*
@@ -211,7 +211,7 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "" x86_64-pc-windows-msvc
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-packager@0.11.8
       - run: choco install nsis --yes --no-progress
@@ -252,7 +252,7 @@ jobs:
             --platform windows-x86_64 --artifact "$archive" \
             --output dist/windows-x86_64-preflight.json \
             --checks build,checksum,setup,agent_ready,mcp_initialize,approved_tool_call,desktop_launch,desktop_views,nsis_install,uninstall,residue_check
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runonmine-windows-x86_64-preflight
           path: dist/*
