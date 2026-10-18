@@ -30,7 +30,7 @@ jobs:
           printf 'CARGO_TARGET_DIR=%s\n' "$target" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: ./scripts/ci/install-rust-toolchain.sh 1.95.0 "llvm-tools-preview" ""
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Enforce measured coverage targets
@@ -39,7 +39,7 @@ jobs:
             --no-default-features --locked --lcov --output-path coverage.lcov
           python3 scripts/ci/check-lcov.py coverage.lcov \
             --global 70 --critical 90 --changed 80
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runonmine-scheduled-coverage-lcov
           path: coverage.lcov
